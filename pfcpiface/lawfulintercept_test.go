@@ -112,28 +112,40 @@ func TestPayloadFormatOf(t *testing.T) {
 	}
 }
 
-// TestShipperPDU checks that a teed datapath packet (8-byte F-SEID tag + inner
-// IP packet) is framed as a valid X3 PDU carrying the F-SEID as correlation ID
-// and the inner packet as payload.
+// TestShipperPDU checks that a teed datapath packet ([fseid(8)][action(1)][pkt])
+// is framed as a valid X3 PDU: F-SEID as correlation id, the inner packet as
+// payload, and — critically (finding R2) — the payload format + direction set
+// from the FAR action, so the downlink copy is labeled GTP-U (not mislabeled as
+// decapsulated inner IP) and the uplink copy is labeled inner IP.
 func TestShipperPDU(t *testing.T) {
 	fseid := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
-	pdu := shipperPDU(append(append([]byte{}, fseid...), inner...))
+	tag := func(action byte) []byte {
+		return append(append(append([]byte{}, fseid...), action), inner...)
+	}
 
-	if pdu.Type != x2x3.PDUTypeX3 {
-		t.Errorf("PDU type = %d, want X3", pdu.Type)
+	// Uplink (action 6): decapsulated inner IP → IPv4 + FromTarget.
+	ul := shipperPDU(tag(farForwardUAndDuplicate))
+	if ul.Type != x2x3.PDUTypeX3 {
+		t.Errorf("PDU type = %d, want X3", ul.Type)
 	}
-	if pdu.PayloadFormat != x2x3.PayloadFormatIPv4 {
-		t.Errorf("payload format = %d, want IPv4", pdu.PayloadFormat)
+	if ul.PayloadFormat != x2x3.PayloadFormatIPv4 || ul.Direction != x2x3.DirectionFromTarget {
+		t.Errorf("uplink: format=%d direction=%d, want IPv4/FromTarget", ul.PayloadFormat, ul.Direction)
 	}
-	if !bytes.Equal(pdu.CorrelationID[:], fseid) {
-		t.Errorf("correlation ID = % x, want % x", pdu.CorrelationID, fseid)
+	if !bytes.Equal(ul.CorrelationID[:], fseid) || !bytes.Equal(ul.Payload, inner) {
+		t.Errorf("uplink: correlation=% x payload=% x", ul.CorrelationID, ul.Payload)
 	}
-	if !bytes.Equal(pdu.Payload, inner) {
-		t.Errorf("payload = % x, want % x", pdu.Payload, inner)
+
+	// Downlink (action 5): teed post-encap → GTP-U + ToTarget (must NOT be labeled inner IP).
+	dl := shipperPDU(tag(farForwardDAndDuplicate))
+	if dl.PayloadFormat != x2x3.PayloadFormatGTPU || dl.Direction != x2x3.DirectionToTarget {
+		t.Errorf("downlink: format=%d direction=%d, want GTPU/ToTarget", dl.PayloadFormat, dl.Direction)
 	}
-	// It must be a well-formed X3 PDU on the wire.
-	if _, err := pdu.Marshal(); err != nil {
-		t.Errorf("Marshal: %v", err)
+
+	// Both must be well-formed X3 PDUs on the wire.
+	for _, pdu := range []*x2x3.PDU{ul, dl} {
+		if _, err := pdu.Marshal(); err != nil {
+			t.Errorf("Marshal: %v", err)
+		}
 	}
 }

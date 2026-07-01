@@ -300,8 +300,13 @@ packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
 # tail rather than straight to the port as prototyped here.
 li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
 liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
+# Prepend the F-SEID (correlation) and the FAR action to each LI copy. The action
+# byte lets the Go X3 shipper tell the downlink copy (teed after GTP-U encap, so a
+# GTP-U packet toward the target) from the uplink copy (decapsulated inner IP from
+# the target) and set the X3 payload format + direction accordingly. Field order is
+# [fseid(8)][action(1)], then the packet.
 liMerge::Merge() \
-    -> liEncap::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}]) \
+    -> liEncap::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
     -> liX3out::PortOut(port='liX3')
 
 executeFAR:farForwardDAndDuplicateAction -> liReplicaD::Replicate(gates=[0, 1])
