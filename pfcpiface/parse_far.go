@@ -164,33 +164,13 @@ func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error
 	}
 
 	// Lawful Interception: a FAR carrying the DUPL apply-action must have its
-	// user-plane traffic copied to the LI Function. The SD-Core CC-POI ships the
-	// copy over X3 natively, so the Duplicating Parameters are parsed only to
-	// surface a destination other than the LI Function; the outer-header/MDF3
-	// tunnel, if present, is not used here.
+	// user-plane traffic copied to the LI Function. The apply-action bit alone
+	// drives the datapath tee and the X3 shipper; the Duplicating Parameters'
+	// destination/outer-header are not consumed here because the CC-POI ships X3
+	// natively. Nothing about a DUPL FAR is parsed-and-logged or otherwise
+	// signalled — a tasked subscriber must be indistinguishable from any other
+	// (undetectability).
 	f.duplicate = f.Duplicates()
-	if f.duplicate {
-		var dupIEs []*ie.IE
-		switch op {
-		case create:
-			dupIEs, err = farIE.DuplicatingParameters()
-		case update:
-			dupIEs, err = farIE.UpdateDuplicatingParameters()
-		}
-
-		if err != nil {
-			logger.PfcpLog.Errorln("unable to parse DuplicatingParameters")
-		} else {
-			for _, dupIE := range dupIEs {
-				if dupIE.Type != ie.DestinationInterface {
-					continue
-				}
-				if di, diErr := dupIE.DestinationInterface(); diErr == nil && di != ie.DstInterfaceLIFunction {
-					logger.PfcpLog.Warnf("LI duplicating parameters: unexpected destination interface %d", di)
-				}
-			}
-		}
-	}
 
 	return nil
 }
