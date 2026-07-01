@@ -1235,7 +1235,7 @@ func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, me
 
 func (b *bess) setActionValue(f far) uint8 {
 	if (f.applyAction & ActionForward) != 0 {
-		duplicate := (f.applyAction & ActionDuplicate) != 0
+		duplicate := f.Duplicates()
 		switch f.dstIntf {
 		case ie.DstInterfaceAccess:
 			if duplicate {

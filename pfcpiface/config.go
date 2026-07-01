@@ -154,6 +154,23 @@ func validateConf(conf Conf) error {
 		}
 	}
 
+	// Lawful Interception is opt-in, but if it IS configured every field is
+	// mandatory — an incomplete Li block would otherwise fail open (the UPF runs
+	// healthy while performing no interception), which for LI is a compliance risk.
+	if conf.Li != nil {
+		for name, val := range map[string]string{
+			"li.mdf3":        conf.Li.MDF3,
+			"li.x3_sockaddr": conf.Li.X3SockAddr,
+			"li.cert":        conf.Li.Cert,
+			"li.key":         conf.Li.Key,
+			"li.ca_cert":     conf.Li.CACert,
+		} {
+			if val == "" {
+				return ErrInvalidArgumentWithReason(name, val, "required when li is configured")
+			}
+		}
+	}
+
 	return nil
 }
 

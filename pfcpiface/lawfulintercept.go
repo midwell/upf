@@ -6,6 +6,7 @@ package pfcpiface
 import (
 	"context"
 	"net"
+	"time"
 
 	"github.com/omec-project/li/mtls"
 	"github.com/omec-project/li/x2x3"
@@ -25,9 +26,16 @@ const (
 // carrying the DUPL apply-action) and delivers each one to the MDF3 as an ETSI
 // TS 103 221-2 X3 PDU over mutual TLS. Opt-in: created only when LI is
 // configured, and it logs nothing that reveals which subscriber is intercepted.
+// reconnect backoff bounds for the X3 egress socket.
+const (
+	minReconnectDelay = 100 * time.Millisecond
+	maxReconnectDelay = 5 * time.Second
+)
+
 type liShipper struct {
-	sock   net.Conn
-	client *x2x3.Client
+	sockAddr string
+	sock     net.Conn
+	client   *x2x3.Client
 }
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
@@ -45,8 +53,9 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 	}
 
 	s := &liShipper{
-		sock:   sock,
-		client: x2x3.NewClient(cfg.MDF3, mat.ClientTLS()),
+		sockAddr: cfg.X3SockAddr,
+		sock:     sock,
+		client:   x2x3.NewClient(cfg.MDF3, mat.ClientTLS()),
 	}
 	go s.shipLoop()
 
@@ -65,7 +74,12 @@ func (s *liShipper) shipLoop() {
 	for {
 		n, err := s.sock.Read(buf)
 		if err != nil {
-			return
+			// The datapath X3 socket dropped (BESS restart / transient error). Do
+			// not die — that would silently disable interception for the life of
+			// the process. Reconnect (with backoff) so interception resumes when
+			// the datapath returns.
+			s.reconnect()
+			continue
 		}
 
 		if n <= liTagLen {
@@ -73,6 +87,28 @@ func (s *liShipper) shipLoop() {
 		}
 
 		_ = s.client.Send(shipperPDU(buf[:n]))
+	}
+}
+
+// reconnect closes the dead X3 egress socket and redials it with capped
+// exponential backoff, blocking until the datapath socket is available again.
+func (s *liShipper) reconnect() {
+	_ = s.sock.Close()
+
+	delay := minReconnectDelay
+	for {
+		time.Sleep(delay)
+
+		var d net.Dialer
+		sock, err := d.DialContext(context.Background(), "unixpacket", s.sockAddr)
+		if err == nil {
+			s.sock = sock
+			return
+		}
+
+		if delay < maxReconnectDelay {
+			delay *= 2
+		}
 	}
 }
 

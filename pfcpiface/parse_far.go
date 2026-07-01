@@ -38,7 +38,6 @@ type far struct {
 
 	dstIntf       uint8
 	sendEndMarker bool
-	duplicate     bool // DUPL apply-action set: duplicate this FAR's traffic for LI
 	applyAction   uint8
 	tunnelType    uint8
 	tunnelIP4Src  uint32
@@ -165,12 +164,11 @@ func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error
 
 	// Lawful Interception: a FAR carrying the DUPL apply-action must have its
 	// user-plane traffic copied to the LI Function. The apply-action bit alone
-	// drives the datapath tee and the X3 shipper; the Duplicating Parameters'
-	// destination/outer-header are not consumed here because the CC-POI ships X3
-	// natively. Nothing about a DUPL FAR is parsed-and-logged or otherwise
-	// signalled — a tasked subscriber must be indistinguishable from any other
-	// (undetectability).
-	f.duplicate = f.Duplicates()
+	// (read via Duplicates() in setActionValue) drives the datapath tee and the X3
+	// shipper; the Duplicating Parameters' destination/outer-header are not
+	// consumed here because the CC-POI ships X3 natively. Nothing about a DUPL FAR
+	// is parsed-and-logged or otherwise signalled — a tasked subscriber must be
+	// indistinguishable from any other (undetectability).
 
 	return nil
 }
