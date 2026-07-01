@@ -28,6 +28,12 @@ farForwardUAction = 1
 farDropAction = 2
 farBufferAction = 3
 farNotifyCPAction = 4
+# Lawful Intercept: forward the subscriber's packet AND duplicate a copy to the
+# X3 egress. A downlink and an uplink variant preserve the forwarding direction
+# of the subscriber copy. The PFCP agent selects these actions for a FAR that
+# carries the PFCP DUPL apply-action.
+farForwardDAndDuplicateAction = 5
+farForwardUAndDuplicateAction = 6
 pdrFailGate = 2
 farFailGate = 2
 qerGreenGate = 1
@@ -273,6 +279,38 @@ closed_loop_path = os.getenv('CLOSED_LOOP_SOCKET_PATH', '/tmp/closedloop')
 closed = UnixSocketPort(name='closedLoop', path=closed_loop_path)
 packetReplica:0 -> sessionQERLookup
 packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
+
+# ====================================================
+#       Lawful Intercept content egress (X3)   [prototype — task 1.4]
+# ====================================================
+# A target session's FAR carries the PFCP DUPL apply-action; the PFCP agent
+# marks that session's packets with a forward-and-duplicate action instead of a
+# plain forward. Each packet is teed: copy 0 continues to the subscriber
+# (uplink/downlink preserved), copy 1 is tagged with the F-SEID and pushed to a
+# userspace socket where the Go LI X3 shipper frames it per ETSI TS 103 221-2
+# and delivers it to the MDF3. Built entirely from stock BESS modules
+# (Replicate / GenericEncap / UnixSocketPort) — no datapath C++ changes.
+#
+# The tee sits at the forwarding stage, downstream of QER policing
+# (appQERLookup/sessionQERLookup run earlier), so the subscriber's traffic is
+# metered exactly once and the duplicate is not double-counted.
+# NOTE (task 5.2): when flow-based volume measurement is enabled
+# (parser.measure_flow), copy 0 must traverse the same post-forward FlowMeasure
+# as the normal path; production wiring routes copy 0 through the shared forward
+# tail rather than straight to the port as prototyped here.
+li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
+liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
+liMerge::Merge() \
+    -> liEncap::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}]) \
+    -> liX3out::PortOut(port='liX3')
+
+executeFAR:farForwardDAndDuplicateAction -> liReplicaD::Replicate(gates=[0, 1])
+liReplicaD:0 -> ports[parser.access_ifname].rtr
+liReplicaD:1 -> liMerge
+
+executeFAR:farForwardUAndDuplicateAction -> liReplicaU::Replicate(gates=[0, 1])
+liReplicaU:0 -> ports[parser.core_ifname].rtr
+liReplicaU:1 -> liMerge
 
 # Set default gates for relevant modules
 pdrLookup.set_default_gate(gate=pdrFailGate)
