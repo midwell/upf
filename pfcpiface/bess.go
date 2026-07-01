@@ -47,6 +47,13 @@ const (
 	farForwardU = 0x1
 	farDrop     = 0x2
 	farNotify   = 0x4
+	// Lawful Interception forward-and-duplicate actions: forward the subscriber's
+	// packet as usual AND tee a copy to the LI X3 egress. The BESS pipeline's
+	// executeFAR Split routes these action values to the LI Replicate tee (see
+	// conf). Downlink and uplink are distinct so the subscriber copy keeps its
+	// direction.
+	farForwardDAndDuplicate = 0x5
+	farForwardUAndDuplicate = 0x6
 	// Bit Rates.
 	KB = 1000
 	MB = 1000000
@@ -91,6 +98,7 @@ type bess struct {
 	notifyBessSocket net.Conn
 	endMarkerChan    chan []byte
 	qciQosMap        map[uint8]*QosConfigVal
+	liShipper        *liShipper
 }
 
 func (b *bess) IsConnected(accessIP *net.IP) bool {
@@ -838,6 +846,15 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 		go b.endMarkerSendLoop(b.endMarkerChan)
 	}
 
+	// Lawful Interception CC-POI: start the X3 shipper only when the opt-in Li
+	// config is present; silent otherwise.
+	if conf.Li != nil {
+		b.liShipper, err = startLIShipper(conf.Li)
+		if err != nil {
+			logger.BessLog.Errorf("lawful interception X3 shipper init failed: %v", err)
+		}
+	}
+
 	if (conf.SliceMeterConfig.N6RateBps > 0) ||
 		(conf.SliceMeterConfig.N3RateBps > 0) {
 		ctx, cancel := context.WithTimeout(context.Background(), Timeout)
@@ -1218,10 +1235,17 @@ func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, me
 
 func (b *bess) setActionValue(f far) uint8 {
 	if (f.applyAction & ActionForward) != 0 {
+		duplicate := (f.applyAction & ActionDuplicate) != 0
 		switch f.dstIntf {
 		case ie.DstInterfaceAccess:
+			if duplicate {
+				return farForwardDAndDuplicate
+			}
 			return farForwardD
 		case ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN:
+			if duplicate {
+				return farForwardUAndDuplicate
+			}
 			return farForwardU
 		}
 	} else if (f.applyAction & ActionDrop) != 0 {

@@ -19,10 +19,11 @@ const (
 )
 
 const (
-	ActionForward = 0x2
-	ActionDrop    = 0x1
-	ActionBuffer  = 0x4
-	ActionNotify  = 0x8
+	ActionForward   = 0x2
+	ActionDrop      = 0x1
+	ActionBuffer    = 0x4
+	ActionNotify    = 0x8
+	ActionDuplicate = 0x10 // DUPL: Lawful Interception content-of-communication copy
 )
 
 const (
@@ -37,6 +38,7 @@ type far struct {
 
 	dstIntf       uint8
 	sendEndMarker bool
+	duplicate     bool // DUPL apply-action set: duplicate this FAR's traffic for LI
 	applyAction   uint8
 	tunnelType    uint8
 	tunnelIP4Src  uint32
@@ -63,6 +65,12 @@ func (f *far) Buffers() bool {
 
 func (f *far) Forwards() bool {
 	return f.applyAction&ActionForward != 0
+}
+
+// Duplicates reports whether the FAR carries the DUPL apply-action, i.e. its
+// user-plane traffic must be copied to the LI Function (content of communication).
+func (f *far) Duplicates() bool {
+	return f.applyAction&ActionDuplicate != 0
 }
 
 func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error {
@@ -151,6 +159,35 @@ func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error
 
 			if has2ndBit(smReqFlags) {
 				f.sendEndMarker = true
+			}
+		}
+	}
+
+	// Lawful Interception: a FAR carrying the DUPL apply-action must have its
+	// user-plane traffic copied to the LI Function. The SD-Core CC-POI ships the
+	// copy over X3 natively, so the Duplicating Parameters are parsed only to
+	// surface a destination other than the LI Function; the outer-header/MDF3
+	// tunnel, if present, is not used here.
+	f.duplicate = f.Duplicates()
+	if f.duplicate {
+		var dupIEs []*ie.IE
+		switch op {
+		case create:
+			dupIEs, err = farIE.DuplicatingParameters()
+		case update:
+			dupIEs, err = farIE.UpdateDuplicatingParameters()
+		}
+
+		if err != nil {
+			logger.PfcpLog.Errorln("unable to parse DuplicatingParameters")
+		} else {
+			for _, dupIE := range dupIEs {
+				if dupIE.Type != ie.DestinationInterface {
+					continue
+				}
+				if di, diErr := dupIE.DestinationInterface(); diErr == nil && di != ie.DstInterfaceLIFunction {
+					logger.PfcpLog.Warnf("LI duplicating parameters: unexpected destination interface %d", di)
+				}
 			}
 		}
 	}
