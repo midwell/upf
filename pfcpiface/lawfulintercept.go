@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/omec-project/li/mtls"
+	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
 )
 
@@ -36,6 +37,7 @@ type liShipper struct {
 	sockAddr string
 	sock     net.Conn
 	client   *x2x3.Client
+	reporter *x1.Reporter // nil when NE-initiated reporting is not configured
 }
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
@@ -57,9 +59,20 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 		sock:     sock,
 		client:   x2x3.NewClient(cfg.MDF3, mat.ClientTLS()),
 	}
+	if cfg.AdmfURL != "" {
+		s.reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
+	}
 	go s.shipLoop()
 
 	return s, nil
+}
+
+// report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no
+// target id), never to general logs. No-op when reporting is not configured.
+func (s *liShipper) report(issueType, description string) {
+	if s.reporter != nil {
+		_ = s.reporter.ReportNEIssue(issueType, description)
+	}
 }
 
 // shipLoop reads each teed packet — an 8-byte F-SEID tag (prepended by the BESS
@@ -76,8 +89,9 @@ func (s *liShipper) shipLoop() {
 		if err != nil {
 			// The datapath X3 socket dropped (BESS restart / transient error). Do
 			// not die — that would silently disable interception for the life of
-			// the process. Reconnect (with backoff) so interception resumes when
-			// the datapath returns.
+			// the process. Report it to the ADMF, then reconnect (with backoff) so
+			// interception resumes when the datapath returns.
+			s.report(x1.NEIssueX3EgressDown, "X3 egress socket unavailable")
 			s.reconnect()
 			continue
 		}
@@ -86,7 +100,9 @@ func (s *liShipper) shipLoop() {
 			continue // tag only, no user-plane payload
 		}
 
-		_ = s.client.Send(shipperPDU(buf[:n]))
+		if err := s.client.Send(shipperPDU(buf[:n])); err != nil {
+			s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed")
+		}
 	}
 }
 

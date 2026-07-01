@@ -58,6 +58,9 @@ type LiConfig struct {
 	Cert       string `json:"cert"`        // X0 LI PKI: this NE's certificate
 	Key        string `json:"key"`         // its private key
 	CACert     string `json:"ca_cert"`     // the LI CA trust anchor
+	NEID       string `json:"ne_id"`       // this NE's identifier (for X1 issue reports)
+	AdmfURL    string `json:"admf_url"`    // ADMF X1 endpoint for NE-initiated issue reports (optional)
+	AdmfID     string `json:"admf_id"`     // responsible ADMF identifier (for reports)
 }
 
 // QciQosConfig : Qos configured attributes.
