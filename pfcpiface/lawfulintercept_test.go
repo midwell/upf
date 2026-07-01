@@ -9,7 +9,11 @@ import (
 	"testing"
 
 	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/upf-epc/logger"
 	"github.com/wmnsk/go-pfcp/ie"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestParseFARDuplicate checks that a FAR carrying the DUPL apply-action plus
@@ -46,6 +50,31 @@ func TestParseFARDuplicate(t *testing.T) {
 	}
 	if plainFAR.Duplicates() || plainFAR.duplicate {
 		t.Error("plain forwarding FAR must not be marked for duplication")
+	}
+}
+
+// TestParseFARDuplicateIsSilent enforces undetectability: parsing a DUPL (LI)
+// FAR must emit no log output, so a tasked subscriber's session is
+// indistinguishable from any other in the UPF's logs.
+func TestParseFARDuplicateIsSilent(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	orig := logger.PfcpLog
+	logger.PfcpLog = zap.New(core).Sugar()
+	t.Cleanup(func() { logger.PfcpLog = orig })
+
+	mockUpf := &upf{accessIP: net.ParseIP("192.168.0.1"), coreIP: net.ParseIP("10.0.10.1")}
+	dup := &far{}
+	in := ie.NewCreateFAR(
+		ie.NewFARID(7),
+		ie.NewApplyAction(ActionForward|ActionDuplicate),
+		ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)),
+		ie.NewDuplicatingParameters(ie.NewDestinationInterface(ie.DstInterfaceLIFunction)),
+	)
+	if err := dup.parseFAR(in, 100, mockUpf, create); err != nil {
+		t.Fatalf("parseFAR: %v", err)
+	}
+	if n := logs.Len(); n != 0 {
+		t.Errorf("parsing a DUPL FAR emitted %d log entries, want 0 (undetectability): %v", n, logs.All())
 	}
 }
 
