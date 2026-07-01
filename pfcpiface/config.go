@@ -45,6 +45,19 @@ type Conf struct {
 	EnableHBTimer            bool             `json:"enable_hbTimer"`
 	HeartBeatInterval        string           `json:"heart_beat_interval"`
 	N4Addr                   string           `json:"n4_addr"`
+	Li                       *LiConfig        `json:"li,omitempty"`
+}
+
+// LiConfig configures the Lawful Interception CC-POI (X3 shipper). It is opt-in:
+// when absent, the LI content-of-communication egress is inactive and the UPF
+// behaves exactly as before. The X3 socket is the userspace UnixSocketPort the
+// BESS pipeline tees duplicated packets to (see conf).
+type LiConfig struct {
+	MDF3       string `json:"mdf3"`        // X3 delivery destination (MDF3 "host:port")
+	X3SockAddr string `json:"x3_sockaddr"` // unixpacket socket the datapath tees LI copies to
+	Cert       string `json:"cert"`        // X0 LI PKI: this NE's certificate
+	Key        string `json:"key"`         // its private key
+	CACert     string `json:"ca_cert"`     // the LI CA trust anchor
 }
 
 // QciQosConfig : Qos configured attributes.
