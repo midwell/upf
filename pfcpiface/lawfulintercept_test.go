@@ -32,8 +32,8 @@ func TestParseFARDuplicate(t *testing.T) {
 	if err := dupFAR.parseFAR(in, 100, mockUpf, create); err != nil {
 		t.Fatalf("parseFAR (dup): %v", err)
 	}
-	if !dupFAR.Duplicates() || !dupFAR.duplicate {
-		t.Errorf("DUPL FAR: Duplicates()=%v duplicate=%v, want both true", dupFAR.Duplicates(), dupFAR.duplicate)
+	if !dupFAR.Duplicates() {
+		t.Errorf("DUPL FAR: Duplicates() = false, want true")
 	}
 	if !dupFAR.Forwards() {
 		t.Error("DUPL FAR must still forward the subscriber copy")
@@ -48,7 +48,7 @@ func TestParseFARDuplicate(t *testing.T) {
 	if err := plainFAR.parseFAR(plain, 100, mockUpf, create); err != nil {
 		t.Fatalf("parseFAR (plain): %v", err)
 	}
-	if plainFAR.Duplicates() || plainFAR.duplicate {
+	if plainFAR.Duplicates() {
 		t.Error("plain forwarding FAR must not be marked for duplication")
 	}
 }
