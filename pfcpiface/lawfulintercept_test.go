@@ -132,8 +132,12 @@ func TestShipperPDU(t *testing.T) {
 	if ul.PayloadFormat != x2x3.PayloadFormatIPv4 || ul.Direction != x2x3.DirectionFromTarget {
 		t.Errorf("uplink: format=%d direction=%d, want IPv4/FromTarget", ul.PayloadFormat, ul.Direction)
 	}
-	if !bytes.Equal(ul.CorrelationID[:], fseid) || !bytes.Equal(ul.Payload, inner) {
-		t.Errorf("uplink: correlation=% x payload=% x", ul.CorrelationID, ul.Payload)
+	// The datapath prepends the F-SEID in host (little-endian) byte order; the X3
+	// correlation ID carries it big-endian so it matches the SMF's X2 correlation
+	// ID for the session (review R20 / design D12) — i.e. the tag bytes reversed.
+	wantCorr := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+	if !bytes.Equal(ul.CorrelationID[:], wantCorr) || !bytes.Equal(ul.Payload, inner) {
+		t.Errorf("uplink: correlation=% x (want % x) payload=% x", ul.CorrelationID, wantCorr, ul.Payload)
 	}
 
 	// Downlink (action 5): teed post-encap → GTP-U + ToTarget (must NOT be labeled inner IP).
