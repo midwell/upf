@@ -851,7 +851,12 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	if conf.Li != nil {
 		b.liShipper, err = startLIShipper(conf.Li)
 		if err != nil {
-			logger.BessLog.Errorf("lawful interception X3 shipper init failed: %v", err)
+			// Do not name the subsystem or echo err (which carries LI-identifying
+			// text) on the general BESS log: that would reveal to an unauthorized
+			// operator that this NE is LI-provisioned (review R23; li-security-isolation
+			// NE-level undetectability). No X1 channel exists yet at datapath init, so
+			// pending a restricted LI log sink this is surfaced only non-attributably.
+			logger.BessLog.Errorln("an optional datapath subsystem failed to initialise")
 		}
 	}
 

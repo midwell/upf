@@ -5,6 +5,7 @@ package pfcpiface
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"time"
 
@@ -36,7 +37,7 @@ const (
 type liShipper struct {
 	sockAddr string
 	sock     net.Conn
-	client   *x2x3.Client
+	client   x2x3.Sender
 	reporter *x1.Reporter // nil when NE-initiated reporting is not configured
 }
 
@@ -54,13 +55,29 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 		return nil, err
 	}
 
+	var reporter *x1.Reporter
+	if cfg.AdmfURL != "" {
+		reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
+	}
+	// Deliver X3 asynchronously: shipLoop must keep draining the datapath socket,
+	// so it cannot block on the MDF3. If Send blocked (slow/unreachable MDF3), the
+	// unread socket would make BESS drop every subsequent LI copy (review R3b).
+	// Enqueue-and-return decouples them; delivery failures surface to the ADMF over
+	// X1 from the delivery worker (throttled, NE-level), never a general log.
+	client := x2x3.NewAsyncSender(
+		x2x3.NewClient(cfg.MDF3, mat.ClientTLS()), 0,
+		func(error) {
+			if reporter != nil {
+				_ = reporter.ReportNEIssue(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed")
+			}
+		},
+		nil, // drops are covered by the same MDF-unreachable report from the worker
+	)
 	s := &liShipper{
 		sockAddr: cfg.X3SockAddr,
 		sock:     sock,
-		client:   x2x3.NewClient(cfg.MDF3, mat.ClientTLS()),
-	}
-	if cfg.AdmfURL != "" {
-		s.reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
+		client:   client,
+		reporter: reporter,
 	}
 	go s.shipLoop()
 
@@ -100,9 +117,11 @@ func (s *liShipper) shipLoop() {
 			continue // tag only, no user-plane payload
 		}
 
-		if err := s.client.Send(shipperPDU(buf[:n])); err != nil {
-			s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed")
-		}
+		// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
+		// a slow/unreachable MDF3 cannot stall the socket read (which would make
+		// BESS drop subsequent copies). Delivery failures are reported from the
+		// worker via the onError hook set in startLIShipper (review R3b).
+		_ = s.client.Send(shipperPDU(buf[:n]))
 	}
 }
 
@@ -141,7 +160,14 @@ func shipperPDU(tagged []byte) *x2x3.PDU {
 		Type:    x2x3.PDUTypeX3,
 		Payload: append([]byte(nil), inner...),
 	}
-	copy(pdu.CorrelationID[:], tagged[:fseidTagLen])
+	// The BESS GenericEncap prepends the F-SEID in host (little-endian) byte order
+	// (the same metadata the notifyCP path reads little-endian). Re-encode it
+	// big-endian as the X3 correlation ID so the value and byte order match the
+	// SMF's X2 xIRI correlation ID (the serving UPF F-SEID, big-endian) and the MDF
+	// can join the two streams without depending on datapath host endianness
+	// (review R20 / design D12).
+	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
+	binary.BigEndian.PutUint64(pdu.CorrelationID[:], fseid)
 
 	switch action {
 	case farForwardDAndDuplicate: // downlink: GTP-U packet toward the target
