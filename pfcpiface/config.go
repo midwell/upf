@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
-	"regexp"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -177,10 +177,67 @@ func validateConf(conf Conf) error {
 	return nil
 }
 
-// Remove comments from JSONC file
+// removeComments strips // line comments and /* */ block comments from a JSONC
+// document, leaving comment markers that appear inside string literals alone.
+//
+// That last part is the whole point: a regex sweep for `//.*$` also eats the
+// scheme separator of any URL-valued setting, and because this configuration is
+// rendered as a single line, "https://..." truncated everything after it and the
+// file failed to parse as "unexpected end of JSON input" — with nothing to
+// suggest a URL was to blame.
 func removeComments(jsonc string) string {
-	commentRegex := regexp.MustCompile(`(?m)//.*$|/\*.*?\*/`)
-	return commentRegex.ReplaceAllString(jsonc, "")
+	var b strings.Builder
+
+	b.Grow(len(jsonc))
+
+	inString, escaped := false, false
+
+	for i := 0; i < len(jsonc); i++ {
+		c := jsonc[i]
+
+		if inString {
+			b.WriteByte(c)
+
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+
+			continue
+		}
+
+		switch {
+		case c == '"':
+			inString = true
+
+			b.WriteByte(c)
+		case c == '/' && i+1 < len(jsonc) && jsonc[i+1] == '/':
+			// Line comment: drop it, but keep the newline so line numbers in any
+			// subsequent parse error still point at the right place.
+			for i < len(jsonc) && jsonc[i] != '\n' {
+				i++
+			}
+
+			if i < len(jsonc) {
+				b.WriteByte('\n')
+			}
+		case c == '/' && i+1 < len(jsonc) && jsonc[i+1] == '*':
+			i += 2
+			for i+1 < len(jsonc) && !(jsonc[i] == '*' && jsonc[i+1] == '/') {
+				i++
+			}
+
+			i++ // the loop's own i++ steps past the closing '/'
+		default:
+			b.WriteByte(c)
+		}
+	}
+
+	return b.String()
 }
 
 // LoadConfigFile : parse jsonc file and populate corresponding struct
