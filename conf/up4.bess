@@ -296,14 +296,32 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # GTP-U packet toward the target) from the uplink copy (decapsulated inner packet
 # from the target) and set the X3 payload format + direction accordingly. Field
 # order is [fseid(8)][action(1)], then the packet.
-liMerge::Merge() \
-    -> liEncap::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
-    -> liX3out::PortOut(port='liX3')
+#
+# The tag is applied BEFORE the tee, and taken off again on the subscriber's
+# branch, which looks roundabout but is the point: Replicate emits the original
+# packet on gate 0 and a bess::Packet::copy() on the others, and that copy
+# duplicates only the packet data — the per-packet metadata area is not carried
+# over. A GenericEncap reading 'fseid'/'action' downstream of the tee therefore
+# reads an uninitialised metadata area and tags every copy with a zero
+# correlation, which is silent: interception keeps running and its product is
+# simply not joinable to the signalling (review R28). Encapping first puts the
+# correlation in packet *data*, which copy() does duplicate.
+#
+# The subscriber keeps gate 0 — the original packet, metadata intact — because the
+# forward tail still needs it: FlowMeasure keys its per-session volume off those
+# attributes, so handing the subscriber the metadata-less copy instead would stop
+# a tasked subscriber's usage being measured correctly. That is the same class of
+# fault as R24 and equally detectable.
+liMerge::Merge() -> liX3out::PortOut(port='liX3')
 
-executeFAR:farForwardDAndDuplicateAction -> liReplicaD::Replicate(gates=[0, 1])
+executeFAR:farForwardDAndDuplicateAction \
+    -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liReplicaD::Replicate(gates=[0, 1])
 liReplicaD:1 -> liMerge
 
-executeFAR:farForwardUAndDuplicateAction -> liReplicaU::Replicate(gates=[0, 1])
+executeFAR:farForwardUAndDuplicateAction \
+    -> liEncapU::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liReplicaU::Replicate(gates=[0, 1])
 liReplicaU:1 -> liMerge
 
 # Set default gates for relevant modules
@@ -360,8 +378,12 @@ else:
     dlForwardTail = postDLQosFlowMeasure
 
 # Lawful Intercept: the subscriber's copy of a duplicated packet takes the same
-# tail as a plain forwarded one, so its volume is measured identically.
-liReplicaD:0 -> dlForwardTail
+# tail as a plain forwarded one, so its volume is measured identically. It is
+# stripped of the 9-byte correlation tag first — the tag is applied before the tee
+# so that the LI copy carries it as packet data (see the egress section), which
+# means the subscriber's packet must have it removed to leave the wire format
+# byte-for-byte what an untasked subscriber's would be.
+liReplicaD:0 -> liStripD::GenericDecap(bytes=9) -> dlForwardTail
 
 # Drop unknown packets
 coreRxIPCksum:1 -> coreRxIPCksumFail::Sink()
@@ -432,7 +454,7 @@ else:
 
 # Lawful Intercept: as for the downlink, the subscriber's copy shares the plain
 # forward tail so a tasked session is metered exactly like an untasked one.
-liReplicaU:0 -> ulForwardTail
+liReplicaU:0 -> liStripU::GenericDecap(bytes=9) -> ulForwardTail
 
 # 4. GTP Echo response pipeline
 accessFastBPF:GTPUEchoGate \
