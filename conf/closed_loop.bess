@@ -293,11 +293,11 @@ packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
 #
 # The tee sits at the forwarding stage, downstream of QER policing
 # (appQERLookup/sessionQERLookup run earlier), so the subscriber's traffic is
-# metered exactly once and the duplicate is not double-counted.
-# NOTE (task 5.2): when flow-based volume measurement is enabled
-# (parser.measure_flow), copy 0 must traverse the same post-forward FlowMeasure
-# as the normal path; production wiring routes copy 0 through the shared forward
-# tail rather than straight to the port as prototyped here.
+# metered exactly once and the duplicate is not double-counted. Copy 0 is wired
+# in the downlink/uplink sections below, where it joins the very same forward
+# tail as the plain forward action — including the post-QoS FlowMeasure when
+# flow-based volume measurement is enabled — so a tasked subscriber's usage is
+# measured exactly as an untasked one's is.
 li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
 liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # Prepend the F-SEID (correlation) and the FAR action to each LI copy. The action
@@ -310,11 +310,9 @@ liMerge::Merge() \
     -> liX3out::PortOut(port='liX3')
 
 executeFAR:farForwardDAndDuplicateAction -> liReplicaD::Replicate(gates=[0, 1])
-liReplicaD:0 -> ports[parser.access_ifname].rtr
 liReplicaD:1 -> liMerge
 
 executeFAR:farForwardUAndDuplicateAction -> liReplicaU::Replicate(gates=[0, 1])
-liReplicaU:0 -> ports[parser.core_ifname].rtr
 liReplicaU:1 -> liMerge
 
 # Set default gates for relevant modules
@@ -359,14 +357,20 @@ _in:gate \
 
 # 3. Complete the last part of the DL pipeline
 if not parser.measure_flow:
+    dlForwardTail = ports[parser.access_ifname].rtr
     executeFAR:farForwardDAction \
-        -> ports[parser.access_ifname].rtr
+        -> dlForwardTail
 else:
     executeFAR:farForwardDAction \
         -> postDLQosFlowMeasure::FlowMeasure(leader=False,
                                              flag_attr_name="buffer_flag",
                                              entries=parser.table_size_flow_measure) \
         -> ports[parser.access_ifname].rtr
+    dlForwardTail = postDLQosFlowMeasure
+
+# Lawful Intercept: the subscriber's copy of a duplicated packet takes the same
+# tail as a plain forwarded one, so its volume is measured identically.
+liReplicaD:0 -> dlForwardTail
 
 # Drop unknown packets
 coreRxIPCksum:1 -> coreRxIPCksumFail::Sink()
@@ -424,14 +428,20 @@ _in:gate \
 
 # 3. Complete the last part of the UL pipeline
 if not parser.measure_flow:
+    ulForwardTail = ports[parser.core_ifname].rtr
     executeFAR:farForwardUAction \
-        -> ports[parser.core_ifname].rtr
+        -> ulForwardTail
 else:
     executeFAR:farForwardUAction \
         -> postULQosFlowMeasure::FlowMeasure(leader=False,
                                              flag_attr_name="buffer_flag",
                                              entries=parser.table_size_flow_measure) \
         -> ports[parser.core_ifname].rtr
+    ulForwardTail = postULQosFlowMeasure
+
+# Lawful Intercept: as for the downlink, the subscriber's copy shares the plain
+# forward tail so a tasked session is metered exactly like an untasked one.
+liReplicaU:0 -> ulForwardTail
 
 # 4. GTP Echo response pipeline
 accessFastBPF:GTPUEchoGate \
