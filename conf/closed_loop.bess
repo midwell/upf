@@ -305,14 +305,24 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # GTP-U packet toward the target) from the uplink copy (decapsulated inner IP from
 # the target) and set the X3 payload format + direction accordingly. Field order is
 # [fseid(8)][action(1)], then the packet.
-liMerge::Merge() \
-    -> liEncap::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
-    -> liX3out::PortOut(port='liX3')
+# The tag is applied BEFORE the tee and removed again on the subscriber's branch.
+# Replicate emits the original packet on gate 0 and a bess::Packet::copy() on the
+# others, and that copy carries only packet data — the per-packet metadata area is
+# not duplicated, so a GenericEncap reading 'fseid'/'action' after the tee tags
+# every copy with a zero correlation (review R28). Encapping first puts the
+# correlation in packet data, which copy() does duplicate. The subscriber keeps
+# gate 0 (the original, metadata intact) because the forward tail still needs
+# those attributes for volume measurement.
+liMerge::Merge() -> liX3out::PortOut(port='liX3')
 
-executeFAR:farForwardDAndDuplicateAction -> liReplicaD::Replicate(gates=[0, 1])
+executeFAR:farForwardDAndDuplicateAction \
+    -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liReplicaD::Replicate(gates=[0, 1])
 liReplicaD:1 -> liMerge
 
-executeFAR:farForwardUAndDuplicateAction -> liReplicaU::Replicate(gates=[0, 1])
+executeFAR:farForwardUAndDuplicateAction \
+    -> liEncapU::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liReplicaU::Replicate(gates=[0, 1])
 liReplicaU:1 -> liMerge
 
 # Set default gates for relevant modules
@@ -370,7 +380,7 @@ else:
 
 # Lawful Intercept: the subscriber's copy of a duplicated packet takes the same
 # tail as a plain forwarded one, so its volume is measured identically.
-liReplicaD:0 -> dlForwardTail
+liReplicaD:0 -> liStripD::GenericDecap(bytes=9) -> dlForwardTail
 
 # Drop unknown packets
 coreRxIPCksum:1 -> coreRxIPCksumFail::Sink()
@@ -441,7 +451,7 @@ else:
 
 # Lawful Intercept: as for the downlink, the subscriber's copy shares the plain
 # forward tail so a tasked session is metered exactly like an untasked one.
-liReplicaU:0 -> ulForwardTail
+liReplicaU:0 -> liStripU::GenericDecap(bytes=9) -> ulForwardTail
 
 # 4. GTP Echo response pipeline
 accessFastBPF:GTPUEchoGate \
