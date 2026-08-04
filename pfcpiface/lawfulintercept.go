@@ -38,7 +38,13 @@ type liShipper struct {
 	sockAddr string
 	sock     net.Conn
 	client   x2x3.Sender
-	reporter *x1.Reporter // nil when NE-initiated reporting is not configured
+	reporter neIssueReporter // nil when NE-initiated reporting is not configured
+}
+
+// neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
+// the x2x3.Sender above) so tests can assert what a fault reports without an ADMF.
+type neIssueReporter interface {
+	ReportNEIssue(issueType, description string) error
 }
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
@@ -77,7 +83,11 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 		sockAddr: cfg.X3SockAddr,
 		sock:     sock,
 		client:   client,
-		reporter: reporter,
+	}
+	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
+	// would pass the nil check in report() and then panic on use.
+	if reporter != nil {
+		s.reporter = reporter
 	}
 	go s.shipLoop()
 
@@ -117,11 +127,33 @@ func (s *liShipper) shipLoop() {
 			continue // tag only, no user-plane payload
 		}
 
+		s.checkTag(buf[:n])
+
 		// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
 		// a slow/unreachable MDF3 cannot stall the socket read (which would make
 		// BESS drop subsequent copies). Delivery failures are reported from the
 		// worker via the onError hook set in startLIShipper (review R3b).
 		_ = s.client.Send(shipperPDU(buf[:n]))
+	}
+}
+
+// checkTag reports an unusable LI tag to the ADMF. The tag's fields reach liEncap
+// as BESS per-packet metadata, whose offsets are assigned from the pipeline graph;
+// a wiring in which they do not reach the encap is accepted at load time with only
+// a printed note, and every copy then carries a zero correlation id or an unknown
+// action. Interception would be running but its product would not be correlatable
+// by the MDF, so surface it over X1 — never to general logs (design D11).
+func (s *liShipper) checkTag(tagged []byte) {
+	switch tagged[fseidTagLen] {
+	case farForwardDAndDuplicate, farForwardUAndDuplicate:
+	default:
+		s.report(x1.NEIssueX3TagInvalid, "content tag carries an unknown forwarding action")
+
+		return
+	}
+
+	if binary.LittleEndian.Uint64(tagged[:fseidTagLen]) == 0 {
+		s.report(x1.NEIssueX3TagInvalid, "content tag carries no session correlation")
 	}
 }
 
@@ -169,19 +201,77 @@ func shipperPDU(tagged []byte) *x2x3.PDU {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 	binary.BigEndian.PutUint64(pdu.CorrelationID[:], fseid)
 
-	switch action {
-	case farForwardDAndDuplicate: // downlink: GTP-U packet toward the target
+	l3, format := networkLayerOf(inner)
+	pdu.Payload = append([]byte(nil), l3...)
+	pdu.Direction = directionOf(action)
+	pdu.PayloadFormat = format
+
+	// The downlink copy is teed after GTP-U encapsulation, so its network layer is
+	// the outer packet carrying the tunnel toward the target.
+	if action == farForwardDAndDuplicate && format != x2x3.PayloadFormatEthernet {
 		pdu.PayloadFormat = x2x3.PayloadFormatGTPU
-		pdu.Direction = x2x3.DirectionToTarget
-	case farForwardUAndDuplicate: // uplink: decapsulated inner IP from the target
-		pdu.PayloadFormat = payloadFormatOf(inner)
-		pdu.Direction = x2x3.DirectionFromTarget
-	default:
-		pdu.PayloadFormat = payloadFormatOf(inner)
-		pdu.Direction = x2x3.DirectionUnknown
 	}
 
 	return pdu
+}
+
+// networkLayerOf returns the packet to carry on X3 and its payload format. The
+// BESS pipeline tees a full Ethernet frame — its GTP-U decap leaves the link layer
+// intact — whereas X3 carries the network-layer packet, so an L2 header is stripped
+// when one is present. A payload that is already a bare IP packet is shipped
+// unchanged, and anything unrecognised is shipped whole and labelled Ethernet
+// rather than mislabelled as IP.
+func networkLayerOf(pkt []byte) ([]byte, x2x3.PayloadFormat) {
+	if l3, ok := stripEthernet(pkt); ok {
+		return l3, payloadFormatOf(l3)
+	}
+
+	if len(pkt) > 0 && (pkt[0]>>4 == 4 || pkt[0]>>4 == 6) {
+		return pkt, payloadFormatOf(pkt)
+	}
+
+	return pkt, x2x3.PayloadFormatEthernet
+}
+
+// directionOf maps the datapath forward-and-duplicate action to the X3 direction.
+func directionOf(action byte) x2x3.PayloadDirection {
+	switch action {
+	case farForwardDAndDuplicate:
+		return x2x3.DirectionToTarget
+	case farForwardUAndDuplicate:
+		return x2x3.DirectionFromTarget
+	default:
+		return x2x3.DirectionUnknown
+	}
+}
+
+// stripEthernet removes the Ethernet (and any 802.1Q) header from a teed frame,
+// returning the network-layer packet. It reports false when the frame does not
+// carry IPv4/IPv6, in which case the caller must not claim an IP payload format.
+func stripEthernet(frame []byte) ([]byte, bool) {
+	const (
+		ethHeaderLen  = 14
+		vlanTagLen    = 4
+		etherTypeIPv4 = 0x0800
+		etherTypeIPv6 = 0x86DD
+		etherTypeVLAN = 0x8100
+		etherTypeQinQ = 0x88A8
+	)
+
+	offset := ethHeaderLen
+	for len(frame) > offset {
+		etherType := binary.BigEndian.Uint16(frame[offset-2 : offset])
+		switch etherType {
+		case etherTypeIPv4, etherTypeIPv6:
+			return frame[offset:], true
+		case etherTypeVLAN, etherTypeQinQ:
+			offset += vlanTagLen
+		default:
+			return frame, false
+		}
+	}
+
+	return frame, false
 }
 
 // payloadFormatOf classifies an inner user-plane packet by IP version.

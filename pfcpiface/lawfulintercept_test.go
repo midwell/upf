@@ -8,6 +8,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
 	"github.com/omec-project/upf-epc/logger"
 	"github.com/wmnsk/go-pfcp/ie"
@@ -151,5 +152,138 @@ func TestShipperPDU(t *testing.T) {
 		if _, err := pdu.Marshal(); err != nil {
 			t.Errorf("Marshal: %v", err)
 		}
+	}
+}
+
+// TestShipperPDUStripsLinkLayer covers what the datapath actually tees: BESS's
+// GTP-U decap leaves the Ethernet header in place, so the teed copy is a full
+// frame (observed on a live bessd pipeline, task 5.5). X3 carries the network
+// layer, so the L2 header must be stripped — otherwise the MDF receives 14 extra
+// bytes under a payload format claiming an IP packet.
+func TestShipperPDUStripsLinkLayer(t *testing.T) {
+	ip := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
+	ethHeader := func(etherType ...byte) []byte {
+		hdr := []byte{0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2}
+
+		return append(hdr, etherType...)
+	}
+	tag := func(action byte, payload []byte) []byte {
+		return append(append(append([]byte{}, 1, 2, 3, 4, 5, 6, 7, 8), action), payload...)
+	}
+
+	tests := []struct {
+		name       string
+		action     byte
+		payload    []byte
+		wantFormat x2x3.PayloadFormat
+		wantBody   []byte
+	}{
+		{
+			name:       "ethernet framed uplink is stripped",
+			action:     farForwardUAndDuplicate,
+			payload:    append(ethHeader(0x08, 0x00), ip...),
+			wantFormat: x2x3.PayloadFormatIPv4,
+			wantBody:   ip,
+		},
+		{
+			name:       "ethernet framed downlink is stripped and labelled GTP-U",
+			action:     farForwardDAndDuplicate,
+			payload:    append(ethHeader(0x08, 0x00), ip...),
+			wantFormat: x2x3.PayloadFormatGTPU,
+			wantBody:   ip,
+		},
+		{
+			name:       "vlan tagged frame is stripped",
+			action:     farForwardUAndDuplicate,
+			payload:    append(append(ethHeader(0x81, 0x00), 0x00, 0x0a, 0x08, 0x00), ip...),
+			wantFormat: x2x3.PayloadFormatIPv4,
+			wantBody:   ip,
+		},
+		{
+			name:       "bare ip packet is shipped unchanged",
+			action:     farForwardUAndDuplicate,
+			payload:    ip,
+			wantFormat: x2x3.PayloadFormatIPv4,
+			wantBody:   ip,
+		},
+		{
+			name:       "unrecognised payload is labelled ethernet, not mislabelled as ip",
+			action:     farForwardUAndDuplicate,
+			payload:    append(ethHeader(0x12, 0x34), 0xaa, 0xbb),
+			wantFormat: x2x3.PayloadFormatEthernet,
+			wantBody:   append(ethHeader(0x12, 0x34), 0xaa, 0xbb),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pdu := shipperPDU(tag(tt.action, tt.payload))
+			if pdu.PayloadFormat != tt.wantFormat {
+				t.Errorf("payload format = %d, want %d", pdu.PayloadFormat, tt.wantFormat)
+			}
+			if !bytes.Equal(pdu.Payload, tt.wantBody) {
+				t.Errorf("payload = % x, want % x", pdu.Payload, tt.wantBody)
+			}
+			if _, err := pdu.Marshal(); err != nil {
+				t.Errorf("Marshal: %v", err)
+			}
+		})
+	}
+}
+
+// fakeNEIssueReporter records the LI-plane faults reported to the ADMF.
+type fakeNEIssueReporter struct {
+	issues []string
+}
+
+func (f *fakeNEIssueReporter) ReportNEIssue(issueType, _ string) error {
+	f.issues = append(f.issues, issueType)
+
+	return nil
+}
+
+// TestCheckTagReportsUnusableTag proves an unusable content tag is reported to the
+// ADMF over X1 (design D11) instead of silently shipping product the MDF cannot
+// correlate. A tag whose metadata never reached the datapath encap carries a zero
+// correlation or an unknown action — interception runs but its product is useless.
+func TestCheckTagReportsUnusableTag(t *testing.T) {
+	tests := []struct {
+		name       string
+		tag        []byte
+		wantReport bool
+	}{
+		{
+			name:       "valid uplink tag is not reported",
+			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, farForwardUAndDuplicate},
+			wantReport: false,
+		},
+		{
+			name:       "unknown action is reported",
+			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, 16},
+			wantReport: true,
+		},
+		{
+			name:       "zero correlation is reported",
+			tag:        []byte{0, 0, 0, 0, 0, 0, 0, 0, farForwardUAndDuplicate},
+			wantReport: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeNEIssueReporter{}
+			s := &liShipper{reporter: fake}
+
+			s.checkTag(append(tt.tag, 0x45, 0x00))
+
+			if got := len(fake.issues) > 0; got != tt.wantReport {
+				t.Errorf("reported = %v (%v), want %v", got, fake.issues, tt.wantReport)
+			}
+			for _, issue := range fake.issues {
+				if issue != x1.NEIssueX3TagInvalid {
+					t.Errorf("issue type = %q, want %q", issue, x1.NEIssueX3TagInvalid)
+				}
+			}
+		})
 	}
 }
