@@ -109,6 +109,13 @@ func (f FakeFar) String() string {
 		f.Drops(), f.Forwards(), f.Buffers())
 }
 
+// ActionValue returns the datapath action the PFCP agent installed for this FAR.
+// This is the BESS-side action value that the pipeline's executeFAR splits on
+// (farForwardD/farForwardU/farDrop/...), not the PFCP apply-action bitmap.
+func (f *FakeFar) ActionValue() uint8 {
+	return f.applyAction
+}
+
 func (f *FakeFar) Drops() bool {
 	return utils.Uint8Has1stBit(f.applyAction)
 }
@@ -166,13 +173,13 @@ func (b *fakeBessService) unsafeGetOrAddModule(name string) module {
 		switch name {
 		case pdrLookupModuleName:
 			b.modules[name] = &wildcardModule{
-				baseModule{name: name},
-				nil,
+				baseModule: baseModule{name: name},
+				entries:    nil,
 			}
 		case farLookupModuleName:
 			b.modules[name] = &exactMatchModule{
-				baseModule{name: name},
-				nil,
+				baseModule: baseModule{name: name},
+				entries:    nil,
 			}
 		case appQerModuleName, sessionQerModuleName:
 			b.modules[name] = &qosModule{
@@ -318,18 +325,25 @@ func (b *baseModule) HandleRequest(cmd string, arg *anypb.Any) (err error) {
 }
 
 type wildcardModule struct {
+	mutex sync.Mutex
 	baseModule
 	entries []*bess_pb.WildcardMatchCommandAddArg
 }
 
+// GetState returns copies of the entries: a caller reads them after the lock is
+// released, while HandleRequest updates matching entries in place.
 func (w *wildcardModule) GetState() (msgs []proto.Message) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
 	for _, e := range w.entries {
-		msgs = append(msgs, e)
+		msgs = append(msgs, proto.Clone(e))
 	}
 	return msgs
 }
 
 func (w *wildcardModule) HandleRequest(cmd string, arg *anypb.Any) (err error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
 	if err = w.baseModule.HandleRequest(cmd, arg); err != nil {
 		return err
 	}
@@ -393,18 +407,25 @@ func (w *wildcardModule) HandleRequest(cmd string, arg *anypb.Any) (err error) {
 }
 
 type exactMatchModule struct {
+	mutex sync.Mutex
 	baseModule
 	entries []*bess_pb.ExactMatchCommandAddArg
 }
 
+// GetState returns copies of the entries: a caller reads them after the lock is
+// released, while HandleRequest updates matching entries in place.
 func (e *exactMatchModule) GetState() (msgs []proto.Message) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
 	for _, em := range e.entries {
-		msgs = append(msgs, em)
+		msgs = append(msgs, proto.Clone(em))
 	}
 	return
 }
 
 func (e *exactMatchModule) HandleRequest(cmd string, arg *anypb.Any) (err error) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
 	if err = e.baseModule.HandleRequest(cmd, arg); err != nil {
 		return err
 	}
@@ -475,7 +496,7 @@ func (q *qosModule) GetState() (msgs []proto.Message) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 	for _, em := range q.entries {
-		msgs = append(msgs, em)
+		msgs = append(msgs, proto.Clone(em))
 	}
 	return
 }
