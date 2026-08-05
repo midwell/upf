@@ -172,6 +172,17 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	const seid = 14426627323429955319
 
 	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	// The destination has to exist before a trigger may name it: this POI refuses a
+	// content trigger whose destinations it does not know, so that a triggering
+	// function whose provisioning has been lost finds out (review R37).
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "10.0.60.122", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+
 	trigger := x1.Trigger{
 		XID:           "11111111-1111-4111-8111-111111111111",
 		ProductID:     "22222222-2222-4222-8222-222222222222",
@@ -183,6 +194,21 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	if err := req.ActivateTask(trigger); err != nil {
 		t.Fatalf("ActivateTask: %v", err)
+	}
+
+	// The same trigger naming a destination this POI has never heard of must be
+	// refused rather than acknowledged. Accepting it would duplicate a subject's
+	// traffic and discard every copy while the triggering function believed
+	// interception was running — which is what a POI restart used to cause.
+	unknown := trigger
+	unknown.XID = "99999999-9999-4999-8999-999999999999"
+	unknown.SEID = seid + 7
+	unknown.DIDs = []string{"55555555-5555-4555-8555-555555555555"}
+	if err := req.ActivateTask(unknown); err == nil {
+		t.Error("a content trigger naming an unknown destination was accepted")
+	}
+	if _, ok := lookupTrigger(tasks, seid+7); ok {
+		t.Error("a refused trigger was installed anyway")
 	}
 
 	task, ok := lookupTrigger(tasks, seid)

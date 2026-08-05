@@ -41,7 +41,14 @@ import (
 // general operator log (review R25/R27).
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter) (*store.Store, error) {
 	tasks := store.New()
-	srv := x1.NewServer(tasks, cfg.NEID, x1.WithADMF(cfg.TFID))
+	// RequireResolvableDIDs is what lets the triggering function find out that this
+	// POI has lost the destination it provisioned — after a restart, say. Accepting
+	// such a trigger would mean duplicating a subject's traffic and discarding every
+	// copy while the triggering function is told interception is running, which is
+	// exactly what happened before review R37.
+	srv := x1.NewServer(tasks, cfg.NEID,
+		x1.WithADMF(cfg.TFID),
+		x1.RequireResolvableDIDs())
 
 	ln, err := net.Listen("tcp", cfg.X1Listen)
 	if err != nil {
