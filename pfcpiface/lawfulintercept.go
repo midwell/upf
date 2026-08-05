@@ -5,12 +5,16 @@ package pfcpiface
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/omec-project/li/mtls"
 	"github.com/omec-project/li/store"
+	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
 )
@@ -38,13 +42,23 @@ const (
 type liShipper struct {
 	sockAddr string
 	sock     net.Conn
-	client   x2x3.Sender
 	reporter neIssueReporter // nil when NE-initiated reporting is not configured
 	// tasks holds the LI_T3 triggers installed by the CC-TF, indexed by the
 	// F-SEID the datapath tags onto duplicated packets. It is what supplies the
 	// warrant XID and correlation identifier for each copy.
 	tasks *store.Store
+	// tlsConfig is the client side of the LI PKI, used to dial each MDF3.
+	tlsConfig *tls.Config
+
+	mu      sync.Mutex
+	senders map[string]x2x3.Sender // per MDF3 address, created on first use
 }
+
+// errNoDeliveryCredentials means X3 delivery was attempted with no LI client
+// credentials loaded, which can only happen in a test that built a shipper
+// directly. Delivering intercept product over an unauthenticated connection is
+// never an acceptable fallback.
+var errNoDeliveryCredentials = errors.New("li: no X3 delivery credentials")
 
 // neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
 // the x2x3.Sender above) so tests can assert what a fault reports without an ADMF.
@@ -86,25 +100,17 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 
 		return nil, err
 	}
-	// Deliver X3 asynchronously: shipLoop must keep draining the datapath socket,
-	// so it cannot block on the MDF3. If Send blocked (slow/unreachable MDF3), the
-	// unread socket would make BESS drop every subsequent LI copy (review R3b).
-	// Enqueue-and-return decouples them; delivery failures surface to the ADMF over
-	// X1 from the delivery worker (throttled, NE-level), never a general log.
-	client := x2x3.NewAsyncSender(
-		x2x3.NewClient(cfg.MDF3, mat.ClientTLS()), 0,
-		func(error) {
-			if reporter != nil {
-				_ = reporter.ReportNEIssue(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed")
-			}
-		},
-		nil, // drops are covered by the same MDF-unreachable report from the worker
-	)
+	// X3 destinations arrive per task over LI_T3 (CreateDestination + the task's
+	// ListOfDIDs), so no delivery client can be built here — one is created per
+	// MDF3 address on first use. Delivery is asynchronous either way: shipLoop must
+	// keep draining the datapath socket and cannot block on an MDF3, or the unread
+	// socket would make BESS drop every subsequent copy (review R3b).
 	s := &liShipper{
-		sockAddr: cfg.X3SockAddr,
-		sock:     sock,
-		client:   client,
-		tasks:    tasks,
+		sockAddr:  cfg.X3SockAddr,
+		sock:      sock,
+		tasks:     tasks,
+		tlsConfig: mat.ClientTLS(),
+		senders:   make(map[string]x2x3.Sender),
 	}
 	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
 	// would pass the nil check in report() and then panic on use.
@@ -125,11 +131,10 @@ func (s *liShipper) report(issueType, description string) {
 }
 
 // shipLoop reads each teed packet — an 8-byte F-SEID tag (prepended by the BESS
-// GenericEncap) followed by the subscriber's inner IP packet — and ships it to
-// the MDF3 as an X3 PDU. The F-SEID is carried as the X3 correlation ID so the
-// MDF can correlate the content to the SMF's session xIRI. The warrant XID is
-// left zero: the SMF triggers duplication over PFCP, which carries no LI XID, so
-// correlation is by session (F-SEID); passing the XID to the UPF is a follow-up.
+// GenericEncap) followed by the subscriber's inner IP packet — and hands it to
+// ship, which resolves the F-SEID to the LI_T3 task covering that session and
+// delivers the content labelled with that task's warrant XID and correlation
+// identifier.
 func (s *liShipper) shipLoop() {
 	buf := make([]byte, 1<<16)
 
@@ -150,13 +155,88 @@ func (s *liShipper) shipLoop() {
 		}
 
 		s.checkTag(buf[:n])
-
-		// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
-		// a slow/unreachable MDF3 cannot stall the socket read (which would make
-		// BESS drop subsequent copies). Delivery failures are reported from the
-		// worker via the onError hook set in startLIShipper (review R3b).
-		_ = s.client.Send(shipperPDU(buf[:n]))
+		s.ship(buf[:n])
 	}
+}
+
+// ship delivers one duplicated packet, if the session it came from is covered by
+// an LI_T3 task.
+//
+// Duplication and tasking reach this UPF over different interfaces — the DUPL
+// apply-action over PFCP, the warrant over X1 (design D14) — so they can disagree.
+// Content whose session has no task is **dropped and reported**, never delivered:
+// the only label available for it would be a zero XID, and a mediation function
+// attributes product by XID alone and discards what it cannot attribute without
+// complaint. Shipping it would look like working interception while delivering
+// nothing usable, which is the failure R34 was (review R34).
+func (s *liShipper) ship(tagged []byte) {
+	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
+
+	task, ok := lookupTrigger(s.tasks, fseid)
+	if !ok {
+		s.report(x1.NEIssueContentUntasked, "duplicated content for a session with no interception task")
+
+		return
+	}
+
+	dest, ok := x3Destination(task)
+	if !ok {
+		s.report(x1.NEIssueInvalidConfig, "interception task carries no X3 delivery destination")
+
+		return
+	}
+
+	sender, err := s.senderFor(dest)
+	if err != nil {
+		s.report(x1.NEIssueMDFUnreachable, "X3 delivery destination could not be prepared")
+
+		return
+	}
+
+	// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
+	// a slow/unreachable MDF3 cannot stall the socket read (which would make
+	// BESS drop subsequent copies). Delivery failures are reported from the
+	// worker via the onError hook set in senderFor (review R3b).
+	_ = sender.Send(shipperPDU(tagged, task))
+}
+
+// x3Destination returns the task's X3 delivery endpoint. A destination
+// provisioned as X2Only is not one: delivering content to a signalling endpoint
+// would be a disclosure to the wrong place.
+func x3Destination(task types.InterceptTask) (string, bool) {
+	for _, d := range task.Deliveries {
+		if d.Type == types.DeliveryX3 && d.Address != "" {
+			return d.Address, true
+		}
+	}
+
+	return "", false
+}
+
+// senderFor returns the delivery client for an MDF3 address, creating it on first
+// use. Destinations arrive per task over X1, so they are not known at startup, and
+// several agencies' destinations may be in use at once — hence one sender per
+// address rather than one for the process.
+func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if sender, ok := s.senders[addr]; ok {
+		return sender, nil
+	}
+
+	if s.tlsConfig == nil {
+		return nil, errNoDeliveryCredentials
+	}
+
+	sender := x2x3.NewAsyncSender(
+		x2x3.NewClient(addr, s.tlsConfig), 0,
+		func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed") },
+		nil, // drops are covered by the same MDF-unreachable report from the worker
+	)
+	s.senders[addr] = sender
+
+	return sender, nil
 }
 
 // checkTag reports an unusable LI tag to the ADMF. The tag's fields reach liEncap
@@ -202,26 +282,27 @@ func (s *liShipper) reconnect() {
 }
 
 // shipperPDU frames one teed datapath packet as an X3 content-of-communication
-// PDU. The datapath prepends the F-SEID (correlation) and the FAR action; the
+// PDU, labelled with the identity the CC-TF supplied for that session's task. The
+// datapath prepends the F-SEID (which selects the task) and the FAR action; the
 // action distinguishes the downlink copy — teed after GTP-U encap, so a GTP-U
 // packet toward the target — from the uplink copy — decapsulated inner IP from
 // the target — which sets both the X3 payload format and the direction. Getting
 // this wrong would ship the downlink copy mislabeled as decapsulated inner IP.
-func shipperPDU(tagged []byte) *x2x3.PDU {
+func shipperPDU(tagged []byte, task types.InterceptTask) *x2x3.PDU {
 	action := tagged[fseidTagLen]
 	inner := tagged[liTagLen:]
 	pdu := &x2x3.PDU{
 		Type:    x2x3.PDUTypeX3,
 		Payload: append([]byte(nil), inner...),
 	}
-	// The BESS GenericEncap prepends the F-SEID in host (little-endian) byte order
-	// (the same metadata the notifyCP path reads little-endian). Re-encode it
-	// big-endian as the X3 correlation ID so the value and byte order match the
-	// SMF's X2 xIRI correlation ID (the serving UPF F-SEID, big-endian) and the MDF
-	// can join the two streams without depending on datapath host endianness
-	// (review R20 / design D12).
-	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
-	binary.BigEndian.PutUint64(pdu.CorrelationID[:], fseid)
+	// Both identity fields come from the LI_T3 task and neither is derived here:
+	// the XID is the warrant's (the task's ProductID, per TS 103 221-1 clause
+	// 6.2.1.2, which is what makes the content attributable at all), and the
+	// correlation identifier is the value the SMF also put on that session's xIRI,
+	// which is what lets the MDF join content to signalling. Deriving either
+	// locally is how the two streams came to disagree (review R20/R34, design D12).
+	pdu.XID = task.DeliveryXID().Bytes()
+	binary.BigEndian.PutUint64(pdu.CorrelationID[:], task.CorrelationID)
 
 	l3, format := networkLayerOf(inner)
 	pdu.Payload = append([]byte(nil), l3...)

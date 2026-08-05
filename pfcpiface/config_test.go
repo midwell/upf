@@ -150,7 +150,7 @@ func TestLoadConfigFileWithURL(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/upf.jsonc"
 	body := `{"mode":"af_packet","log_level":"info","max_req_retries":5,"resp_timeout":"2s","read_timeout":15,` +
-		`"li":{"mdf3":"10.0.0.1:42069","x3_sockaddr":"/pod-share/li_x3","cert":"/c","key":"/k","ca_cert":"/ca",` +
+		`"li":{"x3_sockaddr":"/pod-share/li_x3","cert":"/c","key":"/k","ca_cert":"/ca",` +
 		`"ne_id":"upf-1","admf_url":"https://10.0.0.1:9443/X1/ADMF","admf_id":"admf-id",` +
 		`"x1_listen":"0.0.0.0:8443","tf_id":"smf-1"}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

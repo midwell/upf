@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -17,7 +18,10 @@ import (
 	"time"
 
 	"github.com/omec-project/li/mtls"
+	"github.com/omec-project/li/store"
+	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
+	"github.com/omec-project/li/x2x3"
 )
 
 // liCA creates one throwaway LI certificate authority, writes its certificate to
@@ -296,6 +300,94 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX1ListenFailed {
 		t.Errorf("reported issues = %v, want one %s", rec.issues, x1.NEIssueX1ListenFailed)
 	}
+}
+
+// TestShipDropsContentWithoutATask is R34's guard at the point of delivery.
+// Duplication (PFCP DUPL) and tasking (LI_T3) arrive over different interfaces
+// and can disagree, so content whose session has no task must be dropped and
+// reported — never shipped with an XID no mediation function can attribute.
+func TestShipDropsContentWithoutATask(t *testing.T) {
+	const seid = 42
+
+	// [fseid(8)][action(1)][inner IP packet]
+	tagged := make([]byte, 0, 9+20)
+	tagged = binary.LittleEndian.AppendUint64(tagged, seid)
+	tagged = append(tagged, farForwardUAndDuplicate)
+	tagged = append(tagged, 0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2)
+
+	newShipper := func(rec *recordingReporter) *liShipper {
+		return &liShipper{
+			tasks:    store.New(),
+			reporter: rec,
+			senders:  make(map[string]x2x3.Sender),
+		}
+	}
+
+	t.Run("untasked session", func(t *testing.T) {
+		rec := &recordingReporter{}
+		s := newShipper(rec)
+
+		s.ship(tagged)
+
+		if len(s.senders) != 0 {
+			t.Error("a delivery client was created for content with no interception task")
+		}
+
+		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueContentUntasked {
+			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueContentUntasked)
+		}
+	})
+
+	t.Run("tasked but no X3 destination", func(t *testing.T) {
+		rec := &recordingReporter{}
+		s := newShipper(rec)
+		// A task whose only destination is for signalling: content must not be sent
+		// to an X2 endpoint.
+		s.tasks.Activate(types.InterceptTask{
+			XID:           "11111111-1111-4111-8111-111111111111",
+			ProductID:     "22222222-2222-4222-8222-222222222222",
+			CorrelationID: 7,
+			Target:        types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"},
+			Products:      []types.ProductType{types.ProductCC},
+			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX2, Address: "10.0.0.1:42069"}},
+		})
+
+		s.ship(tagged)
+
+		if len(s.senders) != 0 {
+			t.Error("content was prepared for delivery with no X3 destination")
+		}
+
+		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueInvalidConfig {
+			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueInvalidConfig)
+		}
+	})
+
+	t.Run("no delivery credentials", func(t *testing.T) {
+		rec := &recordingReporter{}
+		s := newShipper(rec)
+		s.tasks.Activate(types.InterceptTask{
+			XID:           "11111111-1111-4111-8111-111111111111",
+			ProductID:     "22222222-2222-4222-8222-222222222222",
+			CorrelationID: 7,
+			Target:        types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"},
+			Products:      []types.ProductType{types.ProductCC},
+			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
+		})
+
+		s.ship(tagged)
+
+		// Intercept product is never delivered over an unauthenticated connection,
+		// so with no LI credentials loaded there is no sender and the fault is
+		// reported instead.
+		if len(s.senders) != 0 {
+			t.Error("a delivery client was created without LI credentials")
+		}
+
+		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueMDFUnreachable {
+			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueMDFUnreachable)
+		}
+	})
 }
 
 // recordingReporter captures the NE issues raised, so a test can assert what the

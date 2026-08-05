@@ -53,7 +53,6 @@ type Conf struct {
 // behaves exactly as before. The X3 socket is the userspace UnixSocketPort the
 // BESS pipeline tees duplicated packets to (see conf).
 type LiConfig struct {
-	MDF3       string `json:"mdf3"`        // X3 delivery destination (MDF3 "host:port")
 	X3SockAddr string `json:"x3_sockaddr"` // unixpacket socket the datapath tees LI copies to
 	Cert       string `json:"cert"`        // X0 LI PKI: this NE's certificate
 	Key        string `json:"key"`         // its private key
@@ -173,7 +172,6 @@ func validateConf(conf Conf) error {
 	// healthy while performing no interception), which for LI is a compliance risk.
 	if conf.Li != nil {
 		for name, val := range map[string]string{
-			"li.mdf3":        conf.Li.MDF3,
 			"li.x3_sockaddr": conf.Li.X3SockAddr,
 			"li.cert":        conf.Li.Cert,
 			"li.key":         conf.Li.Key,
