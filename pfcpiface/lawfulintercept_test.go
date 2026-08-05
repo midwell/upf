@@ -8,6 +8,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
 	"github.com/omec-project/upf-epc/logger"
@@ -143,35 +144,53 @@ func TestPayloadFormatOf(t *testing.T) {
 }
 
 // TestShipperPDU checks that a teed datapath packet ([fseid(8)][action(1)][pkt])
-// is framed as a valid X3 PDU: F-SEID as correlation id, the inner packet as
-// payload, and — critically (finding R2) — the payload format + direction set
-// from the FAR action, so the downlink copy is labeled GTP-U (not mislabeled as
-// decapsulated inner IP) and the uplink copy is labeled inner IP.
+// is framed as a valid X3 PDU: the warrant XID and correlation identifier taken
+// from the session's LI_T3 task, the inner packet as payload, and — critically
+// (finding R2) — the payload format + direction set from the FAR action, so the
+// downlink copy is labeled GTP-U (not mislabeled as decapsulated inner IP) and
+// the uplink copy is labeled inner IP.
 func TestShipperPDU(t *testing.T) {
 	fseid := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	// The identity a CC-TF supplied for this session. Neither field is derived
+	// from the packet: the XID is the warrant's, the correlation is the value the
+	// SMF also put on the session's xIRI (review R34, design D12).
+	task := types.InterceptTask{
+		XID:           "11111111-1111-4111-8111-111111111111",
+		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		CorrelationID: 0x2632898145f4d191,
+	}
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
 	tag := func(action byte) []byte {
 		return append(append(append([]byte{}, fseid...), action), inner...)
 	}
 
 	// Uplink (action 6): decapsulated inner IP → IPv4 + FromTarget.
-	ul := shipperPDU(tag(farForwardUAndDuplicate))
+	ul := shipperPDU(tag(farForwardUAndDuplicate), task)
 	if ul.Type != x2x3.PDUTypeX3 {
 		t.Errorf("PDU type = %d, want X3", ul.Type)
 	}
 	if ul.PayloadFormat != x2x3.PayloadFormatIPv4 || ul.Direction != x2x3.DirectionFromTarget {
 		t.Errorf("uplink: format=%d direction=%d, want IPv4/FromTarget", ul.PayloadFormat, ul.Direction)
 	}
-	// The datapath prepends the F-SEID in host (little-endian) byte order; the X3
-	// correlation ID carries it big-endian so it matches the SMF's X2 correlation
-	// ID for the session (review R20 / design D12) — i.e. the tag bytes reversed.
-	wantCorr := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+	// The correlation identifier is the task's, big-endian, so it matches the value
+	// the SMF put on that session's X2 xIRI (review R20 / design D12). It is no
+	// longer derived from the datapath tag — the tag only selects the task.
+	wantCorr := []byte{0x26, 0x32, 0x89, 0x81, 0x45, 0xf4, 0xd1, 0x91}
 	if !bytes.Equal(ul.CorrelationID[:], wantCorr) || !bytes.Equal(ul.Payload, inner) {
 		t.Errorf("uplink: correlation=% x (want % x) payload=% x", ul.CorrelationID, wantCorr, ul.Payload)
 	}
+	// The XID is the warrant's, taken from the task's ProductID. A zero XID here is
+	// content no mediation function can attribute, which is the defect R34 was.
+	wantXID := task.ProductID.Bytes()
+	if ul.XID != wantXID {
+		t.Errorf("uplink: XID = %x, want the warrant XID %x", ul.XID, wantXID)
+	}
+	if ul.XID == ([16]byte{}) {
+		t.Error("uplink: XID is zero — the content would be unattributable")
+	}
 
 	// Downlink (action 5): teed post-encap → GTP-U + ToTarget (must NOT be labeled inner IP).
-	dl := shipperPDU(tag(farForwardDAndDuplicate))
+	dl := shipperPDU(tag(farForwardDAndDuplicate), task)
 	if dl.PayloadFormat != x2x3.PayloadFormatGTPU || dl.Direction != x2x3.DirectionToTarget {
 		t.Errorf("downlink: format=%d direction=%d, want GTPU/ToTarget", dl.PayloadFormat, dl.Direction)
 	}
@@ -246,7 +265,10 @@ func TestShipperPDUStripsLinkLayer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pdu := shipperPDU(tag(tt.action, tt.payload))
+			pdu := shipperPDU(tag(tt.action, tt.payload), types.InterceptTask{
+				ProductID:     "26328981-45f4-4191-8000-000000000000",
+				CorrelationID: 1,
+			})
 			if pdu.PayloadFormat != tt.wantFormat {
 				t.Errorf("payload format = %d, want %d", pdu.PayloadFormat, tt.wantFormat)
 			}
