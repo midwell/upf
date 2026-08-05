@@ -849,7 +849,7 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	// Lawful Interception CC-POI: start the X3 shipper only when the opt-in Li
 	// config is present; silent otherwise.
 	if conf.Li != nil {
-		b.liShipper, err = startLIShipper(conf.Li)
+		b.liShipper, err = startLIShipper(conf.Li, b.client)
 		if err != nil {
 			// Do not name the subsystem or echo err (which carries LI-identifying
 			// text) on the general BESS log: that would reveal to an unauthorized

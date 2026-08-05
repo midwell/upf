@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
+
 	"github.com/omec-project/li/mtls"
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
@@ -68,7 +70,7 @@ type neIssueReporter interface {
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
 // the MDF3 (mutual TLS), and starts the shipping loop.
-func startLIShipper(cfg *LiConfig) (*liShipper, error) {
+func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, error) {
 	mat, err := mtls.Load(cfg.Cert, cfg.Key, cfg.CACert)
 	if err != nil {
 		return nil, err
@@ -118,6 +120,10 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 		s.reporter = reporter
 	}
 	go s.shipLoop()
+	// Loss between the datapath and this shipper is invisible from here — a copy
+	// discarded on the socket write never arrives — so it is watched from the only
+	// vantage point that can see it, the datapath's own accounting (review R36).
+	startLIPuntMonitor(client, issueReporter)
 
 	return s, nil
 }
@@ -232,7 +238,11 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	sender := x2x3.NewAsyncSender(
 		x2x3.NewClient(addr, s.tlsConfig), 0,
 		func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed") },
-		nil, // drops are covered by the same MDF-unreachable report from the worker
+		// A full queue is lost content, and it is not covered by the delivery-failure
+		// report above: that fires when the MDF is unreachable, whereas the queue
+		// overflows when the MDF is reachable but slower than the offered rate. Left
+		// unreported, the product is silently incomplete (review R36).
+		func() { s.report(x1.NEIssueX3ContentLost, "content copies dropped from the delivery queue") },
 	)
 	s.senders[addr] = sender
 
