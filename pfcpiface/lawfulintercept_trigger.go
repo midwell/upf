@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"time"
+
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
@@ -46,9 +48,18 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// such a trigger would mean duplicating a subject's traffic and discarding every
 	// copy while the triggering function is told interception is running, which is
 	// exactly what happened before review R37.
+	// The purge hook is what keeps the fail-safe from being silent: interception
+	// stopping is the safe outcome, but only if somebody is told it happened.
+	// Reports are throttled per type, so a purge of many tasks yields one.
 	srv := x1.NewServer(tasks, cfg.NEID,
 		x1.WithADMF(cfg.TFID),
-		x1.RequireResolvableDIDs())
+		x1.RequireResolvableDIDs(),
+		x1.OnDeactivate(func(types.InterceptTask) {
+			if reporter != nil {
+				_ = reporter.ReportNEIssue(x1.NEIssueTaskingPurged,
+					"content interception tasking removed; the triggering function went quiet")
+			}
+		}))
 
 	ln, err := net.Listen("tcp", cfg.X1Listen)
 	if err != nil {
@@ -76,6 +87,19 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	}
 	// Certificates come from TLSConfig, so the file arguments are empty.
 	go func() { _ = httpSrv.ServeTLS(ln, "", "") }()
+
+	// The keepalive fail-safe (TS 103 221-1), applied to the triggering interface
+	// for the reason it exists: a triggering function that goes away must not leave
+	// interception running behind it. The same mechanism already guards the ADMF
+	// path on the AMF and SMF (design D11 Part B).
+	if cfg.TriggerKeepalive != "" {
+		timeout, err := time.ParseDuration(cfg.TriggerKeepalive)
+		if err != nil || timeout <= 0 {
+			return nil, fmt.Errorf("li: invalid trigger_keepalive %q", cfg.TriggerKeepalive)
+		}
+
+		go srv.WatchKeepalive(timeout)
+	}
 
 	return tasks, nil
 }
