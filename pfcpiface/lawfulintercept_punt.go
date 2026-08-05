@@ -37,16 +37,8 @@ const (
 	// deliberately slow enough to cost nothing on a busy datapath.
 	liPuntPollInterval = 30 * time.Second
 
-	// liEgressModule is the module immediately upstream of the egress port, and
-	// liX3Port the port itself. Both names come from the pipeline configuration; if
-	// a deployment renames them the check reports nothing rather than guessing.
-	//
-	// It must be the *adjacent* module, not the merge further upstream: the pipeline
-	// now buffers copies before the port, and packets sitting in that buffer are
-	// in flight rather than lost. Comparing across the buffer would report a burst
-	// as loss and then "recover" as it drained.
-	liEgressModule = "liQueue"
-	liX3Port       = "liX3"
+	// liX3Port is the port the duplicated copies leave through.
+	liX3Port = "liX3"
 )
 
 // bessCounters is the slice of the bessd API this monitor needs: two counter
@@ -58,11 +50,25 @@ type bessCounters interface {
 	GetPortStats(ctx context.Context, in *pb.GetPortStatsRequest, opts ...grpc.CallOption) (*pb.GetPortStatsResponse, error)
 }
 
+// liEgressModules are the modules that may sit immediately upstream of the egress
+// port, in preference order.
+//
+// Whichever is *adjacent* to the port is the right one to compare against: packets
+// between it and the port are either sent or discarded, never in flight. A
+// pipeline that buffers copies has the queue there; one that does not has the
+// merge. Accepting both means the accounting keeps working when the datapath
+// configuration and this binary are not upgraded in lockstep — which is not
+// hypothetical, since they ship in different images.
+var liEgressModules = []string{"liQueue", "liMerge"}
+
 // liPuntMonitor watches for content discarded between the datapath and the
 // shipper.
 type liPuntMonitor struct {
 	client   bessCounters
 	reporter neIssueReporter
+	// blind records that the egress accounting could not be read, so the ADMF is
+	// told once rather than on every poll.
+	blind bool
 	// lost is the cumulative gap observed so far. Only growth is reported: the
 	// absolute figure includes anything lost before this monitor started, and a
 	// steady gap is one fault, not a fault per poll.
@@ -131,17 +137,34 @@ func (m *liPuntMonitor) check() {
 // handedToPort returns the number of duplicated packets the datapath passed to the
 // egress port. Anything the port did not then send was discarded on the write.
 func (m *liPuntMonitor) handedToPort() (uint64, bool) {
+	for _, name := range liEgressModules {
+		if n, ok := m.modulePackets(name); ok {
+			return n, true
+		}
+	}
+
+	// Neither module is present, so this element cannot tell whether content is
+	// being discarded on its way in. That is not "no loss" — it is no longer
+	// knowing, which the ADMF should hear about once rather than never (review R36).
+	if !m.blind {
+		m.blind = true
+		_ = m.reporter.ReportNEIssue(x1.NEIssueInvalidConfig,
+			"content egress accounting unavailable; loss at the datapath egress cannot be detected")
+	}
+
+	return 0, false
+}
+
+// modulePackets returns the packets a module has passed out, and whether it could
+// be read at all.
+func (m *liPuntMonitor) modulePackets(name string) (uint64, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
 
-	res, err := m.client.GetModuleInfo(ctx, &pb.GetModuleInfoRequest{Name: liEgressModule})
+	res, err := m.client.GetModuleInfo(ctx, &pb.GetModuleInfoRequest{Name: name})
 	if err != nil || res.GetError() != nil {
 		return 0, false
 	}
-
-	// One output gate, to the egress port. Summing is still correct if the
-	// pipeline ever fans out.
-	var total uint64
 
 	gates := res.GetOgates()
 	if len(gates) == 0 {
@@ -151,6 +174,8 @@ func (m *liPuntMonitor) handedToPort() (uint64, bool) {
 		return 0, false
 	}
 
+	// Summing stays correct if the pipeline ever fans out.
+	var total uint64
 	for _, g := range gates {
 		total += g.GetPkts()
 	}
