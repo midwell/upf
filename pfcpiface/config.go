@@ -71,6 +71,16 @@ type LiConfig struct {
 	// into the peer's certificate (TS 103 221-1 clause 8.2.4), so a certificate
 	// from the LI CA does not by itself grant the authority to task this UPF.
 	TFID string `json:"tf_id"`
+	// X3RcvBuf is the receive buffer requested on the datapath egress socket, in
+	// bytes; 0 leaves the kernel default. Deepening it absorbs bursts of duplicated
+	// packets that would otherwise be discarded on the datapath's write.
+	//
+	// It is only half the story, and the other half is not in this process: an
+	// AF_UNIX SEQPACKET socket rejects a write once its queue holds
+	// net.unix.max_dgram_qlen datagrams — 10 by default, regardless of buffer size.
+	// That sysctl is per network namespace and must be raised before this socket is
+	// created, so it belongs to the deployment (see li/README.md).
+	X3RcvBuf int `json:"x3_rcvbuf"`
 }
 
 // QciQosConfig : Qos configured attributes.
