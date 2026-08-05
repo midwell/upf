@@ -228,7 +228,7 @@ func (s *liShipper) shipLoop() {
 			// reported rather than left to be inferred from a counter nobody reads
 			// (review R36).
 			s.recycle(out)
-			s.report(x1.NEIssueX3ContentLost, "content copies dropped before framing")
+			s.report(x1.NEIssueX3FramingLost, "content copies dropped before framing")
 		}
 	}
 }
@@ -337,7 +337,7 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 		// report above: that fires when the MDF is unreachable, whereas the queue
 		// overflows when the MDF is reachable but slower than the offered rate. Left
 		// unreported, the product is silently incomplete (review R36).
-		func() { s.report(x1.NEIssueX3ContentLost, "content copies dropped from the delivery queue") },
+		func() { s.report(x1.NEIssueX3DeliveryLost, "content copies dropped from the delivery queue") },
 	)
 	s.senders[addr] = sender
 

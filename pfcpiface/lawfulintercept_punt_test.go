@@ -16,7 +16,7 @@ import (
 
 // fakeCounters serves whatever the test wants the datapath's accounting to say.
 type fakeCounters struct {
-	teed, sent uint64
+	handed, sent uint64
 	// noGates reproduces a pipeline whose gate tracking is off, where the merge
 	// module reports no gate accounting at all.
 	noGates bool
@@ -31,7 +31,7 @@ func (f *fakeCounters) GetModuleInfo(_ context.Context, _ *pb.GetModuleInfoReque
 
 	res := &pb.GetModuleInfoResponse{}
 	if !f.noGates {
-		res.Ogates = []*pb.GetModuleInfoResponse_OGate{{Pkts: f.teed}}
+		res.Ogates = []*pb.GetModuleInfoResponse_OGate{{Pkts: f.handed}}
 	}
 
 	return res, nil
@@ -49,7 +49,7 @@ func (f *fakeCounters) GetPortStats(_ context.Context, _ *pb.GetPortStatsRequest
 // on the way out of the datapath has to reach the ADMF, and has to do so without
 // re-reporting a gap that has stopped growing.
 func TestPuntMonitorReportsNewLossOnly(t *testing.T) {
-	c := &fakeCounters{teed: 1000, sent: 1000}
+	c := &fakeCounters{handed: 1000, sent: 1000}
 	rec := &recordingReporter{}
 	m := &liPuntMonitor{client: c, reporter: rec}
 
@@ -61,16 +61,16 @@ func TestPuntMonitorReportsNewLossOnly(t *testing.T) {
 	}
 
 	// A gap opens.
-	c.teed, c.sent = 2000, 1900
+	c.handed, c.sent = 2000, 1900
 	m.check()
 
-	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX3ContentLost {
-		t.Fatalf("reported %v, want one %s", rec.issues, x1.NEIssueX3ContentLost)
+	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX3PuntLost {
+		t.Fatalf("reported %v, want one %s", rec.issues, x1.NEIssueX3PuntLost)
 	}
 
 	// Traffic continues with the same gap: already reported, so silent. Re-reporting
 	// a static gap on every poll would bury the report that matters in noise.
-	c.teed, c.sent = 3000, 2900
+	c.handed, c.sent = 3000, 2900
 	m.check()
 
 	if len(rec.issues) != 1 {
@@ -78,7 +78,7 @@ func TestPuntMonitorReportsNewLossOnly(t *testing.T) {
 	}
 
 	// The gap widens: that is new loss and must be reported again.
-	c.teed, c.sent = 4000, 3800
+	c.handed, c.sent = 4000, 3800
 	m.check()
 
 	if len(rec.issues) != 2 {
@@ -91,7 +91,7 @@ func TestPuntMonitorReportsNewLossOnly(t *testing.T) {
 // acceptable; reporting nothing because loss was misread as recovery is not.
 func TestPuntMonitorHandlesRestartAndUnknowns(t *testing.T) {
 	t.Run("counters read backwards across a restart", func(t *testing.T) {
-		c := &fakeCounters{teed: 5000, sent: 4000}
+		c := &fakeCounters{handed: 5000, sent: 4000}
 		rec := &recordingReporter{}
 		m := &liPuntMonitor{client: c, reporter: rec}
 
@@ -100,12 +100,12 @@ func TestPuntMonitorHandlesRestartAndUnknowns(t *testing.T) {
 		// The datapath restarted: the port's counter now exceeds the module's,
 		// which is impossible within one lifetime, so the comparison is meaningless
 		// rather than a recovery.
-		c.teed, c.sent = 10, 500
+		c.handed, c.sent = 10, 500
 		m.check()
 
 		// The baseline must have been dropped, so the next genuine gap is reported
 		// rather than being hidden under the pre-restart figure.
-		c.teed, c.sent = 1000, 950
+		c.handed, c.sent = 1000, 950
 		m.check()
 
 		if len(rec.issues) != 2 {

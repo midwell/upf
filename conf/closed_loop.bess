@@ -308,6 +308,9 @@ packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
 # flow-based volume measurement is enabled — so a tasked subscriber's usage is
 # measured exactly as an untasked one's is.
 li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
+# Depth of the in-datapath buffer in front of the egress socket. Packets, not
+# bytes. Overridable so a deployment expecting heavy targets can raise it.
+LI_EGRESS_QUEUE_PACKETS = int(os.getenv('LI_EGRESS_QUEUE_PACKETS', '16384'))
 liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # Prepend the F-SEID (correlation) and the FAR action to each LI copy. The action
 # byte lets the Go X3 shipper tell the downlink copy (teed after GTP-U encap, so a
@@ -322,7 +325,25 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # correlation in packet data, which copy() does duplicate. The subscriber keeps
 # gate 0 (the original, metadata intact) because the forward tail still needs
 # those attributes for volume measurement.
-liMerge::Merge() -> liX3out::PortOut(port='liX3')
+# Buffer the duplicated copies inside the datapath before handing them to the
+# userspace shipper.
+#
+# Without this the egress is a hard cliff rather than a queue: the pipeline writes
+# packet batches of up to 32 to an AF_UNIX SEQPACKET socket whose receive queue
+# holds net.unix.max_dgram_qlen datagrams — 10 by default — and no reader can be
+# scheduled part-way through a batch, so any batch arriving on a non-empty queue
+# loses packets by arithmetic. What is lost is intercept product, and nothing
+# downstream can recover or even see it (review R36).
+#
+# A Queue turns that into elastic buffering with its own drain task, and its
+# overflow is counted where a failed socket write is not. Sized for a burst rather
+# than for sustained overload: if the shipper cannot keep up on average, no queue
+# depth saves it and the fault is reported instead.
+liQueue::Queue(size=LI_EGRESS_QUEUE_PACKETS)
+liMerge::Merge() -> liQueue -> liX3out::PortOut(port='liX3')
+# The Queue is drained by its own task, so it needs a worker to run on. Worker 0
+# always exists; the LI egress is low-rate next to the forwarding path.
+liQueue.attach_task(wid=0)
 
 executeFAR:farForwardDAndDuplicateAction \
     -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'fwd_action'}]) \

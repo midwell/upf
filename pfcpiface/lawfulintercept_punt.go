@@ -37,12 +37,16 @@ const (
 	// deliberately slow enough to cost nothing on a busy datapath.
 	liPuntPollInterval = 30 * time.Second
 
-	// liMergeModule is the module that merges both duplication directions before
-	// the egress port, and liX3Port the port it writes to. Both names come from the
-	// pipeline configuration; if a deployment renames them, the check reports
-	// nothing rather than guessing (and says so once, over X1).
-	liMergeModule = "liMerge"
-	liX3Port      = "liX3"
+	// liEgressModule is the module immediately upstream of the egress port, and
+	// liX3Port the port itself. Both names come from the pipeline configuration; if
+	// a deployment renames them the check reports nothing rather than guessing.
+	//
+	// It must be the *adjacent* module, not the merge further upstream: the pipeline
+	// now buffers copies before the port, and packets sitting in that buffer are
+	// in flight rather than lost. Comparing across the buffer would report a burst
+	// as loss and then "recover" as it drained.
+	liEgressModule = "liQueue"
+	liX3Port       = "liX3"
 )
 
 // bessCounters is the slice of the bessd API this monitor needs: two counter
@@ -88,7 +92,7 @@ func (m *liPuntMonitor) run() {
 
 // check reads both counters once and reports any new shortfall.
 func (m *liPuntMonitor) check() {
-	teed, ok := m.mergedPackets()
+	handed, ok := m.handedToPort()
 	if !ok {
 		return
 	}
@@ -101,13 +105,13 @@ func (m *liPuntMonitor) check() {
 	// The port cannot have sent more than it was given; if it appears to have, the
 	// counters were read across a datapath restart and the comparison is
 	// meaningless rather than reassuring.
-	if sent > teed {
+	if sent > handed {
 		m.lost = 0
 
 		return
 	}
 
-	lost := teed - sent
+	lost := handed - sent
 	if lost <= m.lost {
 		// No new loss since the last poll. A gap that stops growing has already
 		// been reported.
@@ -120,17 +124,17 @@ func (m *liPuntMonitor) check() {
 	// NE-level only: how much content was lost, never whose. The ADMF can act on
 	// this — reduce the tasking, provision more capacity, or accept the gap — but
 	// only if it is told.
-	_ = m.reporter.ReportNEIssue(x1.NEIssueX3ContentLost,
+	_ = m.reporter.ReportNEIssue(x1.NEIssueX3PuntLost,
 		"content copies discarded at the datapath egress socket")
 }
 
-// mergedPackets returns the number of duplicated packets the datapath handed to
-// the egress port.
-func (m *liPuntMonitor) mergedPackets() (uint64, bool) {
+// handedToPort returns the number of duplicated packets the datapath passed to the
+// egress port. Anything the port did not then send was discarded on the write.
+func (m *liPuntMonitor) handedToPort() (uint64, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
 
-	res, err := m.client.GetModuleInfo(ctx, &pb.GetModuleInfoRequest{Name: liMergeModule})
+	res, err := m.client.GetModuleInfo(ctx, &pb.GetModuleInfoRequest{Name: liEgressModule})
 	if err != nil || res.GetError() != nil {
 		return 0, false
 	}
