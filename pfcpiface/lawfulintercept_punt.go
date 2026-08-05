@@ -7,6 +7,8 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/grpc"
+
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 
 	"github.com/omec-project/li/x1"
@@ -43,10 +45,19 @@ const (
 	liX3Port      = "liX3"
 )
 
+// bessCounters is the slice of the bessd API this monitor needs: two counter
+// reads. Narrowed to those so the comparison logic can be tested without a
+// datapath, since the logic — what counts as new loss, and what counts as a
+// restart rather than a recovery — is where the mistakes would be.
+type bessCounters interface {
+	GetModuleInfo(ctx context.Context, in *pb.GetModuleInfoRequest, opts ...grpc.CallOption) (*pb.GetModuleInfoResponse, error)
+	GetPortStats(ctx context.Context, in *pb.GetPortStatsRequest, opts ...grpc.CallOption) (*pb.GetPortStatsResponse, error)
+}
+
 // liPuntMonitor watches for content discarded between the datapath and the
 // shipper.
 type liPuntMonitor struct {
-	client   pb.BESSControlClient
+	client   bessCounters
 	reporter neIssueReporter
 	// lost is the cumulative gap observed so far. Only growth is reported: the
 	// absolute figure includes anything lost before this monitor started, and a
@@ -57,7 +68,7 @@ type liPuntMonitor struct {
 // startLIPuntMonitor begins comparing the LI egress accounting. It is silent when
 // no reporting channel is configured, because the finding it produces has nowhere
 // else it may legitimately go — a general log is exactly where it must not appear.
-func startLIPuntMonitor(client pb.BESSControlClient, reporter neIssueReporter) {
+func startLIPuntMonitor(client bessCounters, reporter neIssueReporter) {
 	if client == nil || reporter == nil {
 		return
 	}
