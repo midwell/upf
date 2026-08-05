@@ -41,6 +41,21 @@ const (
 	maxReconnectDelay = 5 * time.Second
 )
 
+// Punting copies to userspace has a ceiling, and the socket that carries them
+// holds only as many datagrams as net.unix.max_dgram_qlen allows — 10 by default,
+// which a burst fills instantly. Everything the read loop does before returning to
+// Read is time that queue spends filling, so the loop does nothing but read and
+// hand off; parsing, task lookup and PDU framing happen on workers.
+const (
+	// liFrameQueueDepth absorbs a burst that arrives faster than it can be framed.
+	liFrameQueueDepth = 4096
+	// liFrameWorkers frame concurrently. Delivery itself is already asynchronous;
+	// this covers the per-packet work in front of it.
+	liFrameWorkers = 4
+	// liMaxPunted bounds a single copy read from the socket.
+	liMaxPunted = 1 << 16
+)
+
 type liShipper struct {
 	sockAddr string
 	sock     net.Conn
@@ -54,6 +69,11 @@ type liShipper struct {
 
 	mu      sync.Mutex
 	senders map[string]x2x3.Sender // per MDF3 address, created on first use
+
+	// punted carries copies from the socket read to the framing workers, and free
+	// recycles the buffers so the hot path does not allocate per packet.
+	punted chan []byte
+	free   chan []byte
 }
 
 // errNoDeliveryCredentials means X3 delivery was attempted with no LI client
@@ -81,6 +101,8 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 	if err != nil {
 		return nil, err
 	}
+
+	setPuntReadBuffer(sock, cfg.X3RcvBuf)
 
 	var reporter *x1.Reporter
 	if cfg.AdmfURL != "" {
@@ -113,12 +135,18 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 		tasks:     tasks,
 		tlsConfig: mat.ClientTLS(),
 		senders:   make(map[string]x2x3.Sender),
+		punted:    make(chan []byte, liFrameQueueDepth),
+		free:      make(chan []byte, liFrameQueueDepth),
 	}
 	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
 	// would pass the nil check in report() and then panic on use.
 	if reporter != nil {
 		s.reporter = reporter
 	}
+	for range liFrameWorkers {
+		go s.frameLoop()
+	}
+
 	go s.shipLoop()
 	// Loss between the datapath and this shipper is invisible from here — a copy
 	// discarded on the socket write never arrives — so it is watched from the only
@@ -126,6 +154,32 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 	startLIPuntMonitor(client, issueReporter)
 
 	return s, nil
+}
+
+// setPuntReadBuffer asks the kernel for a deeper receive buffer on the egress
+// socket, so a burst of duplicated packets is absorbed rather than discarded on
+// the datapath's write.
+//
+// On its own this achieves little, and it is worth being explicit about why: an
+// AF_UNIX SEQPACKET socket refuses a write once its receive queue holds
+// net.unix.max_dgram_qlen *datagrams*, which defaults to 10 and is not affected by
+// the buffer size at all. The byte budget only starts to bind after that queue
+// limit is raised, which is a deployment matter — the sysctl is per network
+// namespace, so the pod needs it set before this socket is created. Measured
+// effect of raising it from 10 to 4096: egress loss under burst fell by about half
+// (review R36).
+func setPuntReadBuffer(sock net.Conn, size int) {
+	if size <= 0 {
+		return
+	}
+
+	if c, ok := sock.(*net.UnixConn); ok {
+		// Best-effort: the kernel caps the request at net.core.rmem_max, and a
+		// smaller-than-requested buffer is still better than the default. Nothing is
+		// logged either way — a failure here degrades capacity, and capacity
+		// problems are reported by the egress monitor rather than announced.
+		_ = c.SetReadBuffer(size)
+	}
 }
 
 // report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no
@@ -142,7 +196,7 @@ func (s *liShipper) report(issueType, description string) {
 // delivers the content labelled with that task's warrant XID and correlation
 // identifier.
 func (s *liShipper) shipLoop() {
-	buf := make([]byte, 1<<16)
+	buf := make([]byte, liMaxPunted)
 
 	for {
 		n, err := s.sock.Read(buf)
@@ -153,6 +207,7 @@ func (s *liShipper) shipLoop() {
 			// interception resumes when the datapath returns.
 			s.report(x1.NEIssueX3EgressDown, "X3 egress socket unavailable")
 			s.reconnect()
+
 			continue
 		}
 
@@ -160,8 +215,48 @@ func (s *liShipper) shipLoop() {
 			continue // tag only, no user-plane payload
 		}
 
-		s.checkTag(buf[:n])
-		s.ship(buf[:n])
+		// Copy out of the read buffer and hand off. The read buffer is reused, so
+		// the copy is necessary; doing anything more here — parsing, a task lookup,
+		// framing a PDU — is time the socket queue spends filling behind us, and
+		// what it overflows with is intercept product nobody can recover.
+		out := append(s.buffer()[:0], buf[:n]...)
+
+		select {
+		case s.punted <- out:
+		default:
+			// Framing cannot keep up. This is lost content like any other, so it is
+			// reported rather than left to be inferred from a counter nobody reads
+			// (review R36).
+			s.recycle(out)
+			s.report(x1.NEIssueX3ContentLost, "content copies dropped before framing")
+		}
+	}
+}
+
+// frameLoop turns punted copies into X3 PDUs and hands them to delivery.
+func (s *liShipper) frameLoop() {
+	for b := range s.punted {
+		s.checkTag(b)
+		s.ship(b)
+		s.recycle(b)
+	}
+}
+
+// buffer takes a recycled buffer, or allocates when the pool is empty.
+func (s *liShipper) buffer() []byte {
+	select {
+	case b := <-s.free:
+		return b
+	default:
+		return make([]byte, 0, liMaxPunted)
+	}
+}
+
+// recycle returns a buffer for reuse, dropping it if the pool is full.
+func (s *liShipper) recycle(b []byte) {
+	select {
+	case s.free <- b:
+	default:
 	}
 }
 
@@ -301,10 +396,7 @@ func (s *liShipper) reconnect() {
 func shipperPDU(tagged []byte, task types.InterceptTask) *x2x3.PDU {
 	action := tagged[fseidTagLen]
 	inner := tagged[liTagLen:]
-	pdu := &x2x3.PDU{
-		Type:    x2x3.PDUTypeX3,
-		Payload: append([]byte(nil), inner...),
-	}
+	pdu := &x2x3.PDU{Type: x2x3.PDUTypeX3}
 	// Both identity fields come from the LI_T3 task and neither is derived here:
 	// the XID is the warrant's (the task's ProductID, per TS 103 221-1 clause
 	// 6.2.1.2, which is what makes the content attributable at all), and the
