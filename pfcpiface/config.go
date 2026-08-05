@@ -61,6 +61,17 @@ type LiConfig struct {
 	NEID       string `json:"ne_id"`       // this NE's identifier (for X1 issue reports)
 	AdmfURL    string `json:"admf_url"`    // ADMF X1 endpoint for NE-initiated issue reports (optional)
 	AdmfID     string `json:"admf_id"`     // responsible ADMF identifier (for reports)
+	// X1Listen is the address the CC-POI's LI_T3 triggering interface binds. The
+	// CC Triggering Function in the SMF tasks this UPF over it (TS 33.128 clause
+	// 6.2.3.3), which is where the warrant XID, the correlation identifier and the
+	// X3 destination come from; without it the datapath can duplicate traffic but
+	// nothing can attribute the result.
+	X1Listen string `json:"x1_listen"`
+	// TFID is the identifier of the CC Triggering Function authorised to task this
+	// CC-POI — the SMF's, not the ADMF's. It is checked against the identity bound
+	// into the peer's certificate (TS 103 221-1 clause 8.2.4), so a certificate
+	// from the LI CA does not by itself grant the authority to task this UPF.
+	TFID string `json:"tf_id"`
 }
 
 // QciQosConfig : Qos configured attributes.
@@ -167,6 +178,12 @@ func validateConf(conf Conf) error {
 			"li.cert":        conf.Li.Cert,
 			"li.key":         conf.Li.Key,
 			"li.ca_cert":     conf.Li.CACert,
+			// The triggering interface is not optional either: a CC-POI with no
+			// LI_T3 listener receives no warrant identity, so it can only produce
+			// content no mediation function is able to attribute (review R34).
+			"li.x1_listen": conf.Li.X1Listen,
+			"li.tf_id":     conf.Li.TFID,
+			"li.ne_id":     conf.Li.NEID,
 		} {
 			if val == "" {
 				return ErrInvalidArgumentWithReason(name, val, "required when li is configured")

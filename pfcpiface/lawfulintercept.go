@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/omec-project/li/mtls"
+	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
 )
@@ -39,6 +40,10 @@ type liShipper struct {
 	sock     net.Conn
 	client   x2x3.Sender
 	reporter neIssueReporter // nil when NE-initiated reporting is not configured
+	// tasks holds the LI_T3 triggers installed by the CC-TF, indexed by the
+	// F-SEID the datapath tags onto duplicated packets. It is what supplies the
+	// warrant XID and correlation identifier for each copy.
+	tasks *store.Store
 }
 
 // neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
@@ -65,6 +70,22 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 	if cfg.AdmfURL != "" {
 		reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
 	}
+
+	// Bring up the LI_T3 triggering interface before the shipping loop: without it
+	// no content can be attributed to a warrant, so there is nothing worth shipping.
+	// A typed-nil reporter would defeat the nil checks inside, so pass the
+	// interface only when one is configured.
+	var issueReporter neIssueReporter
+	if reporter != nil {
+		issueReporter = reporter
+	}
+
+	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter)
+	if err != nil {
+		_ = sock.Close()
+
+		return nil, err
+	}
 	// Deliver X3 asynchronously: shipLoop must keep draining the datapath socket,
 	// so it cannot block on the MDF3. If Send blocked (slow/unreachable MDF3), the
 	// unread socket would make BESS drop every subsequent LI copy (review R3b).
@@ -83,6 +104,7 @@ func startLIShipper(cfg *LiConfig) (*liShipper, error) {
 		sockAddr: cfg.X3SockAddr,
 		sock:     sock,
 		client:   client,
+		tasks:    tasks,
 	}
 	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
 	// would pass the nil check in report() and then panic on use.
