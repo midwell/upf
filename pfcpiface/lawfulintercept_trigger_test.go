@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -323,8 +324,8 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
-	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX1ListenFailed {
-		t.Errorf("reported issues = %v, want one %s", rec.issues, x1.NEIssueX1ListenFailed)
+	if len(rec.reported()) != 1 || rec.reported()[0] != x1.NEIssueX1ListenFailed {
+		t.Errorf("reported issues = %v, want one %s", rec.reported(), x1.NEIssueX1ListenFailed)
 	}
 }
 
@@ -359,8 +360,8 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			t.Error("a delivery client was created for content with no interception task")
 		}
 
-		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueContentUntasked {
-			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueContentUntasked)
+		if len(rec.reported()) != 1 || rec.reported()[0] != x1.NEIssueContentUntasked {
+			t.Errorf("reported = %v, want one %s", rec.reported(), x1.NEIssueContentUntasked)
 		}
 	})
 
@@ -384,8 +385,8 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			t.Error("content was prepared for delivery with no X3 destination")
 		}
 
-		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueInvalidConfig {
-			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueInvalidConfig)
+		if len(rec.reported()) != 1 || rec.reported()[0] != x1.NEIssueInvalidConfig {
+			t.Errorf("reported = %v, want one %s", rec.reported(), x1.NEIssueInvalidConfig)
 		}
 	})
 
@@ -410,22 +411,35 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			t.Error("a delivery client was created without LI credentials")
 		}
 
-		if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueMDFUnreachable {
-			t.Errorf("reported = %v, want one %s", rec.issues, x1.NEIssueMDFUnreachable)
+		if len(rec.reported()) != 1 || rec.reported()[0] != x1.NEIssueMDFUnreachable {
+			t.Errorf("reported = %v, want one %s", rec.reported(), x1.NEIssueMDFUnreachable)
 		}
 	})
 }
 
 // recordingReporter captures the NE issues raised, so a test can assert what the
-// ADMF would have been told.
+// ADMF would have been told. Guarded, because reports also arrive from background
+// goroutines — the keepalive fail-safe raises one from its own watchdog.
 type recordingReporter struct {
+	mu     sync.Mutex
 	issues []string
 }
 
-func (r *recordingReporter) ReportNEIssue(issueType, description string) error {
+func (r *recordingReporter) ReportNEIssue(issueType, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.issues = append(r.issues, issueType)
 
 	return nil
+}
+
+// reported returns a copy of what has been raised so far.
+func (r *recordingReporter) reported() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.issues...)
 }
 
 // TestTriggerKeepaliveFailSafePurgesTasking is review R39: tasking must not
@@ -515,13 +529,13 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 
 	// And the ADMF is told, because interception stopping must not be silent.
 	var purged bool
-	for _, i := range rec.issues {
+	for _, i := range rec.reported() {
 		if i == x1.NEIssueTaskingPurged {
 			purged = true
 		}
 	}
 
 	if !purged {
-		t.Errorf("reported %v, want %s", rec.issues, x1.NEIssueTaskingPurged)
+		t.Errorf("reported %v, want %s", rec.reported(), x1.NEIssueTaskingPurged)
 	}
 }
