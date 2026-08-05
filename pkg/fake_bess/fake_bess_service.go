@@ -94,6 +94,7 @@ type FakeFar struct {
 	dstIntf       uint8
 	sendEndMarker bool
 	applyAction   uint8
+	fwdAction     uint8
 	tunnelType    uint8
 	tunnelIP4Src  uint32
 	tunnelIP4Dst  uint32
@@ -109,11 +110,21 @@ func (f FakeFar) String() string {
 		f.Drops(), f.Forwards(), f.Buffers())
 }
 
-// ActionValue returns the datapath action the PFCP agent installed for this FAR.
-// This is the BESS-side action value that the pipeline's executeFAR splits on
-// (farForwardD/farForwardU/farDrop/...), not the PFCP apply-action bitmap.
+// ActionValue returns the datapath action the PFCP agent installed for this FAR:
+// the BESS-side value (farForwardD/farForwardU/farDrop/...), not the PFCP
+// apply-action bitmap. Note this is the value GtpuEncap also consumes as the
+// GTP-U PDU Session Container PDU Type, so it never carries a duplication
+// variant — see ForwardActionValue.
 func (f *FakeFar) ActionValue() uint8 {
 	return f.applyAction
+}
+
+// ForwardActionValue returns the value the pipeline's executeFAR splits on, which
+// is where content duplication is signalled (farForwardDAndDuplicate /
+// farForwardUAndDuplicate). Assert on this, not ActionValue, when checking that
+// interception reached the datapath.
+func (f *FakeFar) ForwardActionValue() uint8 {
+	return f.fwdAction
 }
 
 func (f *FakeFar) Drops() bool {
@@ -277,6 +288,7 @@ func UnmarshalFar(em *bess_pb.ExactMatchCommandAddArg) (f FakeFar) {
 	f.tunnelIP4Dst = uint32(em.Values[3].GetValueInt())
 	f.tunnelTEID = uint32(em.Values[4].GetValueInt())
 	f.tunnelPort = uint16(em.Values[5].GetValueInt())
+	f.fwdAction = uint8(em.Values[6].GetValueInt())
 
 	return
 }

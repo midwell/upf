@@ -4,6 +4,7 @@
 package integration
 
 import (
+	"github.com/omec-project/upf-epc/pkg/fake_bess"
 	"net"
 	"testing"
 
@@ -83,6 +84,10 @@ func TestLawfulInterceptDuplicateFAR(t *testing.T) {
 
 	assertFARAction(t, "CC warrant active", uplinkFARID, bessForwardUAndDuplicate)
 	assertFARAction(t, "CC warrant active", downlinkFARID, bessForwardDAndDuplicate)
+	// The subscriber's own traffic must be unaffected on the wire. The downlink
+	// one is the case that mattered: an undefined PDU type here crashed the RAN.
+	assertFARPduType(t, "CC warrant active", uplinkFARID, bessForwardU)
+	assertFARPduType(t, "CC warrant active", downlinkFARID, bessForwardD)
 	// Duplication must not add, remove, or reshape any other session state.
 	verifyEntries(t, testcase.expected)
 
@@ -120,7 +125,37 @@ func modifyForwardingFARs(t *testing.T, testcase *testCase, action uint8, when s
 	}
 }
 
+// assertFARAction checks the value the pipeline's executeFAR splits on, which is
+// where content duplication is signalled.
+//
+// Deliberately not ActionValue(): that is the attribute BESS's GtpuEncap also
+// reads as the GTP-U PDU Session Container PDU Type, so it must never carry a
+// duplication variant (review R30). assertFARPduType covers that half.
 func assertFARAction(t *testing.T, when string, farID uint32, want uint8) {
+	t.Helper()
+
+	far := farOrFail(t, when, farID)
+
+	if got := far.ForwardActionValue(); got != want {
+		t.Errorf("%s: FAR %d datapath forward action = %#x, want %#x", when, farID, got, want)
+	}
+}
+
+// assertFARPduType checks that whatever the FAR is doing, the value GtpuEncap
+// turns into the GTP-U PDU Session Container PDU Type stays one of the two the
+// wire format defines. A duplication value here reaches the RAN as an undefined
+// PDU type, which crashed it.
+func assertFARPduType(t *testing.T, when string, farID uint32, want uint8) {
+	t.Helper()
+
+	far := farOrFail(t, when, farID)
+
+	if got := far.ActionValue(); got != want {
+		t.Errorf("%s: FAR %d PDU-type-bearing action = %#x, want %#x", when, farID, got, want)
+	}
+}
+
+func farOrFail(t *testing.T, when string, farID uint32) fake_bess.FakeFar {
 	t.Helper()
 
 	fars := bessFake.GetFarTableEntries()
@@ -130,7 +165,5 @@ func assertFARAction(t *testing.T, when string, farID uint32, want uint8) {
 		t.Fatalf("%s: FAR %d not installed in the datapath (entries: %v)", when, farID, fars)
 	}
 
-	if got := far.ActionValue(); got != want {
-		t.Errorf("%s: FAR %d datapath action = %#x, want %#x", when, farID, got, want)
-	}
+	return far
 }

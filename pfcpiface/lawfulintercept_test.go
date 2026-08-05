@@ -79,24 +79,53 @@ func TestParseFARDuplicateIsSilent(t *testing.T) {
 	}
 }
 
-// TestSetActionValueDuplicate checks that DUPL forwarding FARs are programmed
-// with the forward-and-duplicate BESS actions (which the pipeline routes to the
-// LI tee), while plain forwarding FARs keep the normal actions.
-func TestSetActionValueDuplicate(t *testing.T) {
+// TestSetFwdActionValueDuplicate checks that DUPL forwarding FARs are routed to
+// the LI tee, and — the part that matters — that this never reaches the "action"
+// attribute.
+//
+// BESS's GtpuEncap reuses "action" as the GTP-U PDU Session Container PDU Type,
+// where only 0 (downlink) and 1 (uplink) exist. Putting a duplication value there
+// shipped an undefined PDU type to the RAN, which segfaulted parsing it (review
+// R30). The duplication variants therefore belong on fwd_action alone, and the
+// second half of this table is the regression guard for that.
+func TestSetFwdActionValueDuplicate(t *testing.T) {
 	b := &bess{}
-	cases := []struct {
+
+	dlDup := far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceAccess}
+	ulDup := far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceCore}
+	dlPlain := far{applyAction: ActionForward, dstIntf: ie.DstInterfaceAccess}
+	ulPlain := far{applyAction: ActionForward, dstIntf: ie.DstInterfaceCore}
+
+	// What executeFAR splits on: duplication is visible here.
+	for _, c := range []struct {
 		name   string
 		f      far
 		expect uint8
 	}{
-		{"downlink+dupl", far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceAccess}, farForwardDAndDuplicate},
-		{"uplink+dupl", far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceCore}, farForwardUAndDuplicate},
-		{"downlink plain", far{applyAction: ActionForward, dstIntf: ie.DstInterfaceAccess}, farForwardD},
-		{"uplink plain", far{applyAction: ActionForward, dstIntf: ie.DstInterfaceCore}, farForwardU},
+		{"downlink+dupl", dlDup, farForwardDAndDuplicate},
+		{"uplink+dupl", ulDup, farForwardUAndDuplicate},
+		{"downlink plain", dlPlain, farForwardD},
+		{"uplink plain", ulPlain, farForwardU},
+	} {
+		if got := b.setFwdActionValue(c.f); got != c.expect {
+			t.Errorf("%s: fwd_action = %d, want %d", c.name, got, c.expect)
+		}
 	}
-	for _, c := range cases {
-		if got := b.setActionValue(c.f); got != uint8(c.expect) {
-			t.Errorf("%s: action = %d, want %d", c.name, got, c.expect)
+
+	// What GtpuEncap consumes as the PSC PDU type: duplication must be invisible,
+	// and the value must stay one of the two the wire format defines.
+	for _, c := range []struct {
+		name   string
+		f      far
+		expect uint8
+	}{
+		{"downlink+dupl stays a valid PDU type", dlDup, farForwardD},
+		{"uplink+dupl stays a valid PDU type", ulDup, farForwardU},
+		{"downlink plain", dlPlain, farForwardD},
+		{"uplink plain", ulPlain, farForwardU},
+	} {
+		if got := b.setActionValue(c.f); got != c.expect {
+			t.Errorf("%s: action = %d, want %d (0 and 1 are the only defined PDU types)", c.name, got, c.expect)
 		}
 	}
 }

@@ -1238,19 +1238,23 @@ func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, me
 	}
 }
 
+// setActionValue returns the value written to the datapath's "action" attribute.
+//
+// This is NOT only a routing value: BESS's GtpuEncap reuses the same attribute as
+// the GTP-U PDU Session Container PDU Type (core/modules/gtpu_encap.cc registers
+// AddMetadataAttr("action", ...) and assigns it to psch->pdu_type). The stock
+// values are safe there purely because farForwardD == 0 and farForwardU == 1 are
+// also the only two valid PDU types, downlink and uplink. Anything else reaches
+// the RAN as a PDU type that does not exist.
+//
+// So this function must keep returning stock values only. The duplication signal
+// lives in setFwdActionValue instead (review R30).
 func (b *bess) setActionValue(f far) uint8 {
 	if (f.applyAction & ActionForward) != 0 {
-		duplicate := f.Duplicates()
 		switch f.dstIntf {
 		case ie.DstInterfaceAccess:
-			if duplicate {
-				return farForwardDAndDuplicate
-			}
 			return farForwardD
 		case ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN:
-			if duplicate {
-				return farForwardUAndDuplicate
-			}
 			return farForwardU
 		}
 	} else if (f.applyAction & ActionDrop) != 0 {
@@ -1265,6 +1269,24 @@ func (b *bess) setActionValue(f far) uint8 {
 	return farDrop
 }
 
+// setFwdActionValue returns the value the pipeline's executeFAR splits on. It is
+// the action value plus the two Lawful Interception variants, which route a
+// forwarding packet through the content-duplication tee as well as onward to the
+// subscriber. Kept separate from setActionValue because that attribute is also
+// the GTP-U PDU Session Container PDU Type and cannot carry these values.
+func (b *bess) setFwdActionValue(f far) uint8 {
+	if (f.applyAction&ActionForward) != 0 && f.Duplicates() {
+		switch f.dstIntf {
+		case ie.DstInterfaceAccess:
+			return farForwardDAndDuplicate
+		case ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN:
+			return farForwardUAndDuplicate
+		}
+	}
+
+	return b.setActionValue(f)
+}
+
 func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 	go func() {
 		var (
@@ -1273,6 +1295,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 		)
 
 		action := b.setActionValue(far)
+		fwdAction := b.setFwdActionValue(far)
 		f := &pb.ExactMatchCommandAddArg{
 			Gate: uint64(far.tunnelType),
 			Fields: []*pb.FieldData{
@@ -1286,6 +1309,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 				intEnc(uint64(far.tunnelIP4Dst)), /* enb ip */
 				intEnc(uint64(far.tunnelTEID)),   /* enb teid */
 				intEnc(uint64(far.tunnelPort)),   /* udp gtpu port */
+				intEnc(uint64(fwdAction)),        /* fwd_action */
 			},
 		}
 
