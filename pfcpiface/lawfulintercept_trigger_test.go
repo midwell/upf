@@ -427,3 +427,101 @@ func (r *recordingReporter) ReportNEIssue(issueType, description string) error {
 
 	return nil
 }
+
+// TestTriggerKeepaliveFailSafePurgesTasking is review R39: tasking must not
+// outlive the party responsible for it. A triggering function that restarts
+// forgets the triggers it installed, and content intercepted under a trigger
+// nobody can withdraw keeps flowing past the point where the warrant itself is
+// revoked. The fail-safe makes that lapse instead.
+func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	rec := &recordingReporter{}
+	cfg := &LiConfig{
+		NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t),
+		// Short enough to observe, long enough that the tasking below lands first.
+		TriggerKeepalive: "1s",
+	}
+
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec)
+	if err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+
+	const seid = 4242
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "10.0.60.122", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+
+	if err := req.ActivateTask(x1.Trigger{
+		XID:           "11111111-1111-4111-8111-111111111111",
+		ProductID:     "22222222-2222-4222-8222-222222222222",
+		CorrelationID: 7,
+		SEID:          seid,
+		DIDs:          []string{did},
+	}); err != nil {
+		t.Fatalf("ActivateTask: %v", err)
+	}
+
+	if _, ok := lookupTrigger(tasks, seid); !ok {
+		t.Fatal("trigger was not installed")
+	}
+
+	// A keepalive keeps it alive: the fail-safe must not remove tasking merely
+	// because no new session happened to be established.
+	for range 3 {
+		time.Sleep(600 * time.Millisecond)
+
+		if err := req.Keepalive(); err != nil {
+			t.Fatalf("Keepalive: %v", err)
+		}
+	}
+
+	if _, ok := lookupTrigger(tasks, seid); !ok {
+		t.Fatal("tasking was purged while the triggering function was still talking")
+	}
+
+	// Now it goes quiet, as a restarted one does.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := lookupTrigger(tasks, seid); !ok {
+			break
+		}
+
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if _, ok := lookupTrigger(tasks, seid); ok {
+		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
+	}
+
+	// And the ADMF is told, because interception stopping must not be silent.
+	var purged bool
+	for _, i := range rec.issues {
+		if i == x1.NEIssueTaskingPurged {
+			purged = true
+		}
+	}
+
+	if !purged {
+		t.Errorf("reported %v, want %s", rec.issues, x1.NEIssueTaskingPurged)
+	}
+}

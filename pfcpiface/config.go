@@ -81,6 +81,17 @@ type LiConfig struct {
 	// That sysctl is per network namespace and must be raised before this socket is
 	// created, so it belongs to the deployment (see li/README.md).
 	X3RcvBuf int `json:"x3_rcvbuf"`
+	// TriggerKeepalive is how long this CC-POI keeps its tasking after the last
+	// message from its triggering function, as a Go duration ("5m"). Empty leaves
+	// the fail-safe off.
+	//
+	// It exists because tasking must not outlive the party responsible for it: a
+	// triggering function that restarts forgets the triggers it installed, and
+	// without this the POI would keep intercepting content nobody can withdraw —
+	// past the point where the warrant itself is revoked (review R39). The
+	// triggering function keeps tasking alive by sending keepalives, so this only
+	// lapses when it is genuinely gone.
+	TriggerKeepalive string `json:"trigger_keepalive"`
 }
 
 // QciQosConfig : Qos configured attributes.
