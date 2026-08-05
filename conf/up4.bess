@@ -196,7 +196,15 @@ else:
         -> gtpuDecap::GtpuDecap() \
         -> appQERLookup
 
-executeFAR::Split(size=1, attribute='action')
+# Split on fwd_action, NOT action. GtpuEncap reuses the 'action' attribute as the
+# GTP-U PDU Session Container PDU Type (core/modules/gtpu_encap.cc:
+# AddMetadataAttr("action", ...) -> psch->pdu_type), which works for the stock
+# values only because farForwardDAction=0 and farForwardUAction=1 happen to equal
+# the two valid PDU types. Routing duplication through that same attribute put 5
+# and 6 on the wire as PDU types that do not exist, and the RAN segfaulted parsing
+# them (review R30). 'action' therefore keeps the stock 0-4 values that GtpuEncap
+# needs, and duplication is signalled out of band on 'fwd_action'.
+executeFAR::Split(size=1, attribute='fwd_action')
 _in = executeFAR
 if parser.enable_slice_metering:
     # sliceMeter enforces a per slice, per direction meter rate limit
@@ -227,7 +235,8 @@ farLookup::ExactMatch(fields=[{'attr_name':'far_id', 'num_bytes':4}, \
                               {'attr_name':'tunnel_out_src_ip4addr', 'num_bytes':4}, \
                               {'attr_name':'tunnel_out_dst_ip4addr', 'num_bytes':4}, \
                               {'attr_name':'tunnel_out_teid', 'num_bytes':4}, \
-                              {'attr_name':'tunnel_out_udp_port', 'num_bytes':2}],\
+                              {'attr_name':'tunnel_out_udp_port', 'num_bytes':2}, \
+                              {'attr_name':'fwd_action', 'num_bytes':1}],\
                       entries=parser.table_size_far_lookup):noGTPUEncap \
     -> farMerge::Merge() \
     -> _in
@@ -315,12 +324,12 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 liMerge::Merge() -> liX3out::PortOut(port='liX3')
 
 executeFAR:farForwardDAndDuplicateAction \
-    -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'fwd_action'}]) \
     -> liReplicaD::Replicate(gates=[0, 1])
 liReplicaD:1 -> liMerge
 
 executeFAR:farForwardUAndDuplicateAction \
-    -> liEncapU::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'action'}]) \
+    -> liEncapU::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'fwd_action'}]) \
     -> liReplicaU::Replicate(gates=[0, 1])
 liReplicaU:1 -> liMerge
 
