@@ -113,9 +113,12 @@ func TestPuntMonitorHandlesRestartAndUnknowns(t *testing.T) {
 		}
 	})
 
+	// Losing the ability to read the accounting is not the same as reading zero
+	// loss, and it must not pass for it. The ADMF hears once — repeating on every
+	// poll would bury it — and the two ways of losing that ability are equivalent:
+	// no such module, or a module whose gate accounting is off.
 	for name, c := range map[string]*fakeCounters{
 		"module unreachable or renamed": {moduleErr: true},
-		"port unreachable or renamed":   {portErr: true},
 		"gate tracking disabled":        {noGates: true, sent: 100},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -123,15 +126,27 @@ func TestPuntMonitorHandlesRestartAndUnknowns(t *testing.T) {
 			m := &liPuntMonitor{client: c, reporter: rec}
 
 			m.check()
+			m.check()
 
-			// Nothing can be concluded, so nothing is claimed — in particular the
-			// zero that an unread counter would otherwise supply must not be
-			// compared, since it would read as "no loss".
-			if len(rec.issues) != 0 {
-				t.Errorf("reported %v from an unusable reading", rec.issues)
+			if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueInvalidConfig {
+				t.Errorf("reported %v, want exactly one %s", rec.issues, x1.NEIssueInvalidConfig)
 			}
 		})
 	}
+
+	// An unreadable *port* is left to the shipper, which notices its socket has gone
+	// and reports x3EgressDown — a second report of the same fact from here would
+	// add nothing.
+	t.Run("port unreachable or renamed", func(t *testing.T) {
+		rec := &recordingReporter{}
+		m := &liPuntMonitor{client: &fakeCounters{handed: 100, portErr: true}, reporter: rec}
+
+		m.check()
+
+		if len(rec.issues) != 0 {
+			t.Errorf("reported %v; an unreadable port is the shipper's to report", rec.issues)
+		}
+	})
 }
 
 // TestPuntMonitorNeedsAReportingChannel covers the deployment where no ADMF is
