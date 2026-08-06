@@ -287,10 +287,8 @@ type fakeNEIssueReporter struct {
 	issues []string
 }
 
-func (f *fakeNEIssueReporter) ReportNEIssue(issueType, _ string) error {
+func (f *fakeNEIssueReporter) Notify(issueType, _ string) {
 	f.issues = append(f.issues, issueType)
-
-	return nil
 }
 
 // TestCheckTagReportsUnusableTag proves an unusable content tag is reported to the

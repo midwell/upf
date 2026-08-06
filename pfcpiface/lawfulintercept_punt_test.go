@@ -7,11 +7,9 @@ import (
 	"context"
 	"testing"
 
-	"google.golang.org/grpc"
-
-	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
-
 	"github.com/omec-project/li/x1"
+	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
+	"google.golang.org/grpc"
 )
 
 // fakeCounters serves whatever the test wants the datapath's accounting to say.
