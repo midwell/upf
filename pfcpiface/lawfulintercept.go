@@ -12,13 +12,12 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
-
 	"github.com/omec-project/li/mtls"
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
+	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 )
 
 // The BESS liEncap (GenericEncap) prepends a fixed tag to every duplicated
@@ -84,8 +83,11 @@ var errNoDeliveryCredentials = errors.New("li: no X3 delivery credentials")
 
 // neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
 // the x2x3.Sender above) so tests can assert what a fault reports without an ADMF.
+// It exposes the fire-and-forget form (*x1.Reporter.Notify): reporting is
+// best-effort by design and a failed report has nowhere to go, so the outcome is
+// not returned.
 type neIssueReporter interface {
-	ReportNEIssue(issueType, description string) error
+	Notify(issueType, description string)
 }
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
@@ -178,6 +180,7 @@ func setPuntReadBuffer(sock net.Conn, size int) {
 		// smaller-than-requested buffer is still better than the default. Nothing is
 		// logged either way — a failure here degrades capacity, and capacity
 		// problems are reported by the egress monitor rather than announced.
+		//nolint:errcheck // best-effort tuning; degraded capacity is reported by the egress monitor
 		_ = c.SetReadBuffer(size)
 	}
 }
@@ -186,7 +189,7 @@ func setPuntReadBuffer(sock net.Conn, size int) {
 // target id), never to general logs. No-op when reporting is not configured.
 func (s *liShipper) report(issueType, description string) {
 	if s.reporter != nil {
-		_ = s.reporter.ReportNEIssue(issueType, description)
+		s.reporter.Notify(issueType, description)
 	}
 }
 
@@ -298,6 +301,7 @@ func (s *liShipper) ship(tagged []byte) {
 	// a slow/unreachable MDF3 cannot stall the socket read (which would make
 	// BESS drop subsequent copies). Delivery failures are reported from the
 	// worker via the onError hook set in senderFor (review R3b).
+	//nolint:errcheck // async enqueue never blocks; delivery failures report via onError
 	_ = sender.Send(shipperPDU(tagged, task))
 }
 

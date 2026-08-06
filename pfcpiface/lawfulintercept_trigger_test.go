@@ -126,6 +126,7 @@ func writePEM(t *testing.T, path string, blocks ...*pem.Block) {
 func freePort(t *testing.T) string {
 	t.Helper()
 
+	//nolint:noctx // test listener; no context needed
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -311,6 +312,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	}
 
 	// Occupy the port so the listener cannot bind.
+	//nolint:noctx // test listener; no context needed
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -425,13 +427,11 @@ type recordingReporter struct {
 	issues []string
 }
 
-func (r *recordingReporter) ReportNEIssue(issueType, _ string) error {
+func (r *recordingReporter) Notify(issueType, _ string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.issues = append(r.issues, issueType)
-
-	return nil
 }
 
 // reported returns a copy of what has been raised so far.

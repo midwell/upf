@@ -7,11 +7,9 @@ import (
 	"context"
 	"time"
 
-	"google.golang.org/grpc"
-
-	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
-
 	"github.com/omec-project/li/x1"
+	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
+	"google.golang.org/grpc"
 )
 
 // Content of communication leaves the datapath through a userspace socket, and a
@@ -130,7 +128,7 @@ func (m *liPuntMonitor) check() {
 	// NE-level only: how much content was lost, never whose. The ADMF can act on
 	// this — reduce the tasking, provision more capacity, or accept the gap — but
 	// only if it is told.
-	_ = m.reporter.ReportNEIssue(x1.NEIssueX3PuntLost,
+	m.reporter.Notify(x1.NEIssueX3PuntLost,
 		"content copies discarded at the datapath egress socket")
 }
 
@@ -148,7 +146,7 @@ func (m *liPuntMonitor) handedToPort() (uint64, bool) {
 	// knowing, which the ADMF should hear about once rather than never (review R36).
 	if !m.blind {
 		m.blind = true
-		_ = m.reporter.ReportNEIssue(x1.NEIssueInvalidConfig,
+		m.reporter.Notify(x1.NEIssueInvalidConfig,
 			"content egress accounting unavailable; loss at the datapath egress cannot be detected")
 	}
 

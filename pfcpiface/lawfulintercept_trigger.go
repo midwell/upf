@@ -4,11 +4,11 @@
 package pfcpiface
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
-
 	"time"
 
 	"github.com/omec-project/li/store"
@@ -53,7 +53,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		x1.RequireResolvableDIDs(),
 		x1.OnDeactivate(func(types.InterceptTask) {
 			if reporter != nil {
-				_ = reporter.ReportNEIssue(x1.NEIssueTaskingPurged,
+				reporter.Notify(x1.NEIssueTaskingPurged,
 					"content interception tasking removed; the triggering function went quiet")
 			}
 		}),
@@ -63,15 +63,17 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// without this the attempt leaves no trace at all (review R44).
 		x1.OnAuthFailure(func(code int) {
 			if reporter != nil {
-				_ = reporter.ReportNEIssue(x1.NEIssueX1AuthFailed,
+				reporter.Notify(x1.NEIssueX1AuthFailed,
 					fmt.Sprintf("LI_T3 triggering refused: peer failed authentication (error %d)", code))
 			}
 		}))
 
-	ln, err := net.Listen("tcp", cfg.X1Listen)
+	// ListenConfig.Listen rather than net.Listen so the listen carries a context
+	// (the linter's noctx rule); the bind is otherwise unchanged.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.X1Listen)
 	if err != nil {
 		if reporter != nil {
-			_ = reporter.ReportNEIssue(x1.NEIssueX1ListenFailed, "X1 listener bind failed")
+			reporter.Notify(x1.NEIssueX1ListenFailed, "X1 listener bind failed")
 		}
 
 		return nil, fmt.Errorf("li: X1 listen on %s: %w", cfg.X1Listen, err)
@@ -86,7 +88,10 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// peer can hold connections open until this element can no longer be untasked
 	// (review R42).
 	httpSrv := x1.NewListener(srv, serverTLS)
-	// Certificates come from TLSConfig, so the file arguments are empty.
+	// Certificates come from TLSConfig, so the file arguments are empty. ServeTLS
+	// blocks until the listener is closed and then returns; the bind already
+	// succeeded above, so its return is not actionable here.
+	//nolint:errcheck // serve-until-close; a bind failure already surfaced above
 	go func() { _ = httpSrv.ServeTLS(ln, "", "") }()
 
 	// The keepalive fail-safe (TS 103 221-1), applied to the triggering interface
