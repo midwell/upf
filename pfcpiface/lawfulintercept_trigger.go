@@ -6,10 +6,7 @@ package pfcpiface
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
-	"log"
 	"net"
-	"net/http"
 	"strconv"
 
 	"time"
@@ -59,6 +56,16 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 				_ = reporter.ReportNEIssue(x1.NEIssueTaskingPurged,
 					"content interception tasking removed; the triggering function went quiet")
 			}
+		}),
+		// Someone in the LI trust domain trying to trigger this CC-POI as a triggering
+		// function it is not would be aiming a subject's traffic at a destination of
+		// their choosing. It is refused, but this element logs nothing by design, so
+		// without this the attempt leaves no trace at all (review R44).
+		x1.OnAuthFailure(func(code int) {
+			if reporter != nil {
+				_ = reporter.ReportNEIssue(x1.NEIssueX1AuthFailed,
+					fmt.Sprintf("LI_T3 triggering refused: peer failed authentication (error %d)", code))
+			}
 		}))
 
 	ln, err := net.Listen("tcp", cfg.X1Listen)
@@ -73,18 +80,12 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// Mutual TLS with the identity binding checked per message by x1.Server: the
 	// certificate proves the peer is in the LI domain, the binding proves it is the
 	// triggering function we were told to accept (review R26).
-	httpSrv := &http.Server{
-		Handler:   srv,
-		TLSConfig: serverTLS,
-		// net/http writes handshake failures to the default logger, i.e. this
-		// process's stderr: "http: TLS handshake error from <addr>: remote error:
-		// tls: bad certificate". On an LI interface that is a disclosure — it puts
-		// the LI domain's address in the general operator log and marks this NE as
-		// running a mutually-authenticated listener nothing else explains. Discard
-		// it; genuine faults on this interface are reported to the ADMF over X1
-		// (design D11), which is the only channel allowed to know (review R35).
-		ErrorLog: log.New(io.Discard, "", 0),
-	}
+	// NewListener supplies the properties every X1 endpoint needs and none of the
+	// three network functions should be trusted to remember separately: a discarded
+	// error log (review R35) and per-phase timeouts, without which an unauthenticated
+	// peer can hold connections open until this element can no longer be untasked
+	// (review R42).
+	httpSrv := x1.NewListener(srv, serverTLS)
 	// Certificates come from TLSConfig, so the file arguments are empty.
 	go func() { _ = httpSrv.ServeTLS(ln, "", "") }()
 
