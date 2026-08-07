@@ -98,7 +98,6 @@ type bess struct {
 	notifyBessSocket net.Conn
 	endMarkerChan    chan []byte
 	qciQosMap        map[uint8]*QosConfigVal
-	liShipper        *liShipper
 }
 
 func (b *bess) IsConnected(accessIP *net.IP) bool {
@@ -849,8 +848,9 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	// Lawful Interception CC-POI: start the X3 shipper only when the opt-in Li
 	// config is present; silent otherwise.
 	if conf.Li != nil {
-		b.liShipper, err = startLIShipper(conf.Li, b.client)
-		if err != nil {
+		// The shipper owns its own goroutines and socket for the life of the process,
+		// so nothing here needs to hold on to it.
+		if _, err := startLIShipper(conf.Li, b.client); err != nil {
 			// Do not name the subsystem or echo err (which carries LI-identifying
 			// text) on the general BESS log: that would reveal to an unauthorized
 			// operator that this NE is LI-provisioned (review R23; li-security-isolation

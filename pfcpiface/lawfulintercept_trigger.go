@@ -39,6 +39,15 @@ import (
 // Nothing is logged — that this NE can be tasked at all must not appear in a
 // general operator log (review R25/R27).
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter) (*store.Store, error) {
+	// Parse the fail-safe window before anything is bound. Doing it afterwards left
+	// a listener accepting and applying tasking into a store this function had
+	// already abandoned by returning an error — an element that looks un-tasked to
+	// its operator while quietly holding warrants.
+	keepalive, err := triggerKeepalive(cfg.TriggerKeepalive)
+	if err != nil {
+		return nil, err
+	}
+
 	tasks := store.New()
 	// RequireResolvableDIDs is what lets the triggering function find out that this
 	// POI has lost the destination it provisioned — after a restart, say. Accepting
@@ -97,30 +106,49 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// The keepalive fail-safe (TS 103 221-1), applied to the triggering interface
 	// for the reason it exists: a triggering function that goes away must not leave
 	// interception running behind it. The same mechanism already guards the ADMF
-	// path on the AMF and SMF (design D11 Part B).
-	if cfg.TriggerKeepalive != "" {
-		timeout, err := time.ParseDuration(cfg.TriggerKeepalive)
-		if err != nil || timeout <= 0 {
-			return nil, fmt.Errorf("li: invalid trigger_keepalive %q", cfg.TriggerKeepalive)
-		}
-
-		go srv.WatchKeepalive(timeout)
+	// path on the AMF and SMF (design D11 Part B). A nil stop channel means it runs
+	// for as long as this element can hold tasking, which is the whole point.
+	if keepalive > 0 {
+		go srv.WatchKeepalive(keepalive, nil)
 	}
 
 	return tasks, nil
 }
 
+// triggerKeepalive validates the configured fail-safe window. An empty value
+// leaves the fail-safe off and yields zero; anything unparseable or non-positive
+// is an error rather than a silent "off", since a deployment that asked for the
+// fail-safe and did not get it holds tasking nothing will ever reclaim.
+func triggerKeepalive(v string) (time.Duration, error) {
+	if v == "" {
+		return 0, nil
+	}
+
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("li: invalid trigger_keepalive %q", v)
+	}
+
+	return d, nil
+}
+
 // lookupTrigger returns the LI_T3 task covering the PFCP session identified by
-// seid, and reports whether one exists. The F-SEID is the detection criterion the
-// CC-TF sends (TS 33.128 table 6.2.3-7, "PFCP Session ID") and the value the
-// datapath tags onto every duplicated packet, so it is what ties a copy on the
-// wire back to the warrant that authorised taking it.
+// seid, how many tasks cover it in all, and whether any does. The F-SEID is the
+// detection criterion the CC-TF sends (TS 33.128 table 6.2.3-7, "PFCP Session
+// ID") and the value the datapath tags onto every duplicated packet, so it is
+// what ties a copy on the wire back to the warrant that authorised taking it.
 //
-// When several warrants cover one session the first task is returned; delivering
-// one copy per warrant is multi-agency work this does not attempt.
-func lookupTrigger(tasks *store.Store, seid uint64) (types.InterceptTask, bool) {
+// Delivering one copy per warrant is multi-agency work this does not attempt, so
+// when several warrants cover one session the first is chosen. What matters is
+// that "first" is the same on every packet: store.Match orders by XID precisely
+// so this choice is stable. Picking from a map's iteration order instead — as this
+// did — scattered one session's packets across the covering warrants at random,
+// leaving every agency with a partial stream and none with a usable one. The count
+// is returned so the caller can tell the ADMF that a warrant is being served
+// nothing, which is the part of this compromise that must not stay quiet.
+func lookupTrigger(tasks *store.Store, seid uint64) (types.InterceptTask, int, bool) {
 	if tasks == nil || seid == 0 {
-		return types.InterceptTask{}, false
+		return types.InterceptTask{}, 0, false
 	}
 
 	matched := tasks.Match(types.TargetIdentifier{
@@ -128,8 +156,8 @@ func lookupTrigger(tasks *store.Store, seid uint64) (types.InterceptTask, bool) 
 		Value: strconv.FormatUint(seid, 10),
 	})
 	if len(matched) == 0 {
-		return types.InterceptTask{}, false
+		return types.InterceptTask{}, 0, false
 	}
 
-	return matched[0], true
+	return matched[0], len(matched), true
 }

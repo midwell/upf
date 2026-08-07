@@ -208,6 +208,13 @@ func validateConf(conf Conf) error {
 				return ErrInvalidArgumentWithReason(name, val, "required when li is configured")
 			}
 		}
+		// An unparseable fail-safe window is rejected here rather than treated as
+		// "off": a deployment that asked for the fail-safe and silently did not get
+		// it keeps tasking that nothing will ever reclaim.
+		if _, err := triggerKeepalive(conf.Li.TriggerKeepalive); err != nil {
+			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
+				"must be a positive Go duration (e.g. \"5m\") or empty to disable")
+		}
 	}
 
 	return nil
