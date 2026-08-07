@@ -6,6 +6,7 @@ package pfcpiface
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
@@ -14,6 +15,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -209,11 +211,11 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	if err := req.ActivateTask(unknown); err == nil {
 		t.Error("a content trigger naming an unknown destination was accepted")
 	}
-	if _, ok := lookupTrigger(tasks, seid+7); ok {
+	if _, _, ok := lookupTrigger(tasks, seid+7); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 
-	task, ok := lookupTrigger(tasks, seid)
+	task, _, ok := lookupTrigger(tasks, seid)
 	if !ok {
 		t.Fatal("no trigger found for the tasked session")
 	}
@@ -228,7 +230,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	// A session nobody tasked must not resolve to a warrant, or content would be
 	// delivered labelled with someone else's (review R34).
-	if _, ok := lookupTrigger(tasks, seid+1); ok {
+	if _, _, ok := lookupTrigger(tasks, seid+1); ok {
 		t.Error("an untasked session resolved to a trigger")
 	}
 
@@ -236,7 +238,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		t.Fatalf("DeactivateTask: %v", err)
 	}
 
-	if _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, seid); ok {
 		t.Error("trigger still installed after DeactivateTask")
 	}
 }
@@ -293,7 +295,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Errorf("err = %v, want X1 error 1030 (identifier does not match certificate)", err)
 	}
 
-	if _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, seid); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 }
@@ -495,7 +497,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("ActivateTask: %v", err)
 	}
 
-	if _, ok := lookupTrigger(tasks, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, seid); !ok {
 		t.Fatal("trigger was not installed")
 	}
 
@@ -509,21 +511,21 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		}
 	}
 
-	if _, ok := lookupTrigger(tasks, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, seid); !ok {
 		t.Fatal("tasking was purged while the triggering function was still talking")
 	}
 
 	// Now it goes quiet, as a restarted one does.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := lookupTrigger(tasks, seid); !ok {
+		if _, _, ok := lookupTrigger(tasks, seid); !ok {
 			break
 		}
 
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	if _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, seid); ok {
 		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 	}
 
@@ -538,4 +540,89 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	if !purged {
 		t.Errorf("reported %v, want %s", rec.reported(), x1.NEIssueTaskingPurged)
 	}
+}
+
+// TestOverlappingWarrantsPickTheSameOneEveryTime: when two warrants cover one
+// session this POI delivers each packet under exactly one of them, so which one
+// has to be the same on every packet. Selecting from a map's iteration order —
+// which is what reading store.Match unsorted amounted to — scattered a session's
+// packets across the covering warrants at random, leaving each agency with an
+// arbitrary fraction of the content and none of them with a usable stream. The
+// agency that ends up with nothing is the ADMF's problem to resolve, so the
+// overlap is reported rather than left to be inferred from an absence of product.
+func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
+	const seid = 42
+
+	target := types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"}
+	tasks := store.New()
+	for _, xid := range []types.XID{
+		"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+	} {
+		tasks.Activate(types.InterceptTask{
+			XID: xid, ProductID: xid, CorrelationID: 7, Target: target,
+			Products:   []types.ProductType{types.ProductCC},
+			Deliveries: []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
+		})
+	}
+
+	const wantXID = types.XID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	for i := range 50 {
+		task, covering, ok := lookupTrigger(tasks, seid)
+		if !ok {
+			t.Fatalf("pass %d: tasked session did not resolve to a trigger", i)
+		}
+		if task.XID != wantXID {
+			t.Fatalf("pass %d: selected warrant %q, want %q on every packet", i, task.XID, wantXID)
+		}
+		if covering != 3 {
+			t.Fatalf("pass %d: covering = %d, want 3", i, covering)
+		}
+	}
+
+	// And the shipper tells the ADMF, since two of these three warrants are
+	// authorised and receiving nothing.
+	tagged := make([]byte, 0, 9+20)
+	tagged = binary.LittleEndian.AppendUint64(tagged, seid)
+	tagged = append(tagged, farForwardUAndDuplicate)
+	tagged = append(tagged, 0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2)
+
+	rec := &recordingReporter{}
+	s := &liShipper{tasks: tasks, reporter: rec, senders: make(map[string]x2x3.Sender)}
+	s.ship(tagged)
+
+	if !slices.Contains(rec.reported(), x1.NEIssueContentTaskOverlap) {
+		t.Errorf("reported = %v, want it to include %s", rec.reported(), x1.NEIssueContentTaskOverlap)
+	}
+}
+
+// TestTriggerKeepaliveMustBeValid: an unparseable fail-safe window used to be
+// checked only after the X1 listener was already serving, so the error returned
+// here left an element accepting and applying tasking into a store its caller had
+// abandoned — un-tasked to its operator, holding warrants in fact.
+func TestTriggerKeepaliveMustBeValid(t *testing.T) {
+	for _, v := range []string{"nonsense", "-5m", "0s"} {
+		if _, err := triggerKeepalive(v); err == nil {
+			t.Errorf("triggerKeepalive(%q) accepted an unusable window", v)
+		}
+	}
+	if d, err := triggerKeepalive(""); err != nil || d != 0 {
+		t.Errorf(`triggerKeepalive("") = %v, %v; want 0, nil (fail-safe off)`, d, err)
+	}
+	if d, err := triggerKeepalive("5m"); err != nil || d != 5*time.Minute {
+		t.Errorf(`triggerKeepalive("5m") = %v, %v; want 5m, nil`, d, err)
+	}
+
+	// Nothing may be left listening when the window is rejected.
+	addr := freePort(t)
+	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil); err == nil {
+		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("X1 port still bound after a rejected trigger_keepalive: %v", err)
+	}
+	_ = ln.Close()
 }

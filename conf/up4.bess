@@ -309,6 +309,15 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # from the target) and set the X3 payload format + direction accordingly. Field
 # order is [fseid(8)][action(1)], then the packet.
 #
+# These sizes are named once and used by the encap, the subscriber-side decap and
+# nothing else, so the tag cannot come off at a different width than it went on.
+# The Go shipper's fseidTagLen/liTagLen (pfcpiface/lawfulintercept.go) must agree
+# with them: it reads the same bytes off the socket, and no build step checks that
+# it does, because the pipeline and the agent ship in separate images.
+LI_TAG_FSEID_BYTES = 8
+LI_TAG_ACTION_BYTES = 1
+LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
+#
 # The tag is applied BEFORE the tee, and taken off again on the subscriber's
 # branch, which looks roundabout but is the point: Replicate emits the original
 # packet on gate 0 and a bess::Packet::copy() on the others, and that copy
@@ -345,12 +354,12 @@ liMerge::Merge() -> liQueue -> liX3out::PortOut(port='liX3')
 liQueue.attach_task(wid=0)
 
 executeFAR:farForwardDAndDuplicateAction \
-    -> liEncapD::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'fwd_action'}]) \
+    -> liEncapD::GenericEncap(fields=[{'size': LI_TAG_FSEID_BYTES, 'attribute': 'fseid'}, {'size': LI_TAG_ACTION_BYTES, 'attribute': 'fwd_action'}]) \
     -> liReplicaD::Replicate(gates=[0, 1])
 liReplicaD:1 -> liMerge
 
 executeFAR:farForwardUAndDuplicateAction \
-    -> liEncapU::GenericEncap(fields=[{'size': 8, 'attribute': 'fseid'}, {'size': 1, 'attribute': 'fwd_action'}]) \
+    -> liEncapU::GenericEncap(fields=[{'size': LI_TAG_FSEID_BYTES, 'attribute': 'fseid'}, {'size': LI_TAG_ACTION_BYTES, 'attribute': 'fwd_action'}]) \
     -> liReplicaU::Replicate(gates=[0, 1])
 liReplicaU:1 -> liMerge
 
@@ -413,7 +422,7 @@ else:
 # so that the LI copy carries it as packet data (see the egress section), which
 # means the subscriber's packet must have it removed to leave the wire format
 # byte-for-byte what an untasked subscriber's would be.
-liReplicaD:0 -> liStripD::GenericDecap(bytes=9) -> dlForwardTail
+liReplicaD:0 -> liStripD::GenericDecap(bytes=LI_TAG_BYTES) -> dlForwardTail
 
 # Drop unknown packets
 coreRxIPCksum:1 -> coreRxIPCksumFail::Sink()
@@ -484,7 +493,7 @@ else:
 
 # Lawful Intercept: as for the downlink, the subscriber's copy shares the plain
 # forward tail so a tasked session is metered exactly like an untasked one.
-liReplicaU:0 -> liStripU::GenericDecap(bytes=9) -> ulForwardTail
+liReplicaU:0 -> liStripU::GenericDecap(bytes=LI_TAG_BYTES) -> ulForwardTail
 
 # 4. GTP Echo response pipeline
 accessFastBPF:GTPUEchoGate \

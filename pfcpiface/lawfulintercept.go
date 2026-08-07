@@ -276,11 +276,19 @@ func (s *liShipper) recycle(b []byte) {
 func (s *liShipper) ship(tagged []byte) {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 
-	task, ok := lookupTrigger(s.tasks, fseid)
+	task, covering, ok := lookupTrigger(s.tasks, fseid)
 	if !ok {
 		s.report(x1.NEIssueContentUntasked, "duplicated content for a session with no interception task")
 
 		return
+	}
+
+	if covering > 1 {
+		// Every copy of this session goes to one warrant, so the others are
+		// authorised and receiving nothing. Only the ADMF can reconcile that, and it
+		// cannot do so from an absence of product.
+		s.report(x1.NEIssueContentTaskOverlap,
+			"several interception tasks cover one session; content is delivered under one of them")
 	}
 
 	dest, ok := x3Destination(task)
