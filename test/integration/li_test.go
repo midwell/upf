@@ -130,7 +130,7 @@ func modifyForwardingFARs(t *testing.T, testcase *testCase, action uint8, when s
 //
 // Deliberately not ActionValue(): that is the attribute BESS's GtpuEncap also
 // reads as the GTP-U PDU Session Container PDU Type, so it must never carry a
-// duplication variant (review R30). assertFARPduType covers that half.
+// duplication variant. assertFARPduType covers that half.
 func assertFARAction(t *testing.T, when string, farID uint32, want uint8) {
 	t.Helper()
 

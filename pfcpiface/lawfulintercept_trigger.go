@@ -24,8 +24,8 @@ import (
 // to label content with, the correlation identifier that joins it to the SMF's
 // signalling, and where to deliver it.
 //
-// The PFCP DUPL apply-action remains the mechanism that replicates packets
-// (design D14); this interface supplies the identity of what is replicated. The
+// The PFCP DUPL apply-action remains the mechanism that replicates packets;
+// this interface supplies the identity of what is replicated. The
 // two therefore arrive over different interfaces and can disagree — content whose
 // session has no trigger must not be delivered, since it could only be labelled
 // with an XID no mediation function can attribute.
@@ -37,7 +37,7 @@ import (
 // enabled but can never be tasked performs no interception, and the whole point
 // of failing closed here is that this is not discoverable from the outside.
 // Nothing is logged — that this NE can be tasked at all must not appear in a
-// general operator log (review R25/R27).
+// general operator log.
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
@@ -53,9 +53,9 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// POI has lost the destination it provisioned — after a restart, say. Accepting
 	// such a trigger would mean duplicating a subject's traffic and discarding every
 	// copy while the triggering function is told interception is running, which is
-	// exactly what happened before review R37.
-	// The purge hook is what keeps the fail-safe from being silent: interception
-	// stopping is the safe outcome, but only if somebody is told it happened.
+	// exactly what used to happen. The purge hook is what keeps the fail-safe from
+	// being silent: interception stopping is the safe outcome, but only if somebody
+	// is told it happened.
 	// Reports are throttled per type, so a purge of many tasks yields one.
 	srv := x1.NewServer(tasks, cfg.NEID,
 		x1.WithADMF(cfg.TFID),
@@ -69,7 +69,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// Someone in the LI trust domain trying to trigger this CC-POI as a triggering
 		// function it is not would be aiming a subject's traffic at a destination of
 		// their choosing. It is refused, but this element logs nothing by design, so
-		// without this the attempt leaves no trace at all (review R44).
+		// without this the attempt leaves no trace at all.
 		x1.OnAuthFailure(func(code int) {
 			if reporter != nil {
 				reporter.Notify(x1.NEIssueX1AuthFailed,
@@ -90,12 +90,11 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 
 	// Mutual TLS with the identity binding checked per message by x1.Server: the
 	// certificate proves the peer is in the LI domain, the binding proves it is the
-	// triggering function we were told to accept (review R26).
+	// triggering function we were told to accept.
 	// NewListener supplies the properties every X1 endpoint needs and none of the
 	// three network functions should be trusted to remember separately: a discarded
-	// error log (review R35) and per-phase timeouts, without which an unauthenticated
-	// peer can hold connections open until this element can no longer be untasked
-	// (review R42).
+	// error log and per-phase timeouts, without which an unauthenticated peer can
+	// hold connections open until this element can no longer be untasked.
 	httpSrv := x1.NewListener(srv, serverTLS)
 	// Certificates come from TLSConfig, so the file arguments are empty. ServeTLS
 	// blocks until the listener is closed and then returns; the bind already
@@ -106,8 +105,8 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// The keepalive fail-safe (TS 103 221-1), applied to the triggering interface
 	// for the reason it exists: a triggering function that goes away must not leave
 	// interception running behind it. The same mechanism already guards the ADMF
-	// path on the AMF and SMF (design D11 Part B). A nil stop channel means it runs
-	// for as long as this element can hold tasking, which is the whole point.
+	// path on the AMF and SMF. A nil stop channel means it runs for as long as this
+	// element can hold tasking, which is the whole point.
 	if keepalive > 0 {
 		go srv.WatchKeepalive(keepalive, nil)
 	}
