@@ -130,7 +130,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 	// ListOfDIDs), so no delivery client can be built here — one is created per
 	// MDF3 address on first use. Delivery is asynchronous either way: shipLoop must
 	// keep draining the datapath socket and cannot block on an MDF3, or the unread
-	// socket would make BESS drop every subsequent copy (review R3b).
+	// socket would make BESS drop every subsequent copy.
 	s := &liShipper{
 		sockAddr:  cfg.X3SockAddr,
 		sock:      sock,
@@ -152,7 +152,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 	go s.shipLoop()
 	// Loss between the datapath and this shipper is invisible from here — a copy
 	// discarded on the socket write never arrives — so it is watched from the only
-	// vantage point that can see it, the datapath's own accounting (review R36).
+	// vantage point that can see it, the datapath's own accounting.
 	startLIPuntMonitor(client, issueReporter)
 
 	return s, nil
@@ -168,8 +168,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 // the buffer size at all. The byte budget only starts to bind after that queue
 // limit is raised, which is a deployment matter — the sysctl is per network
 // namespace, so the pod needs it set before this socket is created. Measured
-// effect of raising it from 10 to 4096: egress loss under burst fell by about half
-// (review R36).
+// effect of raising it from 10 to 4096: egress loss under burst fell by about half.
 func setPuntReadBuffer(sock net.Conn, size int) {
 	if size <= 0 {
 		return
@@ -228,8 +227,7 @@ func (s *liShipper) shipLoop() {
 		case s.punted <- out:
 		default:
 			// Framing cannot keep up. This is lost content like any other, so it is
-			// reported rather than left to be inferred from a counter nobody reads
-			// (review R36).
+			// reported rather than left to be inferred from a counter nobody reads.
 			s.recycle(out)
 			s.report(x1.NEIssueX3FramingLost, "content copies dropped before framing")
 		}
@@ -267,12 +265,12 @@ func (s *liShipper) recycle(b []byte) {
 // an LI_T3 task.
 //
 // Duplication and tasking reach this UPF over different interfaces — the DUPL
-// apply-action over PFCP, the warrant over X1 (design D14) — so they can disagree.
+// apply-action over PFCP, the warrant over X1 — so they can disagree.
 // Content whose session has no task is **dropped and reported**, never delivered:
 // the only label available for it would be a zero XID, and a mediation function
 // attributes product by XID alone and discards what it cannot attribute without
 // complaint. Shipping it would look like working interception while delivering
-// nothing usable, which is the failure R34 was (review R34).
+// nothing usable.
 func (s *liShipper) ship(tagged []byte) {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 
@@ -308,7 +306,7 @@ func (s *liShipper) ship(tagged []byte) {
 	// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
 	// a slow/unreachable MDF3 cannot stall the socket read (which would make
 	// BESS drop subsequent copies). Delivery failures are reported from the
-	// worker via the onError hook set in senderFor (review R3b).
+	// worker via the onError hook set in senderFor.
 	//nolint:errcheck // async enqueue never blocks; delivery failures report via onError
 	_ = sender.Send(shipperPDU(tagged, task))
 }
@@ -348,7 +346,7 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 		// A full queue is lost content, and it is not covered by the delivery-failure
 		// report above: that fires when the MDF is unreachable, whereas the queue
 		// overflows when the MDF is reachable but slower than the offered rate. Left
-		// unreported, the product is silently incomplete (review R36).
+		// unreported, the product is silently incomplete.
 		func() { s.report(x1.NEIssueX3DeliveryLost, "content copies dropped from the delivery queue") },
 	)
 	s.senders[addr] = sender
@@ -361,7 +359,7 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 // a wiring in which they do not reach the encap is accepted at load time with only
 // a printed note, and every copy then carries a zero correlation id or an unknown
 // action. Interception would be running but its product would not be correlatable
-// by the MDF, so surface it over X1 — never to general logs (design D11).
+// by the MDF, so surface it over X1 — never to general logs.
 func (s *liShipper) checkTag(tagged []byte) {
 	switch tagged[fseidTagLen] {
 	case farForwardDAndDuplicate, farForwardUAndDuplicate:
@@ -414,7 +412,7 @@ func shipperPDU(tagged []byte, task types.InterceptTask) *x2x3.PDU {
 	// 6.2.1.2, which is what makes the content attributable at all), and the
 	// correlation identifier is the value the SMF also put on that session's xIRI,
 	// which is what lets the MDF join content to signalling. Deriving either
-	// locally is how the two streams came to disagree (review R20/R34, design D12).
+	// locally is how the two streams came to disagree.
 	pdu.XID = task.DeliveryXID().Bytes()
 	binary.BigEndian.PutUint64(pdu.CorrelationID[:], task.CorrelationID)
 

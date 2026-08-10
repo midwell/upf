@@ -853,8 +853,8 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 		if _, err := startLIShipper(conf.Li, b.client); err != nil {
 			// Do not name the subsystem or echo err (which carries LI-identifying
 			// text) on the general BESS log: that would reveal to an unauthorized
-			// operator that this NE is LI-provisioned (review R23; li-security-isolation
-			// NE-level undetectability). No X1 channel exists yet at datapath init, so
+			// operator that this NE is LI-provisioned, which network-element-level
+			// undetectability forbids. No X1 channel exists yet at datapath init, so
 			// pending a restricted LI log sink this is surfaced only non-attributably.
 			logger.BessLog.Errorln("an optional datapath subsystem failed to initialise")
 		}
@@ -1248,7 +1248,7 @@ func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, me
 // the RAN as a PDU type that does not exist.
 //
 // So this function must keep returning stock values only. The duplication signal
-// lives in setFwdActionValue instead (review R30).
+// lives in setFwdActionValue instead.
 func (b *bess) setActionValue(f far) uint8 {
 	if (f.applyAction & ActionForward) != 0 {
 		switch f.dstIntf {

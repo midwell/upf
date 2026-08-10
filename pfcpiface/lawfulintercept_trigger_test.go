@@ -180,7 +180,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	// The destination has to exist before a trigger may name it: this POI refuses a
 	// content trigger whose destinations it does not know, so that a triggering
-	// function whose provisioning has been lost finds out (review R37).
+	// function whose provisioning has been lost finds out.
 	const did = "33333333-3333-4333-8333-333333333333"
 	if err := req.CreateDestination(x1.Destination{
 		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
@@ -230,7 +230,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	}
 
 	// A session nobody tasked must not resolve to a warrant, or content would be
-	// delivered labelled with someone else's (review R34).
+	// delivered labelled with someone else's.
 	if _, _, ok := lookupTrigger(tasks, seid+1); ok {
 		t.Error("an untasked session resolved to a trigger")
 	}
@@ -244,7 +244,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	}
 }
 
-// TestTriggerListenerRejectsForeignTasker is R26's attack aimed at this interface:
+// TestTriggerListenerRejectsForeignTasker aims the same attack at this interface:
 // a certificate the LI CA legitimately issued, asserting an identity it is not
 // bound to. Being inside the LI trust domain is not authority to task this UPF.
 func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
@@ -303,7 +303,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 // TestTriggerListenerBindFailureIsReported checks the fail-closed behaviour: a
 // CC-POI that cannot be tasked must not come up looking healthy, and the fault
-// goes to the ADMF rather than a general log (design D11).
+// goes to the ADMF rather than a general log.
 func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
@@ -334,7 +334,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	}
 }
 
-// TestShipDropsContentWithoutATask is R34's guard at the point of delivery.
+// TestShipDropsContentWithoutATask is the guard at the point of delivery.
 // Duplication (PFCP DUPL) and tasking (LI_T3) arrive over different interfaces
 // and can disagree, so content whose session has no task must be dropped and
 // reported — never shipped with an XID no mediation function can attribute.
@@ -445,7 +445,7 @@ func (r *recordingReporter) reported() []string {
 	return append([]string(nil), r.issues...)
 }
 
-// TestTriggerKeepaliveFailSafePurgesTasking is review R39: tasking must not
+// TestTriggerKeepaliveFailSafePurgesTasking: tasking must not
 // outlive the party responsible for it. A triggering function that restarts
 // forgets the triggers it installed, and content intercepted under a trigger
 // nobody can withdraw keeps flowing past the point where the warrant itself is

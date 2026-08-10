@@ -43,7 +43,7 @@ func (f *fakeCounters) GetPortStats(_ context.Context, _ *pb.GetPortStatsRequest
 	return &pb.GetPortStatsResponse{Out: &pb.GetPortStatsResponse_Stat{Packets: f.sent}}, nil
 }
 
-// TestPuntMonitorReportsNewLossOnly is the logic R36 turns on: content discarded
+// TestPuntMonitorReportsNewLossOnly covers the reporting logic: content discarded
 // on the way out of the datapath has to reach the ADMF, and has to do so without
 // re-reporting a gap that has stopped growing.
 func TestPuntMonitorReportsNewLossOnly(t *testing.T) {

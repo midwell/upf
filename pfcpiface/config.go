@@ -88,9 +88,9 @@ type LiConfig struct {
 	// It exists because tasking must not outlive the party responsible for it: a
 	// triggering function that restarts forgets the triggers it installed, and
 	// without this the POI would keep intercepting content nobody can withdraw —
-	// past the point where the warrant itself is revoked (review R39). The
-	// triggering function keeps tasking alive by sending keepalives, so this only
-	// lapses when it is genuinely gone.
+	// past the point where the warrant itself is revoked. The triggering function
+	// keeps tasking alive by sending keepalives, so this only lapses when it is
+	// genuinely gone.
 	TriggerKeepalive string `json:"trigger_keepalive"`
 }
 
@@ -199,7 +199,7 @@ func validateConf(conf Conf) error {
 			"li.ca_cert":     conf.Li.CACert,
 			// The triggering interface is not optional either: a CC-POI with no
 			// LI_T3 listener receives no warrant identity, so it can only produce
-			// content no mediation function is able to attribute (review R34).
+			// content no mediation function is able to attribute.
 			"li.x1_listen": conf.Li.X1Listen,
 			"li.tf_id":     conf.Li.TFID,
 			"li.ne_id":     conf.Li.NEID,

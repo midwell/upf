@@ -26,7 +26,7 @@ import (
 // the merge module counts what it handed to the egress port, the port counts what
 // it managed to send, and the difference is what was dropped on the way out. The
 // PFCP agent already holds a bessd channel for programming the pipeline, so it can
-// read both and report the gap (review R36).
+// read both and report the gap.
 
 const (
 	// liPuntPollInterval is how often the egress accounting is compared. Loss
@@ -143,7 +143,7 @@ func (m *liPuntMonitor) handedToPort() (uint64, bool) {
 
 	// Neither module is present, so this element cannot tell whether content is
 	// being discarded on its way in. That is not "no loss" — it is no longer
-	// knowing, which the ADMF should hear about once rather than never (review R36).
+	// knowing, which the ADMF should hear about once rather than never.
 	if !m.blind {
 		m.blind = true
 		m.reporter.Notify(x1.NEIssueInvalidConfig,

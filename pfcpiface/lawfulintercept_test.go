@@ -87,7 +87,7 @@ func TestParseFARDuplicateIsSilent(t *testing.T) {
 // BESS's GtpuEncap reuses "action" as the GTP-U PDU Session Container PDU Type,
 // where only 0 (downlink) and 1 (uplink) exist. Putting a duplication value there
 // shipped an undefined PDU type to the RAN, which segfaulted parsing it (review
-// R30). The duplication variants therefore belong on fwd_action alone, and the
+// type). The duplication variants therefore belong on fwd_action alone, and the
 // second half of this table is the regression guard for that.
 func TestSetFwdActionValueDuplicate(t *testing.T) {
 	b := &bess{}
@@ -146,14 +146,14 @@ func TestPayloadFormatOf(t *testing.T) {
 // TestShipperPDU checks that a teed datapath packet ([fseid(8)][action(1)][pkt])
 // is framed as a valid X3 PDU: the warrant XID and correlation identifier taken
 // from the session's LI_T3 task, the inner packet as payload, and — critically
-// (finding R2) — the payload format + direction set from the FAR action, so the
+// — the payload format + direction set from the FAR action, so the
 // downlink copy is labeled GTP-U (not mislabeled as decapsulated inner IP) and
 // the uplink copy is labeled inner IP.
 func TestShipperPDU(t *testing.T) {
 	fseid := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	// The identity a CC-TF supplied for this session. Neither field is derived
 	// from the packet: the XID is the warrant's, the correlation is the value the
-	// SMF also put on the session's xIRI (review R34, design D12).
+	// SMF also put on the session's xIRI.
 	task := types.InterceptTask{
 		XID:           "11111111-1111-4111-8111-111111111111",
 		ProductID:     "26328981-45f4-4191-8000-000000000000",
@@ -173,14 +173,14 @@ func TestShipperPDU(t *testing.T) {
 		t.Errorf("uplink: format=%d direction=%d, want IPv4/FromTarget", ul.PayloadFormat, ul.Direction)
 	}
 	// The correlation identifier is the task's, big-endian, so it matches the value
-	// the SMF put on that session's X2 xIRI (review R20 / design D12). It is no
-	// longer derived from the datapath tag — the tag only selects the task.
+	// the SMF put on that session's X2 xIRI. It is no longer derived from the
+	// datapath tag — the tag only selects the task.
 	wantCorr := []byte{0x26, 0x32, 0x89, 0x81, 0x45, 0xf4, 0xd1, 0x91}
 	if !bytes.Equal(ul.CorrelationID[:], wantCorr) || !bytes.Equal(ul.Payload, inner) {
 		t.Errorf("uplink: correlation=% x (want % x) payload=% x", ul.CorrelationID, wantCorr, ul.Payload)
 	}
 	// The XID is the warrant's, taken from the task's ProductID. A zero XID here is
-	// content no mediation function can attribute, which is the defect R34 was.
+	// content no mediation function can attribute.
 	wantXID := task.ProductID.Bytes()
 	if ul.XID != wantXID {
 		t.Errorf("uplink: XID = %x, want the warrant XID %x", ul.XID, wantXID)
@@ -205,7 +205,7 @@ func TestShipperPDU(t *testing.T) {
 
 // TestShipperPDUStripsLinkLayer covers what the datapath actually tees: BESS's
 // GTP-U decap leaves the Ethernet header in place, so the teed copy is a full
-// frame (observed on a live bessd pipeline, task 5.5). X3 carries the network
+// frame (observed on a live bessd pipeline). X3 carries the network
 // layer, so the L2 header must be stripped — otherwise the MDF receives 14 extra
 // bytes under a payload format claiming an IP packet.
 func TestShipperPDUStripsLinkLayer(t *testing.T) {
@@ -292,7 +292,7 @@ func (f *fakeNEIssueReporter) Notify(issueType, _ string) {
 }
 
 // TestCheckTagReportsUnusableTag proves an unusable content tag is reported to the
-// ADMF over X1 (design D11) instead of silently shipping product the MDF cannot
+// ADMF over X1 instead of silently shipping product the MDF cannot
 // correlate. A tag whose metadata never reached the datapath encap carries a zero
 // correlation or an unknown action — interception runs but its product is useless.
 func TestCheckTagReportsUnusableTag(t *testing.T) {
