@@ -4,6 +4,7 @@
 package pfcpiface
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -620,7 +621,8 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	if _, err := startTriggerListener(cfg, &tls.Config{}, nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
-	ln, err := net.Listen("tcp", addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatalf("X1 port still bound after a rejected trigger_keepalive: %v", err)
 	}

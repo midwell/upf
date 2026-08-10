@@ -4,11 +4,11 @@
 package integration
 
 import (
-	"github.com/omec-project/upf-epc/pkg/fake_bess"
 	"net"
 	"testing"
 
 	"github.com/omec-project/pfcpsim/pkg/pfcpsim/session"
+	"github.com/omec-project/upf-epc/pkg/fake_bess"
 	"github.com/wmnsk/go-pfcp/ie"
 )
 
