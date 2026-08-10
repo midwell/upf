@@ -183,7 +183,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	// function whose provisioning has been lost finds out (review R37).
 	const did = "33333333-3333-4333-8333-333333333333"
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "10.0.60.122", Port: 42069,
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 
 	const did = "33333333-3333-4333-8333-333333333333"
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "10.0.60.122", Port: 42069,
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}

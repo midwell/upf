@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2021 Open Networking Foundation <info@opennetworking.org>
+# SPDX-License-Identifier: Apache-2.0
+#
+# Local packaging Dockerfile: wraps a host-cross-compiled linux/amd64 pfcpiface
+# binary (built in the go.work workspace so the li module resolves) into the
+# same runtime image the upstream Dockerfile "pfcp" stage produces. Used because
+# the in-container build cannot resolve github.com/omec-project/li yet (task 8.3).
+
+FROM alpine:3.24 AS pfcp
+
+LABEL description="SD-Core UPF PFCP agent (LI-enabled, locally packaged)"
+
+COPY conf /opt/bess/bessctl/conf
+COPY pfcpiface.amd64 /bin/pfcpiface
+ENTRYPOINT [ "/bin/pfcpiface" ]
