@@ -156,6 +156,11 @@ func (node *PFCPNode) NewPFCPConn(lAddr, rAddr string, buf []byte) *PFCPConn {
 
 	p.setLocalNodeID(node.upf.nodeID)
 
+	// Lawful Interception tasking is held per element but resolved against sessions,
+	// which live per association. Registering the store is what lets tasking already
+	// in place apply to this association's sessions.
+	node.upf.ccEnabler.addSource(p.store)
+
 	if buf != nil {
 		// TODO: Check if the first msg is Association Setup Request
 		p.HandlePFCPMsg(buf)
@@ -302,6 +307,8 @@ func (pConn *PFCPConn) executeShutdown() {
 
 		pConn.RemoveSession(sess)
 	}
+
+	pConn.upf.ccEnabler.removeSource(pConn.store)
 
 	rAddr := pConn.RemoteAddr().String()
 

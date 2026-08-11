@@ -164,7 +164,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		X1Listen: freePort(t),
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -212,11 +212,11 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	if err := req.ActivateTask(unknown); err == nil {
 		t.Error("a content trigger naming an unknown destination was accepted")
 	}
-	if _, _, ok := lookupTrigger(tasks, seid+7); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid+7); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 
-	task, _, ok := lookupTrigger(tasks, seid)
+	task, _, ok := lookupTrigger(tasks, nil, seid)
 	if !ok {
 		t.Fatal("no trigger found for the tasked session")
 	}
@@ -231,7 +231,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	// A session nobody tasked must not resolve to a warrant, or content would be
 	// delivered labelled with someone else's.
-	if _, _, ok := lookupTrigger(tasks, seid+1); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid+1); ok {
 		t.Error("an untasked session resolved to a trigger")
 	}
 
@@ -239,7 +239,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		t.Fatalf("DeactivateTask: %v", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("trigger still installed after DeactivateTask")
 	}
 }
@@ -261,7 +261,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Errorf("err = %v, want X1 error 1030 (identifier does not match certificate)", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 }
@@ -325,7 +325,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	rec := &recordingReporter{}
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: busy.Addr().String()}
 
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec); err == nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil); err == nil {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
@@ -379,7 +379,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			XID:           "11111111-1111-4111-8111-111111111111",
 			ProductID:     "22222222-2222-4222-8222-222222222222",
 			CorrelationID: 7,
-			Targets:       []types.TargetIdentifier{types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"}},
+			Targets:       []types.TargetIdentifier{{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
 			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX2, Address: "10.0.0.1:42069"}},
 		})
@@ -402,7 +402,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			XID:           "11111111-1111-4111-8111-111111111111",
 			ProductID:     "22222222-2222-4222-8222-222222222222",
 			CorrelationID: 7,
-			Targets:       []types.TargetIdentifier{types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"}},
+			Targets:       []types.TargetIdentifier{{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
 			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
 		})
@@ -468,7 +468,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("ActivateTask: %v", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("trigger was not installed")
 	}
 
@@ -512,21 +512,21 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		}
 	}
 
-	if _, _, ok := lookupTrigger(tasks, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("tasking was purged while the triggering function was still talking")
 	}
 
 	// Now it goes quiet, as a restarted one does.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, ok := lookupTrigger(tasks, seid); !ok {
+		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 			break
 		}
 
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 	}
 
@@ -570,7 +570,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 
 	const wantXID = types.XID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	for i := range 50 {
-		task, covering, ok := lookupTrigger(tasks, seid)
+		task, covering, ok := lookupTrigger(tasks, nil, seid)
 		if !ok {
 			t.Fatalf("pass %d: tasked session did not resolve to a trigger", i)
 		}
@@ -618,7 +618,7 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	// Nothing may be left listening when the window is rejected.
 	addr := freePort(t)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
-	if _, err := startTriggerListener(cfg, &tls.Config{}, nil); err == nil {
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
 	var lc net.ListenConfig

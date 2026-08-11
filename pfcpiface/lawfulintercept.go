@@ -63,6 +63,11 @@ type liShipper struct {
 	// F-SEID the datapath tags onto duplicated packets. It is what supplies the
 	// warrant XID and correlation identifier for each copy.
 	tasks *store.Store
+	// enabler resolves a task's detection criteria against PFCP session state. The
+	// shipper needs it because a task's criterion need not be the session identity
+	// the datapath tags copies with. Nil only in a test that built a shipper
+	// directly, where the F-SEID criterion is all that can be answered.
+	enabler *ccEnabler
 	// tlsConfig is the client side of the LI PKI, used to dial each MDF3.
 	tlsConfig *tls.Config
 
@@ -92,7 +97,7 @@ type neIssueReporter interface {
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
 // the MDF3 (mutual TLS), and starts the shipping loop.
-func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, error) {
+func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShipper, error) {
 	mat, err := mtls.Load(cfg.Cert, cfg.Key, cfg.CACert)
 	if err != nil {
 		return nil, err
@@ -120,7 +125,18 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 		issueReporter = reporter
 	}
 
-	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter)
+	// Duplication control before the listener, because the listener refuses tasking
+	// it cannot carry out and needs this to answer. u is nil only in a test that
+	// builds a shipper without a datapath.
+	var enabler *ccEnabler
+	if u != nil {
+		enabler = newCCEnabler(nil, func(all, updated PacketForwardingRules) {
+			u.SendMsgToUPF(upfMsgTypeMod, all, updated)
+		})
+		u.ccEnabler = enabler
+	}
+
+	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler)
 	if err != nil {
 		_ = sock.Close()
 
@@ -135,6 +151,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient) (*liShipper, err
 		sockAddr:  cfg.X3SockAddr,
 		sock:      sock,
 		tasks:     tasks,
+		enabler:   enabler,
 		tlsConfig: mat.ClientTLS(),
 		senders:   make(map[string]x2x3.Sender),
 		punted:    make(chan []byte, liFrameQueueDepth),
@@ -274,7 +291,7 @@ func (s *liShipper) recycle(b []byte) {
 func (s *liShipper) ship(tagged []byte) {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 
-	task, covering, ok := lookupTrigger(s.tasks, fseid)
+	task, covering, ok := lookupTrigger(s.tasks, s.enabler, fseid)
 	if !ok {
 		s.report(x1.NEIssueContentUntasked, "duplicated content for a session with no interception task")
 
