@@ -201,6 +201,10 @@ type pdrRef struct {
 	pdrID uint32
 	farID uint32
 	cover coverage
+	// uplink is the direction of the PDR's traffic, which is what lets a copy be
+	// attributed without inspecting it: the datapath's tag says which direction each
+	// copy came from.
+	uplink bool
 }
 
 func (r pdrRef) String() string {
@@ -224,7 +228,10 @@ func (c criterion) resolve(sessions []PFCPSession) []pdrRef {
 		for j := range sessions[i].pdrs {
 			p := sessions[i].pdrs[j]
 			if cov := c.matchPDR(p); cov != coverNone {
-				out = append(out, pdrRef{seid: p.fseID, pdrID: p.pdrID, farID: p.farID, cover: cov})
+				out = append(out, pdrRef{
+					seid: p.fseID, pdrID: p.pdrID, farID: p.farID,
+					cover: cov, uplink: p.IsUplink(),
+				})
 			}
 		}
 	}

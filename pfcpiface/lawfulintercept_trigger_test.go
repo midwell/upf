@@ -212,11 +212,11 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	if err := req.ActivateTask(unknown); err == nil {
 		t.Error("a content trigger naming an unknown destination was accepted")
 	}
-	if _, _, ok := lookupTrigger(tasks, nil, seid+7); ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid+7); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 
-	task, _, ok := lookupTrigger(tasks, nil, seid)
+	task, _, _, ok := lookupTrigger(tasks, nil, seid)
 	if !ok {
 		t.Fatal("no trigger found for the tasked session")
 	}
@@ -231,7 +231,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	// A session nobody tasked must not resolve to a warrant, or content would be
 	// delivered labelled with someone else's.
-	if _, _, ok := lookupTrigger(tasks, nil, seid+1); ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid+1); ok {
 		t.Error("an untasked session resolved to a trigger")
 	}
 
@@ -239,7 +239,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		t.Fatalf("DeactivateTask: %v", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("trigger still installed after DeactivateTask")
 	}
 }
@@ -296,7 +296,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Errorf("err = %v, want X1 error 1030 (identifier does not match certificate)", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 }
@@ -498,7 +498,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("ActivateTask: %v", err)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("trigger was not installed")
 	}
 
@@ -512,21 +512,21 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		}
 	}
 
-	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("tasking was purged while the triggering function was still talking")
 	}
 
 	// Now it goes quiet, as a restarted one does.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+		if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 			break
 		}
 
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 	}
 
@@ -570,7 +570,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 
 	const wantXID = types.XID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	for i := range 50 {
-		task, covering, ok := lookupTrigger(tasks, nil, seid)
+		task, _, covering, ok := lookupTrigger(tasks, nil, seid)
 		if !ok {
 			t.Fatalf("pass %d: tasked session did not resolve to a trigger", i)
 		}

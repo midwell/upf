@@ -9,6 +9,7 @@ import (
 
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
+	"github.com/omec-project/li/x1"
 )
 
 // enablerFixture is a CC-POI duplication control wired to an in-memory session
@@ -120,7 +121,7 @@ func unmarkedSession(seid uint64, ue string) PFCPSession {
 		PacketForwardingRules: PacketForwardingRules{
 			pdrs: []pdr{
 				uplinkPDR(seid, 1, uint32(seid)+0x1000, ip2int(net.ParseIP("10.76.0.2")), addr),
-				downlinkPDR(seid, 2, 2, addr),
+				downlinkPDR(seid, 2, addr),
 			},
 			fars: []far{
 				{farID: 1, fseID: seid, applyAction: ActionForward},
@@ -381,7 +382,7 @@ func TestLookupFindsTaskByNonSessionCriterion(t *testing.T) {
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 	f.activate(t, "W1", ueAddr("10.250.0.9"))
 
-	task, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("a copy from the tasked session was not attributed to its warrant")
 	}
@@ -391,11 +392,11 @@ func TestLookupFindsTaskByNonSessionCriterion(t *testing.T) {
 
 	// The other subscriber's session is not covered, and a copy from it must stay
 	// unattributed rather than be labelled with someone else's warrant.
-	if _, _, ok := lookupTrigger(f.tasks, f.e, 200); ok {
+	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 200); ok {
 		t.Error("a copy from an untasked session was attributed to a warrant")
 	}
 	// Nor may a session this element has never heard of resolve to anything.
-	if _, _, ok := lookupTrigger(f.tasks, f.e, 999); ok {
+	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 999); ok {
 		t.Error("a copy tagged with an unknown session was attributed to a warrant")
 	}
 }
@@ -411,7 +412,7 @@ func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 	f.activate(t, "W-b", ueAddr("10.250.0.9"))
 	f.activate(t, "W-a", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
 
-	first, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	first, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("no task found")
 	}
@@ -419,7 +420,7 @@ func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 		t.Errorf("covering = %d, want both warrants counted so the overlap is reported", covering)
 	}
 	for range 20 {
-		task, _, _ := lookupTrigger(f.tasks, f.e, 100)
+		task, _, _, _ := lookupTrigger(f.tasks, f.e, 100)
 		if task.XID != first.XID {
 			t.Fatalf("attribution moved between warrants: %q then %q", first.XID, task.XID)
 		}
@@ -441,7 +442,102 @@ func TestLookupCountsOnlyCoveringWarrants(t *testing.T) {
 	f.activate(t, "W1", ueAddr("10.250.0.9"))
 	f.activate(t, "W2", ueAddr("10.250.0.10"))
 
-	if _, covering, _ := lookupTrigger(f.tasks, f.e, 100); covering != 1 {
+	if _, _, covering, _ := lookupTrigger(f.tasks, f.e, 100); covering != 1 {
 		t.Errorf("covering = %d for a session under one warrant, want 1", covering)
+	}
+}
+
+// TestModifyTaskChangesCriteriaInPlace covers table 6.2.3-8's allowance for a
+// ModifyTask to replace a task's detection criteria. The interception must follow
+// the new criteria without being torn down and rebuilt: traffic the superseded
+// criteria selected stops, traffic only the new ones select starts, and the product
+// stays attributed to the same warrant throughout — a mediation function selects by
+// warrant identifier, so a change of attribution across a modify would split the
+// product in two.
+func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
+	f := newEnablerFixture(t)
+	// Both directions through one FAR, so direction filtering is doing real work: the
+	// copies the criteria do not select still arrive and have to be dropped.
+	f.putSession(t, sharedFARSession())
+
+	inbound := types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionInbound}
+	outbound := types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound}
+
+	task := types.InterceptTask{
+		XID: "trigger-1", ProductID: "warrant-1", CorrelationID: 7,
+		Targets:  []types.TargetIdentifier{inbound},
+		Products: []types.ProductType{types.ProductCC},
+	}
+	if err := f.e.canApply(task); err != nil {
+		t.Fatalf("canApply: %v", err)
+	}
+	f.tasks.Activate(task)
+	f.e.retask()
+
+	_, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
+	if !ok {
+		t.Fatal("the task does not cover the session")
+	}
+	if !filter.matches(farForwardUAndDuplicate, uplinkCopy(443)) {
+		t.Error("uplink content is not delivered for an inbound criterion")
+	}
+	if filter.matches(farForwardDAndDuplicate, downlinkCopy(443)) {
+		t.Error("downlink content is delivered for an inbound criterion")
+	}
+	if !f.duplicates(t, 100, 9) {
+		t.Fatal("duplication was not enabled")
+	}
+
+	// The ModifyTask: same XID, different criteria. This is what x1 does with a
+	// retarget — the task is replaced in place, never deactivated.
+	task.Targets = []types.TargetIdentifier{outbound}
+	if err := f.e.canApply(task); err != nil {
+		t.Fatalf("canApply after modify: %v", err)
+	}
+	f.tasks.Activate(task)
+	f.e.retask()
+
+	got, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
+	if !ok {
+		t.Fatal("the modified task no longer covers the session")
+	}
+	if filter.matches(farForwardUAndDuplicate, uplinkCopy(443)) {
+		t.Error("content the superseded criteria selected is still delivered")
+	}
+	if !filter.matches(farForwardDAndDuplicate, downlinkCopy(443)) {
+		t.Error("content the new criteria select is not delivered")
+	}
+	// Still duplicating: the modify narrowed which copies are delivered, not whether
+	// the traffic is copied at all.
+	if !f.duplicates(t, 100, 9) {
+		t.Error("the modify withdrew duplication the task still needs")
+	}
+	// And the labels a mediation function joins on are unchanged.
+	if got.DeliveryXID() != "warrant-1" || got.CorrelationID != 7 {
+		t.Errorf("attribution changed across the modify: XID %q, correlation %d",
+			got.DeliveryXID(), got.CorrelationID)
+	}
+}
+
+// TestModifyToACriterionSelectingNothingStopsContent checks the other end of a
+// modify: criteria that no longer select anything in the session must stop the
+// content, not leave the previous enablement running. Continuing would deliver
+// traffic under a warrant whose criteria no longer describe it.
+func TestModifyToACriterionSelectingNothingStopsContent(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	if !f.duplicates(t, 100, 1) {
+		t.Fatal("duplication was not enabled")
+	}
+
+	// Retargeted at a subscriber that is not here.
+	f.activate(t, "W1", ueAddr("10.250.0.99"))
+
+	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+		t.Error("duplication continued for criteria the task no longer carries")
+	}
+	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
+		t.Error("copies of the session are still attributed to the retargeted warrant")
 	}
 }
