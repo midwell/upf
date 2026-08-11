@@ -174,6 +174,13 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		qers: addQERs,
 	}
 
+	// Lawful Interception: a criterion may identify traffic in a session that did not
+	// exist when the task was activated, so the tasking is resolved against every new
+	// session as it is established rather than only at tasking time. Without this,
+	// coverage would depend on the triggering function noticing each new session — and
+	// a missed one is an interception silently producing nothing.
+	upf.ccEnabler.applyTasking(&session, &updated)
+
 	cause := upf.SendMsgToUPF(upfMsgTypeAdd, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
 		pConn.RemoveSession(session)
@@ -371,6 +378,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		fars: addFARs,
 		qers: addQERs,
 	}
+
+	// Lawful Interception: the SMF's FARs above carry the SMF's view of each apply
+	// action, which knows nothing of interception tasking. Re-deriving here is what
+	// stops a routine modification from ending an interception mid-session — silently,
+	// with the triggering function still believing it is running.
+	upf.ccEnabler.applyTasking(&session, &updated)
 
 	cause := upf.SendMsgToUPF(upfMsgTypeMod, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {

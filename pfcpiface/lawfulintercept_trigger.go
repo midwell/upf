@@ -38,7 +38,7 @@ import (
 // of failing closed here is that this is not discoverable from the outside.
 // Nothing is logged — that this NE can be tasked at all must not appear in a
 // general operator log.
-func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter) (*store.Store, error) {
+func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter, enabler *ccEnabler) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
 	// already abandoned by returning an error — an element that looks un-tasked to
@@ -49,6 +49,9 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	}
 
 	tasks := store.New()
+	if enabler != nil {
+		enabler.tasks = tasks
+	}
 	// RequireResolvableDIDs is what lets the triggering function find out that this
 	// POI has lost the destination it provisioned — after a restart, say. Accepting
 	// such a trigger would mean duplicating a subject's traffic and discarding every
@@ -61,11 +64,24 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		x1.WithADMF(cfg.TFID),
 		x1.RequireResolvableDIDs(),
 		x1.OnDeactivate(func(types.InterceptTask) {
+			// Whatever duplication this task required and no remaining task does is
+			// withdrawn, before the report: interception stopping is the outcome being
+			// reported, so it must actually have stopped.
+			enabler.retask()
 			if reporter != nil {
 				reporter.Notify(x1.NEIssueTaskingPurged,
 					"content interception tasking removed; the triggering function went quiet")
 			}
 		}),
+		// A task is refused unless every detection criterion is one this datapath can
+		// resolve. Acknowledging one it cannot leaves the triggering function believing
+		// an interception is running that can never produce anything — and nothing
+		// outside this element could discover that.
+		x1.CanApply(enabler.canApply),
+		// The traffic a criterion identifies may be traffic the SMF never marked, so
+		// accepting the task is not enough: duplication has to be enabled for it here.
+		// Modifications reach this too, since x1 treats a retarget as an activation.
+		x1.OnActivate(func(types.InterceptTask) { enabler.retask() }),
 		// Someone in the LI trust domain trying to trigger this CC-POI as a triggering
 		// function it is not would be aiming a subject's traffic at a destination of
 		// their choosing. It is refused, but this element logs nothing by design, so
@@ -145,15 +161,25 @@ func triggerKeepalive(v string) (time.Duration, error) {
 // leaving every agency with a partial stream and none with a usable one. The count
 // is returned so the caller can tell the ADMF that a warrant is being served
 // nothing, which is the part of this compromise that must not stay quiet.
-func lookupTrigger(tasks *store.Store, seid uint64) (types.InterceptTask, int, bool) {
+func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, int, bool) {
 	if tasks == nil || seid == 0 {
 		return types.InterceptTask{}, 0, false
 	}
 
-	matched := tasks.Match(types.TargetIdentifier{
-		Type:  types.TargetFSEID,
-		Value: strconv.FormatUint(seid, 10),
-	})
+	// A task may be keyed by any of the detection criteria of table 6.2.3-7, most of
+	// which name something other than a session — an address, a tunnel, a network
+	// instance. Only the duplication control can say whether such a criterion selects
+	// traffic in this session, since answering needs the session's own rules.
+	matched := enabler.tasksCovering(seid)
+	if len(matched) == 0 {
+		// Without duplication control there is no session state to resolve against, so
+		// the only criterion that can be answered is the session identity itself. This
+		// is the path a shipper built without a datapath takes.
+		matched = tasks.Match(types.TargetIdentifier{
+			Type:  types.TargetFSEID,
+			Value: strconv.FormatUint(seid, 10),
+		})
+	}
 	if len(matched) == 0 {
 		return types.InterceptTask{}, 0, false
 	}
