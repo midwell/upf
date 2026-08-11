@@ -162,11 +162,16 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 		}
 
 	case types.TargetUEIPv6:
-		// This datapath holds a UE address as a uint32 and installs IPv4 rules only,
-		// so no session it can describe has an IPv6 UE address to match. Refused
-		// rather than accepted-and-never-matched, which is an interception that
-		// produces nothing while reporting success.
-		return criterion{}, fmt.Errorf("li: UE IPv6 addresses are not supported by this datapath")
+		// Not an interception limitation: this core has no IPv6 PDU sessions to
+		// intercept. The SMF cannot allocate an IPv6 UE address (its allocator is
+		// 32-bit, and the NAS accept it would build carries a zero-length address),
+		// and a session establishment naming one is rejected here at PDI parse time,
+		// where a UE address that is not four octets is an error. So an IPv6
+		// criterion could not match anything however it were resolved.
+		//
+		// Refused rather than accepted-and-never-matched, which would be an
+		// interception producing nothing while reporting success.
+		return criterion{}, fmt.Errorf("li: this UPF has no IPv6 UE addresses to match")
 
 	case types.TargetPDR:
 		// An encoded TS 29.244 rule. Comparing one to the rules a session holds needs
