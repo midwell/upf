@@ -11,6 +11,7 @@ import (
 
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // The sessions these tests resolve against, chosen so that each criterion has
@@ -458,6 +459,220 @@ func TestParseCriterionRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := parseCriterion(c.id); err == nil {
 				t.Errorf("parseCriterion(%+v) accepted a criterion it cannot resolve", c.id)
+			}
+		})
+	}
+}
+
+// encodeCreatePDR builds the wire form of a Create PDR IE, which is what a PDR
+// detection criterion carries. reorder swaps two IEs inside the PDI, producing a
+// *different encoding of the same rule* — the case an octet comparison would miss.
+func encodeCreatePDR(t *testing.T, teid uint32, ue string, reorder bool) string {
+	t.Helper()
+	pdi := []*ie.IE{
+		ie.NewSourceInterface(ie.SrcInterfaceAccess),
+		ie.NewFTEID(0x01, teid, net.ParseIP("10.76.0.2"), nil, 0),
+		ie.NewUEIPAddress(0x02, ue, "", 0, 0),
+	}
+	if reorder {
+		pdi[0], pdi[2] = pdi[2], pdi[0]
+	}
+	raw, err := ie.NewCreatePDR(
+		ie.NewPDRID(1), ie.NewPrecedence(200), ie.NewPDI(pdi...),
+		ie.NewFARID(1), ie.NewQERID(4),
+	).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	return hex.EncodeToString(raw)
+}
+
+// pdrCriterionSessions is one session whose uplink PDR is the rule the criteria
+// below describe, plus another subscriber's, so a match on the wrong one shows up.
+func pdrCriterionSessions(t *testing.T) []PFCPSession {
+	t.Helper()
+	sessions := criteriaSessions()
+	// criteriaSessions builds its uplink PDRs through the same helpers, but with a
+	// network instance and precedence that the encoded criterion does not carry, so
+	// the rule to compare against is built here from the same IEs instead.
+	rule, err := parsePDRCriterion(encodeCreatePDR(t, 0x1001, "10.250.0.9", false))
+	if err != nil {
+		t.Fatalf("building the fixture rule: %v", err)
+	}
+	rule.fseID = targetSEID
+	sessions[0].pdrs[0] = *rule
+
+	return sessions
+}
+
+// TestPDRCriterionMatchesTheRuleItNames checks the criterion that needs a whole rule
+// compared rather than a field. The comparison runs over this agent's parsed form,
+// which is what makes it independent of how the rule was encoded — PFCP puts no
+// ordering on the IEs inside a grouped IE, so an octet comparison would miss a
+// legitimate match.
+func TestPDRCriterionMatchesTheRuleItNames(t *testing.T) {
+	sessions := pdrCriterionSessions(t)
+
+	cases := []struct {
+		name  string
+		value string
+		want  []sel
+	}{
+		{
+			name:  "the rule the session holds",
+			value: encodeCreatePDR(t, 0x1001, "10.250.0.9", false),
+			want:  []sel{{targetSEID, 1, coverExact}},
+		},
+		{
+			// Same rule, different bytes. This is the case the criterion exists to
+			// survive, and the reason the comparison is not octet-for-octet.
+			name:  "the same rule encoded with its PDI in another order",
+			value: encodeCreatePDR(t, 0x1001, "10.250.0.9", true),
+			want:  []sel{{targetSEID, 1, coverExact}},
+		},
+		{
+			name:  "a rule for another tunnel selects nothing",
+			value: encodeCreatePDR(t, 0x9999, "10.250.0.9", false),
+			want:  nil,
+		},
+		{
+			name:  "a rule for another subscriber selects nothing",
+			value: encodeCreatePDR(t, 0x1001, "10.250.0.10", false),
+			want:  nil,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cr, err := parseCriterion(types.TargetIdentifier{Type: types.TargetPDR, Value: c.value})
+			if err != nil {
+				t.Fatalf("parseCriterion: %v", err)
+			}
+			got := cr.resolve(sessions)
+			if len(got) != len(c.want) {
+				t.Fatalf("selected %v, want %v", got, c.want)
+			}
+			for i, w := range c.want {
+				if got[i].seid != w.seid || got[i].pdrID != w.pdrID || got[i].cover != w.cover {
+					t.Errorf("selection %d = %v, want pdr(seid=%d, id=%d, %s)",
+						i, got[i], w.seid, w.pdrID, w.cover)
+				}
+			}
+		})
+	}
+}
+
+// TestPDRCriterionIgnoresSessionAssignedFields checks that the fields a *session*
+// assigns are excluded from the comparison. They are not properties of the rule the
+// triggering function described, so including them would make a correct criterion
+// match nothing — an interception that reports success and collects nothing.
+func TestPDRCriterionIgnoresSessionAssignedFields(t *testing.T) {
+	cr, err := parseCriterion(types.TargetIdentifier{
+		Type: types.TargetPDR, Value: encodeCreatePDR(t, 0x1001, "10.250.0.9", false),
+	})
+	if err != nil {
+		t.Fatalf("parseCriterion: %v", err)
+	}
+
+	rule := *cr.rule
+	// What a session does to a rule it installs: it belongs to a session, was sent
+	// from an address, and is counted by a counter this UPF chose.
+	rule.fseID = 0xdeadbeef
+	rule.fseidIP = ip2int(net.ParseIP("10.76.0.5"))
+	rule.ctrID = 77
+
+	if cr.matchPDR(rule) != coverExact {
+		t.Error("a rule differing only in what its session assigned did not match")
+	}
+
+	// But a difference in the rule itself must still tell them apart.
+	rule.precedence++
+	if cr.matchPDR(rule) != coverNone {
+		t.Error("a rule with a different precedence matched")
+	}
+}
+
+// TestPDRCriterionRefusals checks that a PDR criterion this agent cannot turn into a
+// rule is refused rather than resolved to something that matches nothing — the two
+// are indistinguishable afterwards, and the second is an acknowledged interception
+// that can never produce anything.
+func TestPDRCriterionRefusals(t *testing.T) {
+	valid := encodeCreatePDR(t, 0x1001, "10.250.0.9", false)
+
+	// A Create FAR, so a well-formed PFCP element that is not a rule.
+	far, err := ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(0x02)).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// A Create PDR whose UE IP Address IE asks the UPF to choose the address. That
+	// describes no traffic, so it cannot be a criterion.
+	alloc, err := ie.NewCreatePDR(
+		ie.NewPDRID(1), ie.NewPrecedence(200),
+		ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewUEIPAddress(0x10, "", "", 0, 0)),
+		ie.NewFARID(1),
+	).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// An Update PDR carries the same fields as a Create PDR, so it parses perfectly
+	// well as a rule. It is refused on the IE type alone: the criterion has to be one
+	// agreed form, and Create PDR is the one the SMF sends.
+	update, err := ie.NewUpdatePDR(
+		ie.NewPDRID(1), ie.NewPrecedence(200),
+		ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
+			ie.NewFTEID(0x01, 0x1001, net.ParseIP("10.76.0.2"), nil, 0),
+			ie.NewUEIPAddress(0x02, "10.250.0.9", "", 0, 0)),
+		ie.NewFARID(1), ie.NewQERID(4),
+	).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	cases := []struct{ name, value string }{
+		{
+			name:  "not hex at all",
+			value: "nonsense",
+		},
+		{
+			name:  "an Update PDR, which parses as a rule but is not the agreed form",
+			value: hex.EncodeToString(update),
+		},
+		{
+			name:  "odd-length hex, so not hexBinary",
+			value: "0a1",
+		},
+		{
+			name:  "empty",
+			value: "",
+		},
+		{
+			name:  "hex that is not a PFCP element",
+			value: "ffffffffffffffff",
+		},
+		{
+			name:  "a Create FAR rather than a Create PDR",
+			value: hex.EncodeToString(far),
+		},
+		{
+			name:  "a rule leaving the UE address to be allocated",
+			value: hex.EncodeToString(alloc),
+		},
+		{
+			name:  "a truncated Create PDR",
+			value: valid[:len(valid)-8],
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := parseCriterion(types.TargetIdentifier{
+				Type: types.TargetPDR, Value: c.value,
+			}); err == nil {
+				t.Error("parseCriterion accepted a PDR criterion it cannot resolve")
 			}
 		})
 	}

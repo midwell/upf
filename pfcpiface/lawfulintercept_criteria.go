@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // This file resolves a Lawful Interception detection criterion (3GPP TS 33.128
@@ -68,6 +70,13 @@ type criterion struct {
 	ruleID      uint32 // TargetPDRID, TargetQERID
 	netInstance string // TargetNetworkInstance, as the wire octets
 	uplink      bool   // TargetGTPTunnelDirection
+	// rule is a whole PDR to compare a session's rules against (TargetPDR). It is
+	// held in *this agent's* parsed form rather than as the octets it arrived as:
+	// PFCP puts no ordering on the IEs inside a grouped IE, so two encoders can
+	// describe one PDR in different bytes, and an octet comparison would miss the
+	// match. Parsing both sides with the same parser makes that parser the canonical
+	// form — which is also exactly the set of fields this UPF acts on.
+	rule *pdr
 }
 
 // Transport protocol numbers (IANA), as they appear in an SDF filter's proto field.
@@ -174,10 +183,11 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 		return criterion{}, fmt.Errorf("li: this UPF has no IPv6 UE addresses to match")
 
 	case types.TargetPDR:
-		// An encoded TS 29.244 rule. Comparing one to the rules a session holds needs
-		// canonicalisation semantics this agent does not have, and a wrong comparison
-		// intercepts the wrong traffic rather than failing visibly.
-		return criterion{}, fmt.Errorf("li: PDR criteria are not supported")
+		rule, err := parsePDRCriterion(t.Value)
+		if err != nil {
+			return criterion{}, err
+		}
+		c.rule = rule
 
 	default:
 		// Subscriber identities (SUPI, GPSI, PEI) reach the UPF only by mistake: it
@@ -186,6 +196,75 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 	}
 
 	return c, nil
+}
+
+// parsePDRCriterion decodes a PDR detection criterion — an encoded TS 29.244 rule,
+// carried as xs:hexBinary — into the form this agent holds its own rules in.
+//
+// The encoding is taken to be a Create PDR IE, which is the form the SMF sends and
+// the only one a triggering function could have obtained the rule from. Anything
+// else is refused rather than guessed at.
+func parsePDRCriterion(value string) (*pdr, error) {
+	raw, err := hex.DecodeString(value)
+	if err != nil || len(raw) == 0 {
+		return nil, fmt.Errorf("li: PDR criterion is not hexBinary")
+	}
+
+	parsed, err := ie.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("li: PDR criterion is not a PFCP information element: %w", err)
+	}
+	// Create PDR specifically, not merely something that parses as a rule: an Update
+	// PDR carries the same fields and would be accepted silently. One agreed form
+	// keeps a triggering function from having two ways to say the same thing and
+	// getting a different answer.
+	if parsed.Type != ie.CreatePDR {
+		return nil, fmt.Errorf("li: PDR criterion is IE type %d, want a Create PDR", parsed.Type)
+	}
+
+	// A pool of its own, so parsing a criterion cannot take an address from the one
+	// real sessions are served from. Nothing is expected to be allocated: a criterion
+	// asking the UPF to allocate an address is rejected below.
+	pool, err := NewIPPool(criterionScratchPool)
+	if err != nil {
+		return nil, fmt.Errorf("li: %w", err)
+	}
+
+	var rule pdr
+	if err := rule.parsePDR(parsed, 0, map[string]appPFD{}, pool); err != nil {
+		return nil, fmt.Errorf("li: PDR criterion does not parse as a rule: %w", err)
+	}
+	if rule.allocIPFlag {
+		// The UE IP Address IE asked the UPF to choose an address. That is an
+		// instruction, not a description of traffic, and the address it yielded here
+		// belongs to a throwaway pool — so this criterion could never match anything.
+		return nil, fmt.Errorf("li: PDR criterion leaves the UE address to be allocated")
+	}
+
+	return &rule, nil
+}
+
+// criterionScratchPool is the address pool parsePDRCriterion parses against. It is
+// never drawn from — a criterion whose rule asks for an allocation is refused — but
+// the parser needs a pool to be present in order to reach that refusal rather than
+// dereference nil. A fresh one per call, so nothing accumulates, and a loopback range
+// so that an address from it appearing anywhere is obviously wrong.
+const criterionScratchPool = "127.0.63.0/30"
+
+// sameRule reports whether a session's PDR is the rule a criterion names.
+//
+// The comparison is over what this agent parses, which has two consequences worth
+// being explicit about. Fields the agent does not retain do not participate, so two
+// rules differing only in an IE it ignores compare equal. And the fields a *session*
+// assigns — the F-SEID it belongs to, the address that allocated it, the counter the
+// UPF chose — are excluded, because they are not properties of the rule the
+// triggering function described.
+func sameRule(want, have pdr) bool {
+	want.fseID, have.fseID = 0, 0
+	want.fseidIP, have.fseidIP = 0, 0
+	want.ctrID, have.ctrID = 0, 0
+
+	return reflect.DeepEqual(want, have)
 }
 
 // parseIPv4 converts a dotted-quad address to the datapath's uint32 form.
@@ -291,6 +370,11 @@ func (c criterion) matchPDR(p pdr) coverage {
 
 	case types.TargetGTPTunnelDirection:
 		return exactIf(p.IsUplink() == c.uplink)
+
+	case types.TargetPDR:
+		// The criterion is a rule, so a PDR either is that rule or is not: there is
+		// nothing broader about it.
+		return exactIf(c.rule != nil && sameRule(*c.rule, p))
 
 	default:
 		// parseCriterion refuses everything else, so reaching here means a criterion
