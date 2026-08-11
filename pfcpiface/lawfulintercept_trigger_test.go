@@ -379,7 +379,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			XID:           "11111111-1111-4111-8111-111111111111",
 			ProductID:     "22222222-2222-4222-8222-222222222222",
 			CorrelationID: 7,
-			Target:        types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"},
+			Targets:       []types.TargetIdentifier{types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
 			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX2, Address: "10.0.0.1:42069"}},
 		})
@@ -402,7 +402,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			XID:           "11111111-1111-4111-8111-111111111111",
 			ProductID:     "22222222-2222-4222-8222-222222222222",
 			CorrelationID: 7,
-			Target:        types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"},
+			Targets:       []types.TargetIdentifier{types.TargetIdentifier{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
 			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
 		})
@@ -562,7 +562,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 		"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 	} {
 		tasks.Activate(types.InterceptTask{
-			XID: xid, ProductID: xid, CorrelationID: 7, Target: target,
+			XID: xid, ProductID: xid, CorrelationID: 7, Targets: []types.TargetIdentifier{target},
 			Products:   []types.ProductType{types.ProductCC},
 			Deliveries: []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
 		})
