@@ -264,6 +264,13 @@ func (e *ccEnabler) sessionFor(seid uint64) (PFCPSession, bool) {
 	return PFCPSession{}, false
 }
 
+// coveredTask is a task that covers a session, with the criteria resolved against
+// that session so each copy can be decided without resolving them again.
+type coveredTask struct {
+	task   types.InterceptTask
+	filter copyFilter
+}
+
 // tasksCovering returns the active tasks whose detection criteria select traffic in
 // the session the datapath tagged a copy with, in XID order.
 //
@@ -273,7 +280,7 @@ func (e *ccEnabler) sessionFor(seid uint64) (PFCPSession, bool) {
 // visible from outside this element. The work is a map lookup and a handful of
 // integer comparisons against rules already in memory, which is small beside the
 // framing and delivery each copy costs anyway.
-func (e *ccEnabler) tasksCovering(seid uint64) []types.InterceptTask {
+func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	if e == nil || e.tasks == nil {
 		return nil
 	}
@@ -291,7 +298,7 @@ func (e *ccEnabler) tasksCovering(seid uint64) []types.InterceptTask {
 	// task when several cover a session, and picking a different one per packet would
 	// split a session's product across warrants so that no agency gets a whole
 	// stream.
-	var out []types.InterceptTask
+	var out []coveredTask
 	for _, task := range e.tasks.Snapshot() {
 		for _, id := range task.Targets {
 			c, err := parseCriterion(id)
@@ -299,7 +306,7 @@ func (e *ccEnabler) tasksCovering(seid uint64) []types.InterceptTask {
 				continue
 			}
 			if len(c.resolve(one)) > 0 {
-				out = append(out, task)
+				out = append(out, coveredTask{task: task, filter: filterFor(task, sess)})
 
 				break
 			}

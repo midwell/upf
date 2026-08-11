@@ -42,7 +42,7 @@ func criteriaSessions() []PFCPSession {
 			PacketForwardingRules: PacketForwardingRules{
 				pdrs: []pdr{
 					uplinkPDR(targetSEID, 1, 0x1001, n3, ue),
-					downlinkPDR(targetSEID, 2, 2, ue),
+					downlinkPDR(targetSEID, 2, ue),
 				},
 				fars: []far{{farID: 1, fseID: targetSEID}, {farID: 2, fseID: targetSEID}},
 			},
@@ -61,7 +61,7 @@ func criteriaSessions() []PFCPSession {
 			PacketForwardingRules: PacketForwardingRules{
 				pdrs: []pdr{
 					uplinkPDR(sharedSEID, 9, 0x3001, n3, ip2int(net.ParseIP("10.250.0.11"))),
-					downlinkPDR(sharedSEID, 2, 9, ip2int(net.ParseIP("10.250.0.11"))),
+					downlinkPDR(sharedSEID, 9, ip2int(net.ParseIP("10.250.0.11"))),
 				},
 				fars: []far{{farID: 9, fseID: sharedSEID}},
 			},
@@ -87,9 +87,10 @@ func uplinkPDR(seid uint64, farID, teid, n3, ue uint32) pdr {
 	}
 }
 
-func downlinkPDR(seid uint64, pdrID, farID, ue uint32) pdr {
+// downlinkPDR builds the downlink rule of a session, PDR ID 2 to the uplink's 1.
+func downlinkPDR(seid uint64, farID, ue uint32) pdr {
 	return pdr{
-		pdrID: pdrID, fseID: seid, farID: farID,
+		pdrID: 2, fseID: seid, farID: farID,
 		srcIface: core, srcIfaceMask: 0xff,
 		ueAddress:       ue,
 		qerIDList:       []uint32{4},

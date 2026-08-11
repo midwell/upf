@@ -161,9 +161,9 @@ func triggerKeepalive(v string) (time.Duration, error) {
 // leaving every agency with a partial stream and none with a usable one. The count
 // is returned so the caller can tell the ADMF that a warrant is being served
 // nothing, which is the part of this compromise that must not stay quiet.
-func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, int, bool) {
+func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, copyFilter, int, bool) {
 	if tasks == nil || seid == 0 {
-		return types.InterceptTask{}, 0, false
+		return types.InterceptTask{}, copyFilter{}, 0, false
 	}
 
 	// A task may be keyed by any of the detection criteria of table 6.2.3-7, most of
@@ -173,16 +173,19 @@ func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.I
 	matched := enabler.tasksCovering(seid)
 	if len(matched) == 0 {
 		// Without duplication control there is no session state to resolve against, so
-		// the only criterion that can be answered is the session identity itself. This
-		// is the path a shipper built without a datapath takes.
-		matched = tasks.Match(types.TargetIdentifier{
+		// the only criterion that can be answered is the session identity itself, which
+		// covers a whole session and so needs no filtering. This is the path a shipper
+		// built without a datapath takes.
+		for _, task := range tasks.Match(types.TargetIdentifier{
 			Type:  types.TargetFSEID,
 			Value: strconv.FormatUint(seid, 10),
-		})
+		}) {
+			matched = append(matched, coveredTask{task: task, filter: unfiltered()})
+		}
 	}
 	if len(matched) == 0 {
-		return types.InterceptTask{}, 0, false
+		return types.InterceptTask{}, copyFilter{}, 0, false
 	}
 
-	return matched[0], len(matched), true
+	return matched[0].task, matched[0].filter, len(matched), true
 }

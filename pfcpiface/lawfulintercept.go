@@ -291,10 +291,20 @@ func (s *liShipper) recycle(b []byte) {
 func (s *liShipper) ship(tagged []byte) {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 
-	task, covering, ok := lookupTrigger(s.tasks, s.enabler, fseid)
+	task, filter, covering, ok := lookupTrigger(s.tasks, s.enabler, fseid)
 	if !ok {
 		s.report(x1.NEIssueContentUntasked, "duplicated content for a session with no interception task")
 
+		return
+	}
+
+	// Duplication is set per FAR, so a copy may arrive that the task's detection
+	// criteria do not identify — another PDR's traffic through the same FAR, or
+	// another transport port. Dropped silently and deliberately not reported: a copy
+	// that did not match is not lost content but content this element was never
+	// authorised to take, and reporting it as a fault would manufacture delivery
+	// failures out of correct behaviour.
+	if !filter.matches(tagged[fseidTagLen], tagged[liTagLen:]) {
 		return
 	}
 
