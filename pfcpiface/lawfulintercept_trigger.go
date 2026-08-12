@@ -60,6 +60,14 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// being silent: interception stopping is the safe outcome, but only if somebody
 	// is told it happened.
 	// Reports are throttled per type, so a purge of many tasks yields one.
+	//
+	// Deliberately *without* x1.WithConfiguredDestinations, which the AMF and SMF do wire.
+	// A triggered POI takes its destinations from the function that triggered it and from
+	// nowhere else: the capability requires that a network function "SHALL NOT synthesise a
+	// missing task attribute from local state or configuration", and letting an operator
+	// declare a destination here would give the UPF an X3 endpoint the CC-TF never
+	// provisioned. Adding it for symmetry with the other two POIs would be a regression, not
+	// a tidy-up.
 	srv := x1.NewServer(tasks, cfg.NEID,
 		x1.WithADMF(cfg.TFID),
 		x1.RequireResolvableDIDs(),
