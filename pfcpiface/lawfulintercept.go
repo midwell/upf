@@ -240,18 +240,34 @@ func (s *liShipper) faultProbes() []x1.FaultProbe {
 	}
 }
 
-// unreachableDestinations counts the MDF3s this shipper has delivered to that it currently
-// cannot reach, and how many it holds a client for at all.
+// unreachableDestinations counts the MDF3s this element's triggers currently name that it
+// cannot reach, and how many of them it has attempted at all.
 //
-// It is x2x3.Pool.Unreachable's answer for a shipper that keeps its own clients — this
+// It is x2x3.Pool.UnreachableAmong's answer for a shipper that keeps its own clients — this
 // element must refuse delivery outright when it has no credentials loaded, which the pool
-// does not do. A destination nothing has been sent to counts as reachable: an element with
-// nothing to deliver has not found an MDF3 unreachable, it has not looked.
+// does not do. A destination nothing has been sent to is not counted: an element with nothing
+// to deliver has not found an MDF3 unreachable, it has not looked.
+//
+// Only destinations still under trigger, and here that matters more than anywhere else: a
+// UPF's triggers are withdrawn as sessions end, several times an hour, and a client is never
+// forgotten. A destination whose last delivery failed and whose trigger was then removed can
+// never be delivered to again, so nothing would ever clear it and this element would report
+// itself faulty for the life of the process — while holding no tasking at all.
 func (s *liShipper) unreachableDestinations() (unreachable, inUse int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, sender := range s.senders {
+	counted := make(map[string]bool)
+	for _, addr := range s.destinationsInUse() {
+		if counted[addr] {
+			continue
+		}
+		counted[addr] = true
+
+		sender, ok := s.senders[addr]
+		if !ok {
+			continue
+		}
 		inUse++
 		if r, ok := sender.(x2x3.Reachability); ok && r.Unreachable() {
 			unreachable++
@@ -259,6 +275,23 @@ func (s *liShipper) unreachableDestinations() (unreachable, inUse int) {
 	}
 
 	return unreachable, inUse
+}
+
+// destinationsInUse is the X3 endpoint of every trigger this element holds. Nil tasks — a
+// shipper built directly in a test — name nothing.
+func (s *liShipper) destinationsInUse() []string {
+	if s.tasks == nil {
+		return nil
+	}
+
+	var addrs []string
+	for _, task := range s.tasks.Snapshot() {
+		if addr, ok := x3Destination(task); ok {
+			addrs = append(addrs, addr)
+		}
+	}
+
+	return addrs
 }
 
 // report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no

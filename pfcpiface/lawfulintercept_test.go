@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
@@ -349,6 +350,16 @@ func (s *stubSender) Send(*x2x3.PDU) error { return nil }
 func (s *stubSender) Close() error         { return nil }
 func (s *stubSender) Unreachable() bool    { return s.down }
 
+// triggerTo is an LI_T3 trigger delivering content to one MDF3, which is the only part of a
+// trigger the delivery probe reads.
+func triggerTo(xid, addr string) types.InterceptTask {
+	return types.InterceptTask{
+		XID:        types.XID(xid),
+		Products:   []types.ProductType{types.ProductCC},
+		Deliveries: []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: addr}},
+	}
+}
+
 // TestShipperDeliveryProbeAnswersOnBothEdges covers what this element tells a triggering
 // function that asks how it is, and the two quiet assertions matter as much as the loud one.
 //
@@ -357,7 +368,7 @@ func (s *stubSender) Unreachable() bool    { return s.down }
 // record for anybody to miss. A probe stuck *on* makes every healthy element report itself
 // faulty, which is how this library's predecessor probe failed.
 func TestShipperDeliveryProbeAnswersOnBothEdges(t *testing.T) {
-	s := &liShipper{senders: make(map[string]x2x3.Sender)}
+	s := &liShipper{senders: make(map[string]x2x3.Sender), tasks: store.New()}
 	probe := s.faultProbes()[0]
 
 	if fault := probe(); fault != nil {
@@ -365,6 +376,9 @@ func TestShipperDeliveryProbeAnswersOnBothEdges(t *testing.T) {
 			fault.ErrorDescription)
 	}
 
+	// Two agencies' triggers, each naming its own MDF3, as the CC-TF installs them.
+	s.tasks.Activate(triggerTo("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "10.0.60.122:42069"))
+	s.tasks.Activate(triggerTo("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "10.0.60.123:42069"))
 	failing := &stubSender{down: true}
 	s.senders["10.0.60.122:42069"] = failing
 	s.senders["10.0.60.123:42069"] = &stubSender{}
@@ -506,7 +520,11 @@ func waitFor(t *testing.T, cond func() bool, why string) {
 // It also covers the egress probe on a platform without SEQPACKET sockets, where the
 // reconnect test above can only skip.
 func TestTheTwoShipperFaultsAreIndependent(t *testing.T) {
-	s := &liShipper{senders: map[string]x2x3.Sender{"10.0.60.122:42069": &stubSender{down: true}}}
+	s := &liShipper{
+		senders: map[string]x2x3.Sender{"10.0.60.122:42069": &stubSender{down: true}},
+		tasks:   store.New(),
+	}
+	s.tasks.Activate(triggerTo("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "10.0.60.122:42069"))
 	s.egressDown.Store(true)
 
 	faults := make([]string, 0, 2)
@@ -531,5 +549,40 @@ func TestTheTwoShipperFaultsAreIndependent(t *testing.T) {
 	s.egressDown.Store(false)
 	if fault := s.faultProbes()[1](); fault != nil {
 		t.Errorf("the egress is reported down while only delivery is failing: %q", fault.ErrorDescription)
+	}
+}
+
+// TestAWithdrawnTriggersDestinationStopsCounting is the probe-stuck-on failure this element
+// is most exposed to, because its triggers are withdrawn as sessions end — several times an
+// hour on a busy UPF — and a delivery client is never forgotten.
+//
+// A destination whose last delivery failed and whose trigger has since gone can never be
+// delivered to again. Nothing would clear it, so counting it would leave the element
+// reporting itself faulty for the life of the process, including while holding no tasking at
+// all — an element that answers "Faults" to everything is ignored exactly as fast as one
+// that answers "OK" to everything.
+func TestAWithdrawnTriggersDestinationStopsCounting(t *testing.T) {
+	const (
+		xid  = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+		addr = "10.0.60.122:42069"
+	)
+	s := &liShipper{
+		senders: map[string]x2x3.Sender{addr: &stubSender{down: true}},
+		tasks:   store.New(),
+	}
+	s.tasks.Activate(triggerTo(xid, addr))
+	probe := s.faultProbes()[0]
+
+	if fault := probe(); fault == nil {
+		t.Fatal("an unreachable MDF3 under a live trigger reported no fault")
+	}
+
+	// The warrant ends. The client stays — nothing removes it — but it is no longer a
+	// destination this element delivers to.
+	s.tasks.Deactivate(types.XID(xid))
+
+	if fault := probe(); fault != nil {
+		t.Errorf("a destination no trigger names is still reported as a fault: %q; nothing can "+
+			"ever deliver there again, so nothing could clear it", fault.ErrorDescription)
 	}
 }
