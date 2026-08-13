@@ -5,8 +5,12 @@ package pfcpiface
 
 import (
 	"bytes"
+	"context"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
@@ -334,5 +338,198 @@ func TestCheckTagReportsUnusableTag(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// stubSender is a delivery client with an opinion about a destination it does not have, so
+// the shipper's fault probes can be driven without an MDF3 to take away.
+type stubSender struct{ down bool }
+
+func (s *stubSender) Send(*x2x3.PDU) error { return nil }
+func (s *stubSender) Close() error         { return nil }
+func (s *stubSender) Unreachable() bool    { return s.down }
+
+// TestShipperDeliveryProbeAnswersOnBothEdges covers what this element tells a triggering
+// function that asks how it is, and the two quiet assertions matter as much as the loud one.
+//
+// A probe stuck *off* leaves a CC-POI that is delivering nothing answering that it is fine —
+// which nothing downstream can contradict, since a copy that was never delivered produces no
+// record for anybody to miss. A probe stuck *on* makes every healthy element report itself
+// faulty, which is how this library's predecessor probe failed.
+func TestShipperDeliveryProbeAnswersOnBothEdges(t *testing.T) {
+	s := &liShipper{senders: make(map[string]x2x3.Sender)}
+	probe := s.faultProbes()[0]
+
+	if fault := probe(); fault != nil {
+		t.Errorf("a shipper that has delivered nothing reports a delivery fault: %q",
+			fault.ErrorDescription)
+	}
+
+	failing := &stubSender{down: true}
+	s.senders["10.0.60.122:42069"] = failing
+	s.senders["10.0.60.123:42069"] = &stubSender{}
+
+	fault := probe()
+	if fault == nil {
+		t.Fatal("with an MDF3 unreachable the element reports no fault; content is being " +
+			"dropped and nothing downstream can notice")
+	}
+	if !strings.Contains(fault.ErrorDescription, x1.NEIssueMDFUnreachable) {
+		t.Errorf("the fault does not name the condition: %q", fault.ErrorDescription)
+	}
+	if !strings.Contains(fault.ErrorDescription, "1 of 2") {
+		t.Errorf("the fault does not say how much is wrong: %q", fault.ErrorDescription)
+	}
+	// One agency's destination failing must not name that agency: TS 103 221-1 keeps an
+	// element's own status separate from the per-destination faults reported per DID.
+	for _, identity := range []string{"10.0.60.122", "42069"} {
+		if strings.Contains(fault.ErrorDescription, identity) {
+			t.Errorf("the element's own status names %q; it must say how much is wrong, never whose",
+				identity)
+		}
+	}
+
+	// Nothing clears it: delivery starts working and the next answer says so.
+	failing.down = false
+	if fault := probe(); fault != nil {
+		t.Errorf("the fault outlived the condition, with nothing having cleared it: %q",
+			fault.ErrorDescription)
+	}
+}
+
+// TestLostCopiesAreNotAnElementStatus is decision D3 held in place: the loss counters stay
+// events.
+//
+// "Am I losing copies" is tempting to answer from the reports this element already sends,
+// but loss in the last N seconds is retention with an expiry — it discards real faults on a
+// timer nobody can justify, and without one the element is faulty forever after a single
+// burst. What is a state is the condition underneath, which the egress probe answers.
+func TestLostCopiesAreNotAnElementStatus(t *testing.T) {
+	fake := &fakeNEIssueReporter{}
+	s := &liShipper{reporter: fake, senders: make(map[string]x2x3.Sender)}
+
+	s.report(x1.NEIssueX3PuntLost, "content copies discarded at the datapath egress socket")
+	s.report(x1.NEIssueX3FramingLost, "content copies dropped before framing")
+	s.report(x1.NEIssueX3DeliveryLost, "content copies dropped from the delivery queue")
+
+	if len(fake.issues) != 3 {
+		t.Fatalf("lost copies reported %d times, want 3; the push reporting is what carries them",
+			len(fake.issues))
+	}
+	for i, probe := range s.faultProbes() {
+		if fault := probe(); fault != nil {
+			t.Errorf("probe %d reports a fault after a burst of loss that has ended: %q; "+
+				"an element that stays faulty on a past event is one nobody asks again",
+				i, fault.ErrorDescription)
+		}
+	}
+}
+
+// TestEgressProbeFollowsTheSocket drives the real reconnect path, because the state and the
+// answer have to agree and it is the reconnect that owns the state.
+//
+// The datapath is away when the loop starts redialling and comes back while it is still
+// trying, which is what a BESS restart looks like from here.
+func TestEgressProbeFollowsTheSocket(t *testing.T) {
+	// The X3 egress is an AF_UNIX SEQPACKET socket, which not every development platform
+	// provides; the datapath only ever runs on one that does.
+	addr := filepath.Join(t.TempDir(), "li-x3.sock")
+	probeLn, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Skipf("unixpacket sockets unavailable here: %v", err)
+	}
+	if err := probeLn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A connection to close, standing in for the one the read failed on. Nothing is
+	// listening on addr yet, so the redial inside reconnect cannot succeed.
+	sock, _ := net.Pipe()
+	s := &liShipper{sockAddr: addr, sock: sock, senders: make(map[string]x2x3.Sender)}
+	egress := s.faultProbes()[1]
+
+	if fault := egress(); fault != nil {
+		t.Errorf("a shipper with a live egress socket reports it down: %q", fault.ErrorDescription)
+	}
+
+	reconnected := make(chan struct{})
+	go func() {
+		s.reconnect()
+		close(reconnected)
+	}()
+
+	waitFor(t, func() bool { return egress() != nil },
+		"the egress socket went away and the element still answers that nothing is wrong")
+	if fault := egress(); !strings.Contains(fault.ErrorDescription, x1.NEIssueX3EgressDown) {
+		t.Errorf("the fault does not name the condition: %q", fault.ErrorDescription)
+	}
+
+	// The datapath comes back. Nothing clears the fault: the socket reconnects and the next
+	// answer reflects that.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Fatalf("re-listening on the egress socket: %v", err)
+	}
+	defer ln.Close()
+
+	select {
+	case <-reconnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the shipper never reconnected to the egress socket")
+	}
+	if fault := egress(); fault != nil {
+		t.Errorf("the fault outlived the outage: %q", fault.ErrorDescription)
+	}
+}
+
+// waitFor polls cond until it holds, failing with why if it never does. The states these
+// probes report are set by another goroutine, so an assertion has to be allowed to wait —
+// but only for as long as the thing it is waiting for could legitimately take.
+func waitFor(t *testing.T, cond func() bool, why string) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal(why)
+}
+
+// TestTheTwoShipperFaultsAreIndependent: an unreachable mediation function and a dead egress
+// socket are different faults with different responses — one is outside this element and one
+// is inside it — so neither may stand for or mask the other.
+//
+// It also covers the egress probe on a platform without SEQPACKET sockets, where the
+// reconnect test above can only skip.
+func TestTheTwoShipperFaultsAreIndependent(t *testing.T) {
+	s := &liShipper{senders: map[string]x2x3.Sender{"10.0.60.122:42069": &stubSender{down: true}}}
+	s.egressDown.Store(true)
+
+	faults := make([]string, 0, 2)
+	for _, probe := range s.faultProbes() {
+		fault := probe()
+		if fault == nil {
+			t.Fatal("a probe stayed quiet with both conditions holding; each fault must be " +
+				"reported on its own")
+		}
+		faults = append(faults, fault.ErrorDescription)
+	}
+
+	if !strings.Contains(faults[0], x1.NEIssueMDFUnreachable) {
+		t.Errorf("the delivery fault is not reported as %s: %q", x1.NEIssueMDFUnreachable, faults[0])
+	}
+	if !strings.Contains(faults[1], x1.NEIssueX3EgressDown) {
+		t.Errorf("the egress fault is not reported as %s: %q", x1.NEIssueX3EgressDown, faults[1])
+	}
+
+	// Each alone is reported alone: an element with a live egress and a failing MDF3 must not
+	// be read as a datapath problem, and vice versa.
+	s.egressDown.Store(false)
+	if fault := s.faultProbes()[1](); fault != nil {
+		t.Errorf("the egress is reported down while only delivery is failing: %q", fault.ErrorDescription)
 	}
 }
