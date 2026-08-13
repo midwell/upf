@@ -22,6 +22,8 @@ github.com/libp2p/go-reuseport v0.4.0 h1:nR5KU7hD0WxXCJbmw7r2rhRYruNRl2koHw8fQsc
 github.com/libp2p/go-reuseport v0.4.0/go.mod h1:ZtI03j/wO5hZVDFo2jKywN6bYKWLOy8Se6DrI2E1cLU=
 github.com/midwell/li v0.1.9 h1:Q3W3j5h8fAFa1u2MfF5moPoyMwl/AJXKKwrevSw1UeI=
 github.com/midwell/li v0.1.9/go.mod h1:9CfssJmzedu8y2ApqQZIZ/cTdmc8b0ZO00y2uV8+x/A=
+github.com/midwell/li v0.2.0 h1:tpoYtQpHW/QqjeLq5BLEr1r5mLOnX2bUqxvK6WDL+i4=
+github.com/midwell/li v0.2.0/go.mod h1:9CfssJmzedu8y2ApqQZIZ/cTdmc8b0ZO00y2uV8+x/A=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/omec-project/pfcpsim v1.5.0 h1:hS7T4lFjtjXR6srgwwEmd8taOicP6o2YOPVW2vlsN3Q=
