@@ -73,7 +73,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// declare a destination here would give the UPF an X3 endpoint the CC-TF never
 	// provisioned. Adding it for symmetry with the other two POIs would be a regression, not
 	// a tidy-up.
-	srv := x1.NewServer(tasks, cfg.NEID,
+	opts := []x1.Option{
 		x1.WithADMF(cfg.TFID),
 		x1.RequireResolvableDIDs(),
 		// What this element can observe about itself, for the triggering function that asks
@@ -108,7 +108,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 				reporter.Notify(x1.NEIssueX1AuthFailed,
 					fmt.Sprintf("LI_T3 triggering refused: peer failed authentication (error %d)", code))
 			}
-		}))
+		}),
+	}
+	// The two bulk operations the standard settles by advance agreement rather than by
+	// what the element is. Unset leaves its defaults; li/x1 owns what unset means.
+	opts = append(opts, x1.BulkOptions(cfg.DeactivateAllTasks, cfg.RemoveAllDestinations)...)
+
+	srv := x1.NewServer(tasks, cfg.NEID, opts...)
 
 	// ListenConfig.Listen rather than net.Listen so the listen carries a context
 	// (the linter's noctx rule); the bind is otherwise unchanged.

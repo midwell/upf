@@ -92,6 +92,26 @@ type LiConfig struct {
 	// keeps tasking alive by sending keepalives, so this only lapses when it is
 	// genuinely gone.
 	TriggerKeepalive string `json:"trigger_keepalive"`
+	// DeactivateAllTasks and RemoveAllDestinations carry what TS 103 221-1 leaves to
+	// advance agreement between the parties on an X1 interface: whether this element
+	// performs a bulk deactivation of all its tasking, and whether it performs a bulk
+	// removal of all its destinations.
+	//
+	// Both are tri-state. Unset — the pointer is nil — is "no agreement in advance",
+	// the standard's own phrase, and yields the standard's own defaults: bulk
+	// deactivation performed, bulk destination removal refused. They are pointers
+	// rather than plain bools so that "the operator said false" is a state distinct
+	// from "the operator said nothing".
+	//
+	// Unlike the fields above they are optional, because an unstated agreement is a
+	// conformant deployment rather than an incomplete one.
+	//
+	// Nothing this project ships sends either message to a UPF: the peer here is the
+	// SMF's CC Triggering Function, whose x1.Requester implements no bulk request. So
+	// disabling both removes an unused capability from an interface reachable by
+	// anyone holding an SMF-bound LI certificate — see li/README.md.
+	DeactivateAllTasks    *bool `json:"deactivate_all_tasks,omitempty"`
+	RemoveAllDestinations *bool `json:"remove_all_destinations,omitempty"`
 }
 
 // QciQosConfig : Qos configured attributes.
