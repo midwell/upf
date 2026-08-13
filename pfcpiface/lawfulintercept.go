@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/omec-project/li/mtls"
@@ -74,6 +75,12 @@ type liShipper struct {
 	mu      sync.Mutex
 	senders map[string]x2x3.Sender // per MDF3 address, created on first use
 
+	// egressDown records that the datapath egress socket is not connected — from the
+	// moment a read on it fails until a redial succeeds. It is the state behind the
+	// x3EgressDown probe, and it is a separate flag rather than a look at sock because
+	// sock is the shipping loop's to write and a probe answers on another goroutine.
+	egressDown atomic.Bool
+
 	// punted carries copies from the socket read to the framing workers, and free
 	// recycles the buffers so the hot path does not allocate per packet.
 	punted chan []byte
@@ -136,21 +143,19 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		u.ccEnabler = enabler
 	}
 
-	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler)
-	if err != nil {
-		_ = sock.Close()
-
-		return nil, err
-	}
 	// X3 destinations arrive per task over LI_T3 (CreateDestination + the task's
 	// ListOfDIDs), so no delivery client can be built here — one is created per
 	// MDF3 address on first use. Delivery is asynchronous either way: shipLoop must
 	// keep draining the datapath socket and cannot block on an MDF3, or the unread
 	// socket would make BESS drop every subsequent copy.
+	//
+	// Built before the triggering interface because that interface answers for it: the two
+	// conditions this element can be asked about — whether its mediation functions are
+	// reachable, and whether the datapath egress is up — are the shipper's to know, and
+	// nothing else in this process can see either.
 	s := &liShipper{
 		sockAddr:  cfg.X3SockAddr,
 		sock:      sock,
-		tasks:     tasks,
 		enabler:   enabler,
 		tlsConfig: mat.ClientTLS(),
 		senders:   make(map[string]x2x3.Sender),
@@ -162,6 +167,14 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	if reporter != nil {
 		s.reporter = reporter
 	}
+
+	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.faultProbes()...)
+	if err != nil {
+		_ = sock.Close()
+
+		return nil, err
+	}
+	s.tasks = tasks
 	for range liFrameWorkers {
 		go s.frameLoop()
 	}
@@ -199,6 +212,53 @@ func setPuntReadBuffer(sock net.Conn, size int) {
 		//nolint:errcheck // best-effort tuning; degraded capacity is reported by the egress monitor
 		_ = c.SetReadBuffer(size)
 	}
+}
+
+// faultProbes are the conditions this element can answer for when its triggering function
+// asks how it is. Both are states — re-observable at the moment of asking — which is what
+// keeps them here and keeps the lost-copy counters in the pushed reporting instead.
+//
+// They are two probes rather than one because they are two faults with two responses: an
+// unreachable mediation function is a problem outside this element, a dead egress socket is
+// one inside it, and either can hold while the other does not. Sharing a probe would let
+// whichever was evaluated first stand for both.
+func (s *liShipper) faultProbes() []x1.FaultProbe {
+	return []x1.FaultProbe{
+		x1.MDFUnreachableProbe(s.unreachableDestinations),
+		func() *x1.X1Error {
+			if !s.egressDown.Load() {
+				return nil
+			}
+
+			// The socket's present state, not a history of what was lost while it was down.
+			// Copies dropped at the egress are events with a pushed report of their own
+			// (x3PuntLost), and accumulating them here would leave this element permanently
+			// faulty long after the datapath came back.
+			return x1.NEFault(x1.NEIssueX3EgressDown,
+				"the datapath content egress socket is not connected")
+		},
+	}
+}
+
+// unreachableDestinations counts the MDF3s this shipper has delivered to that it currently
+// cannot reach, and how many it holds a client for at all.
+//
+// It is x2x3.Pool.Unreachable's answer for a shipper that keeps its own clients — this
+// element must refuse delivery outright when it has no credentials loaded, which the pool
+// does not do. A destination nothing has been sent to counts as reachable: an element with
+// nothing to deliver has not found an MDF3 unreachable, it has not looked.
+func (s *liShipper) unreachableDestinations() (unreachable, inUse int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, sender := range s.senders {
+		inUse++
+		if r, ok := sender.(x2x3.Reachability); ok && r.Unreachable() {
+			unreachable++
+		}
+	}
+
+	return unreachable, inUse
 }
 
 // report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no
@@ -403,7 +463,12 @@ func (s *liShipper) checkTag(tagged []byte) {
 
 // reconnect closes the dead X3 egress socket and redials it with capped
 // exponential backoff, blocking until the datapath socket is available again.
+//
+// The egress counts as down for exactly as long as this takes, which is what the
+// x3EgressDown probe reports. Nothing else clears it: an element asked while the datapath is
+// away says so, and the same element asked after it returns does not.
 func (s *liShipper) reconnect() {
+	s.egressDown.Store(true)
 	_ = s.sock.Close()
 
 	delay := minReconnectDelay
@@ -414,6 +479,8 @@ func (s *liShipper) reconnect() {
 		sock, err := d.DialContext(context.Background(), "unixpacket", s.sockAddr)
 		if err == nil {
 			s.sock = sock
+			s.egressDown.Store(false)
+
 			return
 		}
 

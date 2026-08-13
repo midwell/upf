@@ -38,7 +38,12 @@ import (
 // of failing closed here is that this is not discoverable from the outside.
 // Nothing is logged — that this NE can be tasked at all must not appear in a
 // general operator log.
-func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter, enabler *ccEnabler) (*store.Store, error) {
+// probes are the conditions this element can be asked about — the shipper's, since the
+// knowledge is the shipper's. They are passed in rather than built here because this
+// function owns the interface and not the delivery.
+func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter,
+	enabler *ccEnabler, probes ...x1.FaultProbe,
+) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
 	// already abandoned by returning an error — an element that looks un-tasked to
@@ -71,6 +76,10 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	srv := x1.NewServer(tasks, cfg.NEID,
 		x1.WithADMF(cfg.TFID),
 		x1.RequireResolvableDIDs(),
+		// What this element can observe about itself, for the triggering function that asks
+		// for its status. A triggered CC-POI is the one element whose product loss is
+		// invisible everywhere else: a dropped copy produces no record for anybody to miss.
+		x1.WithFaultProbes(probes...),
 		x1.OnDeactivate(func(types.InterceptTask) {
 			// Whatever duplication this task required and no remaining task does is
 			// withdrawn, before the report: interception stopping is the outcome being
