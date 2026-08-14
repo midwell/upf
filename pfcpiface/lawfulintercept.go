@@ -71,6 +71,12 @@ type liShipper struct {
 	enabler *ccEnabler
 	// tlsConfig is the client side of the LI PKI, used to dial each MDF3.
 	tlsConfig *tls.Config
+	// keepalive is the TS 103 221-2 clause 6.2.4 mechanism as configured, applied to
+	// every X3 connection this shipper opens. This POI keeps its own clients rather
+	// than using x2x3.Pool, so the settings are carried here to the one place that
+	// builds them — the alternative being an X3 interface that quietly runs a
+	// different mechanism from the two X2 ones.
+	keepalive x2x3.KeepaliveConfig
 	// ids is what every PDU this element sends carries besides the task's own
 	// labels: the two constant element identities and the sequence numbering. Shared
 	// with the IRI-POIs through li/x2x3, so the three points of interception cannot
@@ -184,6 +190,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		sock:      sock,
 		enabler:   enabler,
 		tlsConfig: mat.ClientTLS(),
+		keepalive: keepaliveConfig(*cfg),
 		senders:   make(map[string]x2x3.Sender),
 		punted:    make(chan []byte, liFrameQueueDepth),
 		free:      make(chan []byte, liFrameQueueDepth),
@@ -477,6 +484,34 @@ func x3Destination(task types.InterceptTask) (string, bool) {
 // use. Destinations arrive per task over X1, so they are not known at startup, and
 // several agencies' destinations may be in use at once — hence one sender per
 // address rather than one for the process.
+// keepaliveConfig turns the operator's three settings into the clause 6.2.4
+// mechanism's configuration.
+//
+// It encodes no defaults: an unset timer is passed through as zero, which x2x3
+// resolves to the specification's own value. Nothing is validated here either —
+// config.go refuses an unusable pair before this point, which is this network
+// function's own idiom and the loudest outcome available in it.
+func keepaliveConfig(cfg LiConfig) x2x3.KeepaliveConfig {
+	ka := x2x3.KeepaliveConfig{
+		Disabled: cfg.X2X3KeepaliveEnabled != nil && !*cfg.X2X3KeepaliveEnabled,
+	}
+	// Errors are ignored because config validation has already refused anything that
+	// does not parse; a value reaching here parses.
+	ka.TimeP1, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP1)
+	ka.TimeP2, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP2)
+
+	return ka
+}
+
+// parseOptionalDuration parses a Go duration, treating empty as unset (zero).
+func parseOptionalDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+
+	return time.ParseDuration(s)
+}
+
 func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -489,8 +524,14 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 		return nil, errNoDeliveryCredentials
 	}
 
+	// The keepalive mechanism reports through the same callback as a delivery
+	// failure: both establish that this destination is not working, and one condition
+	// deserves one report whichever noticed it.
+	keepalive := s.keepalive
+	keepalive.OnFault = func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 keepalive failed") }
+
 	sender := x2x3.NewAsyncSender(
-		x2x3.NewClient(addr, s.tlsConfig), 0,
+		x2x3.NewClient(addr, s.tlsConfig, keepalive), 0,
 		func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed") },
 		// A full queue is lost content, and it is not covered by the delivery-failure
 		// report above: that fires when the MDF is unreachable, whereas the queue
