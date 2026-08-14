@@ -14,6 +14,7 @@ import (
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
+	"github.com/omec-project/li/x2x3"
 )
 
 // The UPF is a triggered CC-POI: it does not learn about warrants from the ADMF.
@@ -42,7 +43,7 @@ import (
 // knowledge is the shipper's. They are passed in rather than built here because this
 // function owns the interface and not the delivery.
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter,
-	enabler *ccEnabler, probes ...x1.FaultProbe,
+	enabler *ccEnabler, ids *x2x3.Identity, probes ...x1.FaultProbe,
 ) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
@@ -80,11 +81,15 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// for its status. A triggered CC-POI is the one element whose product loss is
 		// invisible everywhere else: a dropped copy produces no record for anybody to miss.
 		x1.WithFaultProbes(probes...),
-		x1.OnDeactivate(func(types.InterceptTask) {
+		x1.OnDeactivate(func(task types.InterceptTask) {
 			// Whatever duplication this task required and no remaining task does is
 			// withdrawn, before the report: interception stopping is the outcome being
 			// reported, so it must actually have stopped.
 			enabler.retask()
+			// The numbering state goes with the tasking. This element holds one sequence
+			// context per intercepted session, so a warrant that outlives many sessions
+			// would otherwise leave one entry behind for each of them.
+			ids.Forget(task.DeliveryXID().Bytes())
 			if reporter != nil {
 				reporter.Notify(x1.NEIssueTaskingPurged,
 					"content interception tasking removed; the triggering function went quiet")

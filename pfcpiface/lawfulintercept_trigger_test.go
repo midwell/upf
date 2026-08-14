@@ -164,7 +164,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		X1Listen: freePort(t),
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	rec := &recordingReporter{}
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: busy.Addr().String()}
 
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil); err == nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err == nil {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
@@ -468,7 +468,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -618,7 +618,7 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	// Nothing may be left listening when the window is rejected.
 	addr := freePort(t)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
-	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil); err == nil {
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
 	var lc net.ListenConfig

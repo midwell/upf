@@ -13,6 +13,7 @@ import (
 
 	"github.com/omec-project/li/mtls"
 	"github.com/omec-project/li/x1"
+	"github.com/omec-project/li/x2x3"
 )
 
 // TestBulkDeactivationFollowsConfiguration drives the LI_T3 triggering interface the way its
@@ -62,7 +63,7 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 				DeactivateAllTasks: c.configured,
 			}
 
-			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil)
+			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
 			if err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
@@ -156,7 +157,7 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 				RemoveAllDestinations: c.configured,
 			}
 
-			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil); err != nil {
+			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
 
