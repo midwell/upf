@@ -71,6 +71,11 @@ type liShipper struct {
 	enabler *ccEnabler
 	// tlsConfig is the client side of the LI PKI, used to dial each MDF3.
 	tlsConfig *tls.Config
+	// ids is what every PDU this element sends carries besides the task's own
+	// labels: the two constant element identities and the sequence numbering. Shared
+	// with the IRI-POIs through li/x2x3, so the three points of interception cannot
+	// come to disagree about how an attribute is built.
+	ids *x2x3.Identity
 
 	mu      sync.Mutex
 	senders map[string]x2x3.Sender // per MDF3 address, created on first use
@@ -93,6 +98,19 @@ type liShipper struct {
 // never an acceptable fallback.
 var errNoDeliveryCredentials = errors.New("li: no X3 delivery credentials")
 
+// errNoElementIdentifier means the deployment configured interception without the
+// identifier this element asserts on X1, which is also the Network Function ID every
+// xCC it delivers has to carry (TS 33.128 table 5.3.1-2).
+var errNoElementIdentifier = errors.New("li: no network element identifier configured")
+
+// upfInterceptionPoint is the Interception Point ID every xCC from this element
+// carries (ETSI TS 103 221-2 clause 5.3.8): it names the POI *within* the network
+// function, and this network function contains exactly one — the CC-POI that ships
+// duplicated content. Format is left to the implementation, so it is a name rather
+// than a number, because whoever reads it is correlating with an NFID that is also a
+// name.
+const upfInterceptionPoint = "UPF-CC-POI"
+
 // neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
 // the x2x3.Sender above) so tests can assert what a fault reports without an ADMF.
 // It exposes the fire-and-forget form (*x1.Reporter.Notify): reporting is
@@ -105,6 +123,14 @@ type neIssueReporter interface {
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
 // the MDF3 (mutual TLS), and starts the shipping loop.
 func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShipper, error) {
+	// Without an identifier for this network element, content would reach a mediation
+	// function that cannot attribute it to the element that produced it. Interception
+	// does not start; the datapath carries on forwarding, because a UPF that refuses to
+	// come up over its LI configuration tells every operator it is LI-provisioned.
+	if cfg.NEID == "" {
+		return nil, errNoElementIdentifier
+	}
+
 	mat, err := mtls.Load(cfg.Cert, cfg.Key, cfg.CACert)
 	if err != nil {
 		return nil, err
@@ -161,6 +187,9 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		senders:   make(map[string]x2x3.Sender),
 		punted:    make(chan []byte, liFrameQueueDepth),
 		free:      make(chan []byte, liFrameQueueDepth),
+		// Built once: the two identities are constant for the life of the process, so
+		// no xCC pays for constructing them, and this is a per-packet path.
+		ids: x2x3.NewIdentity(cfg.NEID, upfInterceptionPoint),
 	}
 	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
 	// would pass the nil check in report() and then panic on use.
@@ -168,7 +197,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		s.reporter = reporter
 	}
 
-	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.faultProbes()...)
+	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids, s.faultProbes()...)
 	if err != nil {
 		_ = sock.Close()
 
@@ -428,7 +457,7 @@ func (s *liShipper) ship(tagged []byte) {
 	// BESS drop subsequent copies). Delivery failures are reported from the
 	// worker via the onError hook set in senderFor.
 	//nolint:errcheck // async enqueue never blocks; delivery failures report via onError
-	_ = sender.Send(shipperPDU(tagged, task))
+	_ = sender.Send(shipperPDU(tagged, task, s.ids))
 }
 
 // x3Destination returns the task's X3 delivery endpoint. A destination
@@ -530,7 +559,7 @@ func (s *liShipper) reconnect() {
 // packet toward the target — from the uplink copy — decapsulated inner IP from
 // the target — which sets both the X3 payload format and the direction. Getting
 // this wrong would ship the downlink copy mislabeled as decapsulated inner IP.
-func shipperPDU(tagged []byte, task types.InterceptTask) *x2x3.PDU {
+func shipperPDU(tagged []byte, task types.InterceptTask, ids *x2x3.Identity) *x2x3.PDU {
 	action := tagged[fseidTagLen]
 	inner := tagged[liTagLen:]
 	pdu := &x2x3.PDU{Type: x2x3.PDUTypeX3}
@@ -542,6 +571,16 @@ func shipperPDU(tagged []byte, task types.InterceptTask) *x2x3.PDU {
 	// locally is how the two streams came to disagree.
 	pdu.XID = task.DeliveryXID().Bytes()
 	binary.BigEndian.PutUint64(pdu.CorrelationID[:], task.CorrelationID)
+
+	// The four conditional attributes TS 33.128 table 5.3.3-2 requires of an xCC.
+	// Neither target identifier is among them, and neither is sent: this POI is tasked
+	// by packet-detection criteria and resolves no subscriber identity, so it has none
+	// to report and would have to invent one.
+	//
+	// The timestamp is the time the xCC is generated, which the table asks for and
+	// which is here — so the datapath carries no per-packet timestamp to this point and
+	// the BESS tag layout does not grow.
+	pdu.Attributes = ids.Attributes(pdu.XID, pdu.CorrelationID, time.Now(), nil, nil)
 
 	l3, format := networkLayerOf(inner)
 	pdu.Payload = append([]byte(nil), l3...)

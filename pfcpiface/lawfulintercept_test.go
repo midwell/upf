@@ -6,9 +6,12 @@ package pfcpiface
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,7 +173,8 @@ func TestShipperPDU(t *testing.T) {
 	}
 
 	// Uplink (action 6): decapsulated inner IP → IPv4 + FromTarget.
-	ul := shipperPDU(tag(farForwardUAndDuplicate), task)
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	ul := shipperPDU(tag(farForwardUAndDuplicate), task, ids)
 	if ul.Type != x2x3.PDUTypeX3 {
 		t.Errorf("PDU type = %d, want X3", ul.Type)
 	}
@@ -195,7 +199,7 @@ func TestShipperPDU(t *testing.T) {
 	}
 
 	// Downlink (action 5): teed post-encap → GTP-U + ToTarget (must NOT be labeled inner IP).
-	dl := shipperPDU(tag(farForwardDAndDuplicate), task)
+	dl := shipperPDU(tag(farForwardDAndDuplicate), task, ids)
 	if dl.PayloadFormat != x2x3.PayloadFormatGTPU || dl.Direction != x2x3.DirectionToTarget {
 		t.Errorf("downlink: format=%d direction=%d, want GTPU/ToTarget", dl.PayloadFormat, dl.Direction)
 	}
@@ -273,7 +277,7 @@ func TestShipperPDUStripsLinkLayer(t *testing.T) {
 			pdu := shipperPDU(tag(tt.action, tt.payload), types.InterceptTask{
 				ProductID:     "26328981-45f4-4191-8000-000000000000",
 				CorrelationID: 1,
-			})
+			}, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
 			if pdu.PayloadFormat != tt.wantFormat {
 				t.Errorf("payload format = %d, want %d", pdu.PayloadFormat, tt.wantFormat)
 			}
@@ -584,5 +588,153 @@ func TestAWithdrawnTriggersDestinationStopsCounting(t *testing.T) {
 	if fault := probe(); fault != nil {
 		t.Errorf("a destination no trigger names is still reported as a fault: %q; nothing can "+
 			"ever deliver there again, so nothing could clear it", fault.ErrorDescription)
+	}
+}
+
+// x3AttrsOf indexes a PDU's conditional attributes by type, so an assertion can name
+// the attribute it is about rather than a position.
+func x3AttrsOf(pdu *x2x3.PDU) map[uint16][]byte {
+	out := make(map[uint16][]byte, len(pdu.Attributes))
+	for _, a := range pdu.Attributes {
+		out[a.Type] = a.Value
+	}
+
+	return out
+}
+
+// TestShipperPDUCarriesTheRequiredAttributes covers the four conditional attributes
+// TS 33.128 table 5.3.3-2 requires of an xCC, and the two it does not.
+//
+// Every xCC this project has ever delivered carried none of them: the mechanism was
+// implemented in li/x2x3 and populated by nobody, which is invisible to
+// interoperability testing because neither side sent one.
+func TestShipperPDUCarriesTheRequiredAttributes(t *testing.T) {
+	task := types.InterceptTask{
+		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		CorrelationID: 0x2632898145f4d191,
+	}
+	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
+	tagged := append(append([]byte{1, 2, 3, 4, 5, 6, 7, 8}, farForwardUAndDuplicate), inner...)
+
+	before := time.Now()
+	pdu := shipperPDU(tagged, task, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	after := time.Now()
+
+	attrs := x3AttrsOf(pdu)
+	if len(attrs) != 4 {
+		t.Errorf("PDU carries %d attributes, want the 4 of table 5.3.3-2: %+v", len(attrs), pdu.Attributes)
+	}
+
+	// The NFID is the identifier this element asserts on X1, so a mediation function
+	// and the ADMF name the same element.
+	if got := string(attrs[x2x3.AttrNFID]); got != "upf-1" {
+		t.Errorf("NFID = %q, want the configured network element identifier %q", got, "upf-1")
+	}
+	if got := string(attrs[x2x3.AttrIPID]); got != upfInterceptionPoint {
+		t.Errorf("IPID = %q, want %q", got, upfInterceptionPoint)
+	}
+
+	// Table 5.3.3-2 requires neither target identifier, and this POI holds no
+	// subscriber identity: it is tasked by packet-detection criteria. Sending one
+	// would mean inventing it.
+	for _, typ := range []uint16{x2x3.AttrMatchedTargetIdentifier, x2x3.AttrOtherTargetIdentifier} {
+		if v, ok := attrs[typ]; ok {
+			t.Errorf("attribute %d present with %q; X3 owes no target identity", typ, v)
+		}
+	}
+
+	// The timestamp is when the xCC was generated (table 5.3.3-2), which is framing
+	// time — so the datapath carries no timestamp and the tag does not grow.
+	ts, ok := attrs[x2x3.AttrTimestamp]
+	if !ok || len(ts) != 8 {
+		t.Fatalf("timestamp attribute = % x, want 8 octets", ts)
+	}
+	when := time.Unix(int64(binary.BigEndian.Uint32(ts[0:4])), int64(binary.BigEndian.Uint32(ts[4:8])))
+	if when.Before(before.Truncate(time.Second)) || when.After(after.Add(time.Second)) {
+		t.Errorf("timestamp = %v, want between %v and %v", when, before, after)
+	}
+	if liTagLen != fseidTagLen+1 {
+		t.Errorf("the datapath tag is %d bytes: a timestamp was added to it, which table 5.3.3-2 does not ask for", liTagLen)
+	}
+	if !bytes.Equal(pdu.Payload, inner) {
+		t.Errorf("payload = % x, want the whole inner packet % x", pdu.Payload, inner)
+	}
+
+	if _, err := pdu.Marshal(); err != nil {
+		t.Errorf("Marshal: %v", err)
+	}
+}
+
+// TestShipperPDUNumbersEachContextIndependently is clause 5.3.9's context rule on the
+// content path: two sessions of one warrant are two contexts, each numbered from
+// zero. A counter held per connection or per element would interleave them, and a
+// mediation function ordering one session's content would see gaps that are not loss.
+func TestShipperPDUNumbersEachContextIndependently(t *testing.T) {
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
+	tagged := append(append([]byte{1, 2, 3, 4, 5, 6, 7, 8}, farForwardUAndDuplicate), inner...)
+
+	sessionA := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 1}
+	sessionB := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 2}
+
+	seqOf := func(task types.InterceptTask) uint32 {
+		return binary.BigEndian.Uint32(x3AttrsOf(shipperPDU(tagged, task, ids))[x2x3.AttrSequenceNumber])
+	}
+
+	for want := range uint32(3) {
+		if got := seqOf(sessionA); got != want {
+			t.Errorf("session A packet %d numbered %d", want, got)
+		}
+	}
+	if got := seqOf(sessionB); got != 0 {
+		t.Errorf("a second session starts at %d, want 0 — the counter is not per context", got)
+	}
+	if got := seqOf(sessionA); got != 3 {
+		t.Errorf("session A continued at %d, want 3", got)
+	}
+}
+
+// TestShipperPDUNumbersUnderConcurrentFraming: framing runs on liFrameWorkers
+// goroutines, so the number is taken concurrently for one session. Every number must
+// be handed out exactly once — a repeat would make two packets indistinguishable to a
+// mediation function ordering them. Run under -race.
+func TestShipperPDUNumbersUnderConcurrentFraming(t *testing.T) {
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	task := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 7}
+	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
+
+	const perWorker = 100
+	var mu sync.Mutex
+	seen := make(map[uint32]int, liFrameWorkers*perWorker)
+
+	var wg sync.WaitGroup
+	for range liFrameWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perWorker {
+				tagged := append(append([]byte{1, 2, 3, 4, 5, 6, 7, 8}, farForwardUAndDuplicate), inner...)
+				n := binary.BigEndian.Uint32(x3AttrsOf(shipperPDU(tagged, task, ids))[x2x3.AttrSequenceNumber])
+				mu.Lock()
+				seen[n]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(seen) != liFrameWorkers*perWorker {
+		t.Errorf("%d distinct numbers for %d packets: a sequence number was reused", len(seen), liFrameWorkers*perWorker)
+	}
+}
+
+// TestShipperRefusesWithoutAnElementIdentifier is design D9 for the CC-POI: content
+// that a mediation function cannot attribute to the element that produced it is not
+// delivered at all. The datapath is unaffected — it keeps forwarding — because a UPF
+// that refuses to come up over its LI configuration tells every operator it is
+// LI-provisioned.
+func TestShipperRefusesWithoutAnElementIdentifier(t *testing.T) {
+	if _, err := startLIShipper(&LiConfig{X3SockAddr: "/nonexistent.sock"}, nil, nil); !errors.Is(err, errNoElementIdentifier) {
+		t.Errorf("startLIShipper without a network element identifier returned %v, want errNoElementIdentifier", err)
 	}
 }
