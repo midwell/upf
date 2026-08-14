@@ -92,6 +92,21 @@ type LiConfig struct {
 	// keeps tasking alive by sending keepalives, so this only lapses when it is
 	// genuinely gone.
 	TriggerKeepalive string `json:"trigger_keepalive"`
+
+	// The X2/X3 keepalive mechanism of ETSI TS 103 221-2 clause 6.2.4, on the X3
+	// delivery connections this shipper holds. A different mechanism from
+	// trigger_keepalive above, which is the fail-safe against the triggering
+	// function going quiet; the prefix keeps the two apart in a file that would
+	// otherwise carry two unrelated settings called keepalive.
+	//
+	// Enabled is a pointer so that unset is distinguishable from false: unset runs
+	// the mechanism at the specification's own timers (60 s and 180 s), which is
+	// what a deployment that configures nothing must get. False is for a mediation
+	// function that does not implement the MDF half of the clause and would
+	// therefore be disconnected every TIME_P2.
+	X2X3KeepaliveEnabled *bool  `json:"x2x3_keepalive_enabled,omitempty"`
+	X2X3KeepaliveTimeP1  string `json:"x2x3_keepalive_time_p1,omitempty"` // Go duration; default 60s
+	X2X3KeepaliveTimeP2  string `json:"x2x3_keepalive_time_p2,omitempty"` // Go duration; default 180s
 	// DeactivateAllTasks and RemoveAllDestinations carry what TS 103 221-1 leaves to
 	// advance agreement between the parties on an X1 interface: whether this element
 	// performs a bulk deactivation of all its tasking, and whether it performs a bulk
@@ -234,6 +249,24 @@ func validateConf(conf Conf) error {
 		if _, err := triggerKeepalive(conf.Li.TriggerKeepalive); err != nil {
 			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
 				"must be a positive Go duration (e.g. \"5m\") or empty to disable")
+		}
+
+		// The X2/X3 keepalive timers are refused here rather than defaulted, which is
+		// this network function's idiom: an operator's stated policy reaches the
+		// element or the deployment fails. The relationship between the two — TIME_P2
+		// must exceed TIME_P1 — is checked by the library that owns the mechanism, so
+		// there is one definition of what a usable pair is.
+		for name, value := range map[string]string{
+			"li.x2x3_keepalive_time_p1": conf.Li.X2X3KeepaliveTimeP1,
+			"li.x2x3_keepalive_time_p2": conf.Li.X2X3KeepaliveTimeP2,
+		} {
+			if _, err := parseOptionalDuration(value); err != nil {
+				return ErrInvalidArgumentWithReason(name, value,
+					"must be a Go duration (e.g. \"60s\") or empty for the specification's default")
+			}
+		}
+		if err := keepaliveConfig(*conf.Li).Validate(); err != nil {
+			return ErrInvalidArgumentWithReason("li.x2x3_keepalive_time_p2", conf.Li.X2X3KeepaliveTimeP2, err.Error())
 		}
 	}
 
