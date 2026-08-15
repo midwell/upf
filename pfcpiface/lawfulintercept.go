@@ -83,6 +83,11 @@ type liShipper struct {
 	// come to disagree about how an attribute is built.
 	ids *x2x3.Identity
 
+	// watcher reports both edges of a destination's reachability — that it failed
+	// and that it recovered. Nil when NE-initiated reporting is not configured, and
+	// its methods are nil-safe, so the delivery path calls it unconditionally.
+	watcher *x1.DestinationWatcher
+
 	mu      sync.Mutex
 	senders map[string]x2x3.Sender // per MDF3 address, created on first use
 
@@ -220,6 +225,15 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	// discarded on the socket write never arrives — so it is watched from the only
 	// vantage point that can see it, the datapath's own accounting.
 	startLIPuntMonitor(client, issueReporter)
+	// One owner for both edges of a destination's reachability: that it failed, and
+	// that it recovered. The delivery and keepalive paths used to report the first
+	// and nothing reported the second, so an ADMF told a destination was unreachable
+	// was never told it came back. A nil stop channel runs for as long as this
+	// element can hold tasking, which is the right lifetime.
+	if reporter != nil {
+		s.watcher = x1.NewDestinationWatcher(s.destinationHealth, reporter, 0)
+		go s.watcher.Watch(nil)
+	}
 
 	return s, nil
 }
@@ -328,6 +342,41 @@ func (s *liShipper) destinationsInUse() []string {
 	}
 
 	return addrs
+}
+
+// destinationHealth is the watcher's view of the same destinations
+// unreachableDestinations counts: the identifier the ADMF provisioned each under,
+// and whether this element can currently reach it.
+//
+// It is a different shape from the probe's on purpose. The probe answers a status
+// request and takes counts so it *cannot* name a destination — an element's own
+// status says how much is wrong, never whose product is affected. A
+// destination-scoped report says which, because the ADMF asked about none in
+// particular and that is exactly what it needs. Same fact, two questions.
+func (s *liShipper) destinationHealth() []x1.DestinationHealth {
+	if s.tasks == nil {
+		return nil
+	}
+
+	return x1.DestinationHealthOf(s.tasks.Snapshot(), types.DeliveryX3, s.addressUnreachable)
+}
+
+// addressUnreachable answers for one endpoint what unreachableDestinations counts
+// over all of them. It performs no I/O, which is what makes it safe to sample on a
+// timer.
+func (s *liShipper) addressUnreachable(addr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sender, ok := s.senders[addr]
+	if !ok {
+		// Nothing has been sent to it, so this element has not found it unreachable —
+		// it has not looked. The same rule unreachableDestinations applies.
+		return false
+	}
+	r, ok := sender.(x2x3.Reachability)
+
+	return ok && r.Unreachable()
 }
 
 // report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no
@@ -536,15 +585,30 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 		return nil, errNoDeliveryCredentials
 	}
 
-	// The keepalive mechanism reports through the same callback as a delivery
-	// failure: both establish that this destination is not working, and one condition
-	// deserves one report whichever noticed it.
+	// Neither the keepalive nor a delivery failure reports here any more, and the
+	// reason is not that the condition stopped mattering.
+	//
+	// Both establish that this destination is unreachable, which is a condition the
+	// element can *re-observe* — the sender knows it, which is what
+	// unreachableDestinations and the watcher both ask. So it has an ending, and an
+	// ending has to be reported (TS 103 221-1 clause 5.3). A site that announces and
+	// nothing that retracts eventually announces something nobody retracts, and both
+	// halves belong to whoever can see the transition. That is the watcher, which
+	// reports the failure naming the destination it concerns and the recovery when it
+	// comes.
+	//
+	// The callbacks stay wired and now nudge the watcher instead of reporting. The
+	// sender marks itself unreachable independently of them — sendBytes and the
+	// keepalive expiry both store it before the callback runs — so what the nudge
+	// buys is not the observation but its promptness: without it the ADMF would learn
+	// of a failed destination one sampling interval after this element did, which
+	// would be a regression dressed up as a refactor.
 	keepalive := s.keepalive
-	keepalive.OnFault = func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 keepalive failed") }
+	keepalive.OnFault = func(error) { s.watcher.Nudge() }
 
 	sender := x2x3.NewAsyncSender(
 		x2x3.NewClient(addr, s.tlsConfig, keepalive), 0,
-		func(error) { s.report(x1.NEIssueMDFUnreachable, "MDF3 X3 delivery failed") },
+		func(error) { s.watcher.Nudge() },
 		// A full queue is lost content, and it is not covered by the delivery-failure
 		// report above: that fires when the MDF is unreachable, whereas the queue
 		// overflows when the MDF is reachable but slower than the offered rate. Left
