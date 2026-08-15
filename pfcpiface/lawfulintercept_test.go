@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -588,6 +589,183 @@ func TestAWithdrawnTriggersDestinationStopsCounting(t *testing.T) {
 	if fault := probe(); fault != nil {
 		t.Errorf("a destination no trigger names is still reported as a fault: %q; nothing can "+
 			"ever deliver there again, so nothing could clear it", fault.ErrorDescription)
+	}
+}
+
+// capturingSender records what was delivered to one destination, so a fan-out can be
+// asserted per destination rather than in aggregate.
+type capturingSender struct {
+	mu   sync.Mutex
+	pdus []*x2x3.PDU
+}
+
+func (c *capturingSender) Send(pdu *x2x3.PDU) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pdus = append(c.pdus, pdu)
+
+	return nil
+}
+
+func (c *capturingSender) Close() error { return nil }
+
+func (c *capturingSender) delivered() []*x2x3.PDU {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]*x2x3.PDU(nil), c.pdus...)
+}
+
+// multiDestinationTrigger is an LI_T3 trigger naming several MDF3s, which the
+// provisioning interface permits and RequireResolvableDIDs validates. The criterion
+// is the PFCP session identity, so the shipper finds the task without a duplication
+// control behind it.
+func multiDestinationTrigger(seid uint64, addrs ...string) types.InterceptTask {
+	task := types.InterceptTask{
+		XID:           "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		CorrelationID: 0x2632898145f4d191,
+		Products:      []types.ProductType{types.ProductCC},
+		Targets: []types.TargetIdentifier{
+			{Type: types.TargetFSEID, Value: strconv.FormatUint(seid, 10)},
+		},
+	}
+	for _, addr := range addrs {
+		task.Deliveries = append(task.Deliveries,
+			types.DeliveryEndpoint{Type: types.DeliveryX3, Address: addr})
+	}
+
+	return task
+}
+
+// TestShipDeliversToEveryX3Destination is the loss this fixes: a task resolving two
+// X3 DIDs delivered to whichever endpoint happened to be first, and the agency
+// behind the other received an empty stream while the element reported the
+// interception as running.
+//
+// It also pins the two properties that make the fan-out a delivery and not a loop.
+// One xCC carries one sequence number wherever it goes — the number belongs to the
+// (XID, Correlation Identifier) context, not to a connection (TS 103 221-2 clause
+// 5.3.9), and numbering per destination would give each mediation function gaps it
+// could not tell from loss. And the PDU is built once, so a second destination costs
+// its own delivery and not a second framing.
+func TestShipDeliversToEveryX3Destination(t *testing.T) {
+	const (
+		first  = "10.0.60.122:42069"
+		second = "10.0.60.123:42069"
+		seid   = 4242
+	)
+	a, b := &capturingSender{}, &capturingSender{}
+	s := &liShipper{
+		tasks:   store.New(),
+		senders: map[string]x2x3.Sender{first: a, second: b},
+		ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+	}
+	s.tasks.Activate(multiDestinationTrigger(seid, first, second))
+
+	const copies = 4
+	for range copies {
+		s.ship(taggedCopy(seid, farForwardUAndDuplicate, uplinkCopy(443)))
+	}
+
+	atFirst, atSecond := a.delivered(), b.delivered()
+	if len(atFirst) != copies || len(atSecond) != copies {
+		t.Fatalf("delivered %d and %d copies, want %d to each destination",
+			len(atFirst), len(atSecond), copies)
+	}
+
+	for i := range atFirst {
+		// The same pointer at both, which is what "built once and shared" means: a
+		// loop calling shipperPDU per destination would hand out two values.
+		if atFirst[i] != atSecond[i] {
+			t.Errorf("copy %d was framed separately per destination; the framing must be shared", i)
+		}
+		n := x3AttrsOf(atFirst[i])[x2x3.AttrSequenceNumber]
+		m := x3AttrsOf(atSecond[i])[x2x3.AttrSequenceNumber]
+		if !bytes.Equal(n, m) {
+			t.Errorf("copy %d numbered % x at one destination and % x at the other", i, n, m)
+		}
+		if seq := binary.BigEndian.Uint32(n); seq != uint32(i) {
+			t.Errorf("copy %d carries sequence number %d; the stream is not contiguous", i, seq)
+		}
+	}
+}
+
+// nullSender accepts delivery and keeps nothing, so an allocation measurement of
+// the shipper is not measuring the recorder.
+type nullSender struct{}
+
+func (nullSender) Send(*x2x3.PDU) error { return nil }
+func (nullSender) Close() error         { return nil }
+
+// TestSecondDestinationCostsOnlyItsDelivery is the risk this fan-out carries, held
+// to a number rather than argued. Content interception is the one path whose work is
+// per packet, so a second destination must cost its own delivery and not a second
+// framing — which is what building the PDU once buys, and what a loop calling
+// shipperPDU per destination would have thrown away.
+func TestSecondDestinationCostsOnlyItsDelivery(t *testing.T) {
+	const (
+		first  = "10.0.60.122:42069"
+		second = "10.0.60.123:42069"
+		seid   = 4242
+	)
+	shipperWith := func(addrs ...string) *liShipper {
+		s := &liShipper{
+			tasks:   store.New(),
+			senders: map[string]x2x3.Sender{first: nullSender{}, second: nullSender{}},
+			ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		}
+		s.tasks.Activate(multiDestinationTrigger(seid, addrs...))
+
+		return s
+	}
+
+	toOne, toBoth := shipperWith(first), shipperWith(first, second)
+	copied := taggedCopy(seid, farForwardUAndDuplicate, uplinkCopy(443))
+	one := testing.AllocsPerRun(500, func() { toOne.ship(copied) })
+	two := testing.AllocsPerRun(500, func() { toBoth.ship(copied) })
+
+	t.Logf("allocations per send: one destination %.2f, two %.2f", one, two)
+	if two > one {
+		t.Errorf("a two-destination send allocates %.0f against %.0f for one; the framing "+
+			"is being repeated per destination", two, one)
+	}
+}
+
+// TestShipDeliversDespiteOneUnreachableDestination: one mediation function this
+// element cannot deliver to must not deny the others a warrant's product. The
+// element has no delivery credentials, so the destination with no client already
+// made cannot get one — which is the condition, and the fault names which
+// destination it is.
+func TestShipDeliversDespiteOneUnreachableDestination(t *testing.T) {
+	const (
+		reachable = "10.0.60.122:42069"
+		refused   = "10.0.60.123:42069"
+		seid      = 100
+	)
+	rec := &recordingReporter{}
+	a := &capturingSender{}
+	s := &liShipper{
+		tasks:    store.New(),
+		senders:  map[string]x2x3.Sender{reachable: a},
+		ids:      x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		reporter: rec,
+	}
+	// The unreachable one is named first, so a fan-out that stopped at the first
+	// failure would deliver nothing at all.
+	s.tasks.Activate(multiDestinationTrigger(seid, refused, reachable))
+
+	s.ship(taggedCopy(seid, farForwardUAndDuplicate, uplinkCopy(443)))
+
+	if n := len(a.delivered()); n != 1 {
+		t.Fatalf("the reachable destination received %d copies, want 1 — one unreachable "+
+			"mediation function denied another its product", n)
+	}
+	if got := rec.reported(); len(got) != 1 || got[0] != x1.NEIssueMDFUnreachable {
+		t.Fatalf("reported %v, want one %q", got, x1.NEIssueMDFUnreachable)
+	}
+	if d := rec.described()[0]; !strings.Contains(d, refused) {
+		t.Errorf("the fault does not say which destination failed: %q", d)
 	}
 }
 

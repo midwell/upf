@@ -5,7 +5,9 @@ package pfcpiface
 
 import (
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
@@ -23,9 +25,14 @@ type enablerFixture struct {
 	//
 	// Assertions read datapath rather than the session store, because that is where
 	// interception either happens or does not. Duplication enabled while the tasking
-	// changes is deliberately not written back to the session store — see retask —
+	// changes is deliberately not written back to the session store — see transact —
 	// so a test reading the store would report an interception as absent while it was
 	// running.
+	//
+	// Guarded, because the pushes come from the enabler's worker while the test
+	// asserts on them, and because a test of concurrent tasking changes drives them
+	// from more than one goroutine.
+	mu       sync.Mutex
 	pushed   []PacketForwardingRules
 	datapath map[farRef]bool
 }
@@ -37,20 +44,36 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 		datapath: make(map[farRef]bool),
 	}
 	f.e = newCCEnabler(f.tasks, func(_, updated PacketForwardingRules) {
+		f.mu.Lock()
 		f.pushed = append(f.pushed, updated)
+		f.mu.Unlock()
 		f.record(updated)
 	})
 	f.e.addSource(f.store)
+	// The worker belongs to the element, so it must not outlive it — a test that
+	// leaves one running is the shape of a process that would.
+	t.Cleanup(f.e.stop)
 
 	return f
 }
 
 // record applies to the fake datapath what a push would program.
 func (f *enablerFixture) record(rules PacketForwardingRules) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	for i := range rules.fars {
 		ref := farRef{seid: rules.fars[i].fseID, farID: rules.fars[i].farID}
 		f.datapath[ref] = rules.fars[i].Duplicates()
 	}
+}
+
+// pushCount is how many times rules have been programmed to the datapath.
+func (f *enablerFixture) pushCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return len(f.pushed)
 }
 
 // putSession installs a session, running the same tasking step the PFCP
@@ -77,6 +100,9 @@ func (f *enablerFixture) putSession(t *testing.T, s PFCPSession) {
 // a FAR — that is, whether interception is actually happening for it.
 func (f *enablerFixture) duplicates(t *testing.T, seid uint64, farID uint32) bool {
 	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	ref := farRef{seid: seid, farID: farID}
 	if _, ok := f.datapath[ref]; !ok {
 		t.Fatalf("FAR %d of session %d was never programmed", farID, seid)
@@ -89,14 +115,14 @@ func (f *enablerFixture) duplicates(t *testing.T, seid uint64, farID uint32) boo
 // first, then stored, then duplication re-derived.
 func (f *enablerFixture) activate(t *testing.T, xid types.XID, ids ...types.TargetIdentifier) {
 	t.Helper()
-	task := types.InterceptTask{XID: xid, Targets: ids, Products: []types.ProductType{types.ProductCC}}
+	task := ccTask(xid, ids...)
 	if err := f.e.canApply(task); err != nil {
 		t.Fatalf("canApply(%v): %v", ids, err)
 	}
 	if !f.tasks.Activate(task) {
 		t.Fatal("Activate failed")
 	}
-	f.e.retask()
+	f.e.retaskAndWait()
 }
 
 func (f *enablerFixture) deactivate(t *testing.T, xid types.XID) {
@@ -104,7 +130,7 @@ func (f *enablerFixture) deactivate(t *testing.T, xid types.XID) {
 	if !f.tasks.Deactivate(xid) {
 		t.Fatalf("Deactivate(%q) found no task", xid)
 	}
-	f.e.retask()
+	f.e.retaskAndWait()
 }
 
 func ueAddr(v string) types.TargetIdentifier {
@@ -148,7 +174,7 @@ func TestEnableDuplicationForUnmarkedSession(t *testing.T) {
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
 		t.Error("a task keyed by UE address did not enable duplication for that session")
 	}
-	if len(f.pushed) == 0 {
+	if f.pushCount() == 0 {
 		t.Error("the change was not pushed to the datapath, so nothing is intercepted")
 	}
 }
@@ -312,27 +338,26 @@ func TestEnablementIsIdempotent(t *testing.T) {
 func TestCanApplyRefusesUnresolvableCriteria(t *testing.T) {
 	f := newEnablerFixture(t)
 
+	// Every case requires content, so what is under test is the criteria check and
+	// not the product check TestCanApplyRefusesTaskingWithoutContent covers.
 	cases := []struct {
-		name string
-		task types.InterceptTask
+		name    string
+		targets []types.TargetIdentifier
 	}{
-		{"no criteria at all", types.InterceptTask{XID: "W1"}},
-		{"a criterion this datapath cannot resolve", types.InterceptTask{
-			XID:     "W1",
-			Targets: []types.TargetIdentifier{{Type: types.TargetUEIPv6, Value: "2001:db8::9"}},
-		}},
-		{"one good criterion and one bad", types.InterceptTask{
-			XID: "W1",
-			Targets: []types.TargetIdentifier{
-				ueAddr("10.250.0.9"),
-				{Type: types.TargetPDR, Value: "0a01"},
-			},
-		}},
+		{"no criteria at all", nil},
+		{
+			"a criterion this datapath cannot resolve",
+			[]types.TargetIdentifier{{Type: types.TargetUEIPv6, Value: "2001:db8::9"}},
+		},
+		{
+			"one good criterion and one bad",
+			[]types.TargetIdentifier{ueAddr("10.250.0.9"), {Type: types.TargetPDR, Value: "0a01"}},
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := f.e.canApply(c.task); err == nil {
+			if err := f.e.canApply(ccTask("W1", c.targets...)); err == nil {
 				t.Error("canApply accepted a task this element cannot carry out")
 			}
 		})
@@ -340,10 +365,99 @@ func TestCanApplyRefusesUnresolvableCriteria(t *testing.T) {
 
 	// And a criterion that resolves but selects nothing yet is *not* refused: the
 	// subscriber may attach later.
-	if err := f.e.canApply(types.InterceptTask{
-		XID: "W1", Targets: []types.TargetIdentifier{ueAddr("10.250.0.99")},
-	}); err != nil {
+	if err := f.e.canApply(ccTask("W1", ueAddr("10.250.0.99"))); err != nil {
 		t.Errorf("canApply refused a criterion that simply has no session yet: %v", err)
+	}
+}
+
+// ccTask is tasking for the product this point of interception makes — the X1
+// deliveryType X3Only, or X2andX3 as far as this element is concerned.
+func ccTask(xid types.XID, ids ...types.TargetIdentifier) types.InterceptTask {
+	return types.InterceptTask{
+		XID: xid, Targets: ids,
+		Products: []types.ProductType{types.ProductCC},
+	}
+}
+
+// iriOnlyTask is tasking for a product this point of interception does not make.
+// The X1 deliveryType X2Only maps to exactly this.
+func iriOnlyTask(xid types.XID, ids ...types.TargetIdentifier) types.InterceptTask {
+	return types.InterceptTask{
+		XID: xid, Targets: ids,
+		Products: []types.ProductType{types.ProductIRI},
+	}
+}
+
+// TestCanApplyRefusesTaskingWithoutContent covers the product question, which is
+// prior to the criteria one: a CC-POI produces xCC and nothing else, so tasking
+// that does not require content is tasking it cannot honour. Accepting it tells the
+// triggering function an interception is running that will deliver nothing, and has
+// the datapath duplicate a subject's traffic so every copy can be discarded.
+//
+// li/x1's TestCanApplyRefusesBeforeAcknowledging is the other half: an error from
+// here reaches the triggering function as a refusal carrying this reason, and the
+// task is not stored.
+func TestCanApplyRefusesTaskingWithoutContent(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	if err := f.e.canApply(iriOnlyTask("W1", ueAddr("10.250.0.9"))); err == nil {
+		t.Error("canApply accepted a task that does not require content of communication")
+	}
+
+	// The same criteria with content required is accepted, so the refusal is about
+	// the product and not about anything else in the task.
+	if err := f.e.canApply(types.InterceptTask{
+		XID: "W1", Targets: []types.TargetIdentifier{ueAddr("10.250.0.9")},
+		Products: []types.ProductType{types.ProductIRI, types.ProductCC},
+	}); err != nil {
+		t.Errorf("canApply refused a task that does require content: %v", err)
+	}
+}
+
+// TestNoDuplicationForTaskingWithoutContent asserts the programmed state rather
+// than the refusal: a task admitted before canApply asked the product question must
+// not still be duplicating. The task is put straight into the store, which is what
+// such a leftover looks like.
+func TestNoDuplicationForTaskingWithoutContent(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	if !f.tasks.Activate(iriOnlyTask("W1", ueAddr("10.250.0.9"))) {
+		t.Fatal("Activate failed")
+	}
+	f.e.retaskAndWait()
+
+	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+		t.Error("a task that does not require content is duplicating a subject's traffic")
+	}
+	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
+		t.Error("a copy was attributed to a task with no content product to deliver")
+	}
+}
+
+// TestTaskingWithoutContentDoesNotStealAttribution is the sharp edge of the same
+// filter. Attribution takes the first covering task in XID order, so a leftover
+// non-content task sorting ahead of a real one would swallow the whole session's
+// product: every copy attributed to a task with no X3 destination, and the warrant
+// that has one receiving nothing.
+func TestTaskingWithoutContentDoesNotStealAttribution(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	if !f.tasks.Activate(iriOnlyTask("W-a", ueAddr("10.250.0.9"))) {
+		t.Fatal("Activate failed")
+	}
+	f.activate(t, "W-b", ueAddr("10.250.0.9"))
+
+	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	if !ok {
+		t.Fatal("no task found for a session under a content warrant")
+	}
+	if task.XID != "W-b" {
+		t.Errorf("attributed to %q, want the warrant that requires content", task.XID)
+	}
+	if covering != 1 {
+		t.Errorf("covering = %d, want 1 — a task this POI cannot serve is not an overlap", covering)
 	}
 }
 
@@ -357,16 +471,170 @@ func TestRetaskSkipsUnchangedSessions(t *testing.T) {
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 
 	f.activate(t, "W1", ueAddr("10.250.0.9"))
-	after := len(f.pushed)
+	after := f.pushCount()
 	if after != 1 {
 		t.Fatalf("pushed %d sessions, want just the tasked one", after)
 	}
 
 	// Nothing about the answer changes, so nothing should be pushed again.
-	f.e.retask()
-	if len(f.pushed) != after {
+	f.e.retaskAndWait()
+	if f.pushCount() != after {
 		t.Errorf("pushed %d times, want %d — unchanged sessions were reprogrammed",
-			len(f.pushed), after)
+			f.pushCount(), after)
+	}
+}
+
+// TestConcurrentTaskingChangesDoNotLoseAnUpdate is the lost update, which only
+// appears under interleaving and so was worth nothing as a fix until it had been
+// observed.
+//
+// Two provisioning requests arrive at once. When only the individual reads and
+// writes were protected, the pass that began earlier could program and publish
+// last: it derived duplication from a task set that no longer existed, cleared it
+// for a task that was still active, and nothing re-derived until some unrelated
+// event happened to trigger another pass. Nothing downstream could notice — a
+// dropped copy produces no record for anybody to miss — so it could hold for the
+// life of the warrant.
+func TestConcurrentTaskingChangesDoNotLoseAnUpdate(t *testing.T) {
+	for round := range 50 {
+		f := newEnablerFixture(t)
+		// One pass is made slow, so the losing interleaving is reached rather than
+		// hoped for: the slow pass reads the tasking, the other changes it and
+		// finishes, and the slow one then publishes over the top.
+		paced := &pacedSource{SessionsStore: f.store, delayOne: make(chan struct{}, 1)}
+		f.e.removeSource(f.store)
+		f.e.addSource(paced)
+
+		f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+		f.putSession(t, unmarkedSession(200, "10.250.0.10"))
+		f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+		paced.delayOne <- struct{}{}
+
+		// One request withdraws W1, the other activates W2 for a different subscriber,
+		// in both orders. Which of the two is the delayed pass decides which way the
+		// loss goes — duplication cleared for a task that is still active, or
+		// surviving one that was withdrawn — and they are the same lost update.
+		requests := []func(){
+			func() { f.tasks.Deactivate("W1"); f.e.retaskAndWait() },
+			func() {
+				f.tasks.Activate(ccTask("W2", ueAddr("10.250.0.10")))
+				f.e.retaskAndWait()
+			},
+		}
+		if round%2 == 1 {
+			requests[0], requests[1] = requests[1], requests[0]
+		}
+
+		var wg sync.WaitGroup
+		for _, request := range requests {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				request()
+			}()
+		}
+		wg.Wait()
+
+		// Whichever ran first, the tasking that stands at the end is W2 alone, and
+		// that is what the datapath must be doing.
+		if !f.duplicates(t, 200, 1) || !f.duplicates(t, 200, 2) {
+			t.Fatal("duplication was cleared for a task that is still active")
+		}
+		if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+			t.Fatal("duplication survived the withdrawal of the task that required it")
+		}
+	}
+}
+
+// pacedSource delays one pass over the sessions, on request. The tasking is read
+// before the sessions are, so a delayed pass is one holding a snapshot the world
+// has moved past — which is the whole shape of the lost update.
+type pacedSource struct {
+	SessionsStore
+	delayOne chan struct{}
+}
+
+func (p *pacedSource) GetAllSessions() []PFCPSession {
+	select {
+	case <-p.delayOne:
+		time.Sleep(5 * time.Millisecond)
+	default:
+	}
+
+	return p.SessionsStore.GetAllSessions()
+}
+
+// heldSource stops a transaction inside the worker until the test lets it go, so a
+// burst of requests provably arrives while one pass is running rather than by
+// hoping the scheduler arranges it.
+type heldSource struct {
+	SessionsStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *heldSource) GetAllSessions() []PFCPSession {
+	h.entered <- struct{}{}
+	<-h.release
+
+	return h.SessionsStore.GetAllSessions()
+}
+
+// TestConcurrentRequestsAreCoalesced pins the semantics that make one worker
+// correct rather than merely serial. A re-derivation is a full evaluation from
+// current tasking, so N pending requests and one imply the same work — and what
+// must hold is that the state programmed is the one the last of them implies.
+func TestConcurrentRequestsAreCoalesced(t *testing.T) {
+	held := &heldSource{
+		SessionsStore: NewInMemoryStore(),
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) {})
+	t.Cleanup(e.stop)
+	e.addSource(held)
+
+	e.retask()
+	<-held.entered // one pass is now inside the transaction
+
+	const burst = 32
+	for range burst {
+		e.retask()
+	}
+
+	held.release <- struct{}{} // the first pass finishes
+	<-held.entered             // and one more answers for the whole burst
+	held.release <- struct{}{}
+
+	e.await(burst + 1)
+	if got := e.transactions(); got != 2 {
+		t.Errorf("%d requests during one pass performed %d transactions in all, want 2",
+			burst, got)
+	}
+}
+
+// TestEnablerStopEndsTheWorker: the worker belongs to the element, so it must not
+// outlive it, and a caller waiting on a re-derivation must not be left blocked on
+// one that will never happen.
+func TestEnablerStopEndsTheWorker(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	f.e.stop()
+	f.e.stop() // idempotent: the fixture's cleanup calls it again
+
+	// A request after shutdown is not performed and does not block the caller.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.e.retaskAndWait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a re-derivation requested after shutdown never returned")
 	}
 }
 
@@ -472,7 +740,7 @@ func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
 		t.Fatalf("canApply: %v", err)
 	}
 	f.tasks.Activate(task)
-	f.e.retask()
+	f.e.retaskAndWait()
 
 	_, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
@@ -495,7 +763,7 @@ func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
 		t.Fatalf("canApply after modify: %v", err)
 	}
 	f.tasks.Activate(task)
-	f.e.retask()
+	f.e.retaskAndWait()
 
 	got, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {

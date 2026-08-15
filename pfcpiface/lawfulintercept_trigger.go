@@ -84,8 +84,11 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		x1.OnDeactivate(func(task types.InterceptTask) {
 			// Whatever duplication this task required and no remaining task does is
 			// withdrawn, before the report: interception stopping is the outcome being
-			// reported, so it must actually have stopped.
-			enabler.retask()
+			// reported, so it must actually have stopped. The re-derivation runs on the
+			// enabler's worker, so this waits for the one it asked for — asking is not
+			// stopping, and reporting on the strength of having asked would make the
+			// report a lie in exactly the window it matters.
+			enabler.retaskAndWait()
 			// The numbering state goes with the tasking. This element holds one sequence
 			// context per intercepted session, so a warrant that outlives many sessions
 			// would otherwise leave one entry behind for each of them.

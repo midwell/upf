@@ -352,6 +352,10 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			tasks:    store.New(),
 			reporter: rec,
 			senders:  make(map[string]x2x3.Sender),
+			// A shipper never runs without one — startLIShipper refuses to start
+			// without an element identifier — and the framing now happens before the
+			// per-destination sender lookup, since one PDU is built and shared.
+			ids: x2x3.NewIdentity("upf-1", upfInterceptionPoint),
 		}
 	}
 
@@ -426,15 +430,17 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 // ADMF would have been told. Guarded, because reports also arrive from background
 // goroutines — the keepalive fail-safe raises one from its own watchdog.
 type recordingReporter struct {
-	mu     sync.Mutex
-	issues []string
+	mu           sync.Mutex
+	issues       []string
+	descriptions []string
 }
 
-func (r *recordingReporter) Notify(issueType, _ string) {
+func (r *recordingReporter) Notify(issueType, description string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.issues = append(r.issues, issueType)
+	r.descriptions = append(r.descriptions, description)
 }
 
 // reported returns a copy of what has been raised so far.
@@ -443,6 +449,15 @@ func (r *recordingReporter) reported() []string {
 	defer r.mu.Unlock()
 
 	return append([]string(nil), r.issues...)
+}
+
+// described returns the descriptions that went with them, in the same order — for
+// the faults whose usefulness is in what they name rather than in the type alone.
+func (r *recordingReporter) described() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.descriptions...)
 }
 
 // TestTriggerKeepaliveFailSafePurgesTasking: tasking must not
@@ -590,7 +605,11 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 	tagged = append(tagged, 0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2)
 
 	rec := &recordingReporter{}
-	s := &liShipper{tasks: tasks, reporter: rec, senders: make(map[string]x2x3.Sender)}
+	s := &liShipper{
+		tasks: tasks, reporter: rec,
+		senders: make(map[string]x2x3.Sender),
+		ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+	}
 	s.ship(tagged)
 
 	if !slices.Contains(rec.reported(), x1.NEIssueContentTaskOverlap) {
