@@ -559,6 +559,133 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	}
 }
 
+// orderingReporter records each fault it is told about into a shared sequence, so
+// that when a report happened relative to something else can be asserted.
+type orderingReporter struct{ note func(string) }
+
+func (o orderingReporter) Notify(issueType, _ string) { o.note("report:" + issueType) }
+
+// TestTheStopReportFollowsTheStop pins the ordering obligation the asynchronous
+// re-derivation created: the element reports that content interception has ceased,
+// and that report has to follow the datapath actually having been programmed to stop
+// — not merely a re-derivation having been requested.
+//
+// Worth a test of its own because the property is held by one call. The hook waits
+// for the pass it asked for; swap that back to the fire-and-forget form and every
+// other test in this package still passes while the report becomes a claim about
+// something that has not happened yet.
+//
+// Driven through the keepalive fail-safe because that is the removal path that
+// reports, and it exercises the same hook an ordinary withdrawal does.
+func TestTheStopReportFollowsTheStop(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	var mu sync.Mutex
+	var events []string
+	note := func(e string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
+
+	// A session the trigger's criterion selects, so re-deriving actually programs
+	// something and the ordering has two events to be an ordering between.
+	const seid = 4242
+	sessions := NewInMemoryStore()
+	if err := sessions.PutSession(unmarkedSession(seid, "10.250.0.9")); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+
+	enabler := newCCEnabler(nil, func(_, updated PacketForwardingRules) {
+		for i := range updated.fars {
+			if updated.fars[i].Duplicates() {
+				note("program:on")
+			} else {
+				note("program:off")
+			}
+		}
+	})
+	t.Cleanup(enabler.stop)
+	enabler.addSource(sessions)
+
+	cfg := &LiConfig{
+		NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t),
+		TriggerKeepalive: "1s",
+	}
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), orderingReporter{note: note},
+		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	if err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+	if err := req.ActivateTask(x1.Trigger{
+		XID:           "11111111-1111-4111-8111-111111111111",
+		ProductID:     "22222222-2222-4222-8222-222222222222",
+		CorrelationID: 7,
+		SEID:          seid,
+		DIDs:          []string{did},
+	}); err != nil {
+		t.Fatalf("ActivateTask: %v", err)
+	}
+
+	// Then the triggering function goes quiet and the fail-safe reclaims the tasking.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+			break
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+		t.Fatal("tasking outlived the triggering function")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	stopped, reported := -1, -1
+	for i, e := range events {
+		if e == "program:off" && stopped < 0 {
+			stopped = i
+		}
+		if e == "report:"+x1.NEIssueTaskingPurged && reported < 0 {
+			reported = i
+		}
+	}
+
+	if stopped < 0 {
+		t.Fatalf("the datapath was never programmed to stop duplicating: %v", events)
+	}
+	if reported < 0 {
+		t.Fatalf("interception stopping was not reported: %v", events)
+	}
+	if stopped > reported {
+		t.Errorf("the stop was reported before the datapath was programmed to stop (%v); "+
+			"the report describes a state that does not hold yet", events)
+	}
+}
+
 // TestOverlappingWarrantsPickTheSameOneEveryTime: when two warrants cover one
 // session this POI delivers each packet under exactly one of them, so which one
 // has to be the same on every packet. Selecting from a map's iteration order —
