@@ -193,6 +193,13 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		logger.PfcpLog.Errorf("failed to put PFCP session to store: %v", err)
 	}
 
+	// Lawful Interception: record what was programmed only now the session is
+	// visible to a re-derivation. Recorded before the store, it would say a
+	// session's traffic is being duplicated while GetAllSessions still did not
+	// return the session — and a re-derivation running in that interval publishes a
+	// conclusion drawn without it, leaving duplication nothing will turn off.
+	upf.ccEnabler.sessionProgrammed(&session)
+
 	var localFSEID *ie.IE
 
 	localIP := pConn.LocalAddr().(*net.UDPAddr).IP
@@ -458,6 +465,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	if err != nil {
 		logger.PfcpLog.Errorf("failed to put PFCP session to store: %v", err)
 	}
+
+	// Lawful Interception: as in the establishment handler, and for the sharper
+	// reason. Recorded before the store, a modification that brings a session within
+	// a criterion hands a re-derivation still holding the pre-modification copy a
+	// newer value to compare against — and that pass then pushes the FAR off, ending
+	// an interception the tasking still requires.
+	upf.ccEnabler.sessionProgrammed(&session)
 
 	// Build response message
 	smres := message.NewSessionModificationResponse(0, /* MO?? <-- what's this */

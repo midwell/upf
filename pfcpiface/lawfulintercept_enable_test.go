@@ -81,19 +81,101 @@ func (f *enablerFixture) pushCount() int {
 // would produce.
 func (f *enablerFixture) putSession(t *testing.T, s PFCPSession) {
 	t.Helper()
+	f.derive(&s)
+	f.commit(t, s)
+}
+
+// derive runs the first half of a PFCP session establishment: duplication is
+// re-derived for the session and the rules the handler is about to push are
+// programmed. The session is deliberately not stored — messages_session.go:182
+// stores it afterwards, and the interval between the two is where the
+// reproductions below act.
+func (f *enablerFixture) derive(s *PFCPSession) {
 	updated := PacketForwardingRules{
 		pdrs: append([]pdr(nil), s.pdrs...),
 		fars: append([]far(nil), s.fars...),
 	}
-	f.e.applyTasking(&s, &updated)
-	if err := f.store.PutSession(s); err != nil {
-		t.Fatalf("PutSession: %v", err)
-	}
+	f.e.applyTasking(s, &updated)
 	// An establishment programs the datapath from the session's own rules — the
 	// datapath's add path takes those, and only its modify path takes the update
 	// subset. Recording the wrong one here would leave the session-side marking
 	// untested.
 	f.record(s.PacketForwardingRules)
+}
+
+// deriveModification is the same first half for a session modification: the SMF
+// restates rules, duplication is re-derived over them, and only the changed
+// subset reaches the datapath. messages_session.go:386 orders it exactly as :182
+// does, so it leaves the same interval open — but on a session the store already
+// holds, which is the half a rule keyed on absence would miss.
+func (f *enablerFixture) deriveModification(s *PFCPSession) {
+	// A separate slice, as the handler has: it accumulates the FARs it parsed from
+	// the request and pushes those, while the session holds its own copies.
+	updated := PacketForwardingRules{fars: append([]far(nil), s.fars...)}
+	f.e.applyTasking(s, &updated)
+	f.record(updated)
+}
+
+// commit is the second half: the session becomes visible to GetAllSessions, and
+// only then is what was programmed recorded — the order both handlers use, and
+// the order the carry-over in transact depends on.
+func (f *enablerFixture) commit(t *testing.T, s PFCPSession) {
+	t.Helper()
+	if err := f.store.PutSession(s); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	f.e.sessionProgrammed(&s)
+}
+
+// recorded is what the element believes it last told the datapath about a FAR,
+// and whether it holds any record of it at all. A missing entry is not a
+// bookkeeping blemish — transact reads it as "not duplicating" and therefore as
+// an instruction to do nothing.
+func (f *enablerFixture) recorded(seid uint64, farID uint32) (value, held bool) {
+	f.e.mu.Lock()
+	defer f.e.mu.Unlock()
+
+	v, ok := f.e.programmed[farRef{seid: seid, farID: farID}]
+
+	return v.duplicating, ok
+}
+
+// settle waits for the element to stop re-deriving of its own accord. A pass that
+// preserves live duplication asks for one more, so the state that matters is the
+// one after the element has stopped rather than the one after the pass the test
+// asked for.
+func (f *enablerFixture) settle(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.e.mu.Lock()
+		idle := f.e.requested == f.e.completed
+		f.e.mu.Unlock()
+		if idle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the element never stopped re-deriving")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// windowed replaces the fixture's session source with one that can hold a pass
+// after it has read the sessions.
+func (f *enablerFixture) windowed(t *testing.T) *windowSource {
+	t.Helper()
+	w := &windowSource{
+		SessionsStore: f.store,
+		hold:          make(chan struct{}, 1),
+		read:          make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	f.e.removeSource(f.store)
+	f.e.addSource(w)
+
+	return w
 }
 
 // duplicates reports whether the datapath is currently duplicating the traffic of
@@ -579,6 +661,329 @@ func (h *heldSource) GetAllSessions() []PFCPSession {
 	<-h.release
 
 	return h.SessionsStore.GetAllSessions()
+}
+
+// windowSource holds one pass *after* it has read the sessions, which is what
+// distinguishes it from heldSource: the interval being driven is the one in which
+// a session is already programmed into the datapath and recorded, and is not yet
+// visible to GetAllSessions. Both PFCP handlers leave it open — derive, push,
+// store — and it is a few instructions wide, so racing two goroutines does not
+// reach it. A pass is held only while a token has been placed in hold, so a test
+// can hold one and then let the element settle.
+type windowSource struct {
+	SessionsStore
+	hold    chan struct{}
+	read    chan struct{}
+	release chan struct{}
+}
+
+func (w *windowSource) GetAllSessions() []PFCPSession {
+	all := w.SessionsStore.GetAllSessions()
+
+	select {
+	case <-w.hold:
+		w.read <- struct{}{}
+		<-w.release
+	default:
+	}
+
+	return all
+}
+
+// TestRecordOfDuplicationSurvivesAPassThatCouldNotSeeIt is the narrow half of the
+// lost update: a session established while a re-derivation is walking is invisible
+// to it, so the wholesale publish at the end of that pass discards the fact that
+// duplication was enabled for it. The element then holds no evidence of having
+// enabled duplication it did enable.
+//
+// Asserted on the record rather than on the datapath, because the record is what
+// the next section changes and because at this point the datapath is still right —
+// it is the *next* re-derivation, finding nothing to change, that leaves the
+// traffic being copied. The test that pins that is below.
+func TestRecordOfDuplicationSurvivesAPassThatCouldNotSeeIt(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	// A pass begins and reads the sessions. There are none.
+	w.hold <- struct{}{}
+	gen := f.e.request()
+	<-w.read
+
+	// The PFCP goroutine establishes a session the tasking covers: duplication
+	// derived, rules programmed, session not yet in the store.
+	sess := unmarkedSession(100, "10.250.0.9")
+	f.derive(&sess)
+	f.commit(t, sess)
+
+	// The pass now publishes a conclusion it drew before the session existed.
+	w.release <- struct{}{}
+	f.e.await(gen)
+	f.settle(t)
+
+	for _, farID := range []uint32{1, 2} {
+		value, held := f.recorded(100, farID)
+		if !held {
+			t.Errorf("FAR %d: the element forgot duplication it had enabled, because a pass that could not have seen the session published afterwards", farID)
+
+			continue
+		}
+		if !value {
+			t.Errorf("FAR %d: the element records duplication as off while the datapath is duplicating", farID)
+		}
+	}
+}
+
+// TestDuplicationStopsForASessionEstablishedInsideTheWithdrawalsOwnPass is the one
+// that matters, and it is deliberately arranged so that the pass which loses the
+// record is the pass serving the withdrawal itself.
+//
+// That is what makes preserving the record insufficient on its own. Tasking
+// changes are what ask for a re-derivation, and this tasking change has already
+// been consumed: after the pass publishes, nothing schedules another. So an
+// element that merely remembers correctly is an element whose account is accurate
+// about a datapath that is still copying a subject's traffic under no tasking at
+// all.
+//
+// The assertion is therefore on the datapath and not on the record. A fix that
+// made the bookkeeping right while leaving duplication running would pass a test
+// that pinned the record, and that is the failure this exists to catch.
+func TestDuplicationStopsForASessionEstablishedInsideTheWithdrawalsOwnPass(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	// The PFCP goroutine derives duplication for a new session and programs it.
+	sess := unmarkedSession(100, "10.250.0.9")
+	f.derive(&sess)
+	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
+		t.Fatal("the establishment did not start the interception it was tasked with")
+	}
+
+	// The withdrawal arrives inside the interval before the session is stored, and
+	// its own pass is the one that cannot see the session.
+	w.hold <- struct{}{}
+	if !f.tasks.Deactivate("W1") {
+		t.Fatal("Deactivate found no task")
+	}
+	gen := f.e.request()
+	<-w.read
+
+	f.commit(t, sess)
+	w.release <- struct{}{}
+	f.e.await(gen)
+
+	// Nothing else asks for a re-derivation. Anything that happens from here the
+	// element does on its own account, which is the whole point.
+	f.settle(t)
+
+	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+		t.Error("duplication outlived the tasking that authorised it: the datapath is copying a subject's traffic under no task at all")
+	}
+}
+
+// TestDuplicationStopsForAStoredSessionBroughtWithinTheTasking is the window the
+// establishment case does not reach, and the reason the carry-over rule is about
+// recency rather than about presence.
+//
+// Here the session is already in the store, so the pass does see it — as it stood
+// before the modification. A modification that brings it within a criterion has
+// the session path record duplication while the pass holds the conclusion it drew
+// from the older copy, and the publish overwrites the newer value with the staler
+// one. The ref is present in the pass's own result, so a rule that carried over
+// only entries *absent* from it preserves nothing here and this stays broken.
+func TestDuplicationStopsForAStoredSessionBroughtWithinTheTasking(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	// A session the tasking does not cover, and which the store already holds.
+	f.putSession(t, unmarkedSession(100, "10.250.0.99"))
+	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+		t.Fatal("an untasked subscriber's traffic is being duplicated")
+	}
+
+	// A pass begins and reads the session in its pre-modification state.
+	w.hold <- struct{}{}
+	gen := f.e.request()
+	<-w.read
+
+	// The modification brings the session within the criterion.
+	modified := unmarkedSession(100, "10.250.0.9")
+	f.deriveModification(&modified)
+	f.commit(t, modified)
+	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
+		t.Fatal("the modification did not start the interception the tasking now covers")
+	}
+
+	// The pass publishes the conclusion it drew from the copy it read.
+	w.release <- struct{}{}
+	f.e.await(gen)
+	f.settle(t)
+
+	f.deactivate(t, "W1")
+	f.settle(t)
+
+	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
+		t.Error("duplication outlived the tasking that authorised it: the withdrawal found a record a staler pass had published over, and had nothing to change")
+	}
+}
+
+// TestAStalePassDoesNotEndAnInterceptionTheTaskingRequires is the same window in
+// the other direction, and it is the sharper failure of the two.
+//
+// A re-derivation compares its conclusion against the record as it stands at the
+// moment it compares, not as it stood when it read the sessions. While the record
+// was written before the session was stored, a modification bringing a session
+// within a criterion gave a pass holding the pre-modification copy a *newer* value
+// to disagree with — so the pass did not merely forget, it pushed the FAR off,
+// ending an interception the tasking still required. No withdrawal is needed for
+// this one, and nothing downstream can see it: the triggering function was told
+// the task was applied, and the product that would be missing was never made.
+//
+// It also pins the second half of that: what the pass would have pushed is the
+// FAR body from its own stale snapshot, so restating it would put the SMF's
+// pre-modification forwarding back on the datapath.
+func TestAStalePassDoesNotEndAnInterceptionTheTaskingRequires(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, "10.250.0.99"))
+
+	w.hold <- struct{}{}
+	gen := f.e.request()
+	<-w.read
+
+	modified := unmarkedSession(100, "10.250.0.9")
+	f.deriveModification(&modified)
+	f.commit(t, modified)
+
+	w.release <- struct{}{}
+	f.e.await(gen)
+	f.settle(t)
+
+	// W1 is still active and covers this session.
+	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
+		t.Error("a re-derivation holding a pre-modification copy of the session ended an interception that active tasking requires")
+	}
+}
+
+// TestDepartedSessionsDropOutOfTheRecord is the property the wholesale replace
+// existed for, and the one carrying entries over could quietly cost. The old code
+// could not leak because it discarded everything each pass; this asserts the
+// comparison that replaces that guarantee gets the other direction right.
+func TestDepartedSessionsDropOutOfTheRecord(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	if _, held := f.recorded(100, 1); !held {
+		t.Fatal("the tasked session was never recorded, so this asserts nothing")
+	}
+
+	if err := f.store.DeleteSession(100); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	f.e.retaskAndWait()
+	f.settle(t)
+
+	for _, farID := range []uint32{1, 2} {
+		if _, held := f.recorded(100, farID); held {
+			t.Errorf("FAR %d of a released session is still in the record, which grows for the life of the process", farID)
+		}
+	}
+}
+
+// TestTheRecordDoesNotGrowUnderSessionChurn is the direct assertion the risk
+// register asks for: the map's bound moved from a rebuild to a comparison, so
+// anything wrongly judged newer leaks until the process ends.
+func TestTheRecordDoesNotGrowUnderSessionChurn(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	for seid := uint64(1); seid <= 200; seid++ {
+		// Alternating between traffic the task covers and traffic it does not, so the
+		// churn exercises both the entries that are carried over and those that are not.
+		ue := "10.250.0.9"
+		if seid%2 == 0 {
+			ue = "10.250.0.10"
+		}
+		f.putSession(t, unmarkedSession(seid, ue))
+		if seid > 1 {
+			if err := f.store.DeleteSession(seid - 1); err != nil {
+				t.Fatalf("DeleteSession: %v", err)
+			}
+		}
+	}
+	if err := f.store.DeleteSession(200); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	f.e.retaskAndWait()
+	f.settle(t)
+
+	f.e.mu.Lock()
+	size := len(f.e.programmed)
+	f.e.mu.Unlock()
+
+	// No sessions are left, so nothing should be recorded about any.
+	if size != 0 {
+		t.Errorf("the record holds %d entries with no sessions left; entries are being carried over that should have dropped", size)
+	}
+}
+
+// TestAnEstablishmentDuringARederivationTerminates: the request the session path
+// makes is a feedback edge — a pass can cause a pass — so it is worth pinning that
+// it stops. The second pass sees the session, so it records nothing new and asks
+// for nothing.
+func TestAnEstablishmentDuringARederivationTerminates(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	before := f.e.transactions()
+
+	w.hold <- struct{}{}
+	gen := f.e.request()
+	<-w.read
+
+	sess := unmarkedSession(100, "10.250.0.9")
+	f.derive(&sess)
+	f.commit(t, sess)
+
+	w.release <- struct{}{}
+	f.e.await(gen)
+	f.settle(t)
+
+	// The pass the test asked for, and the one the establishment asked for. A third
+	// would mean the follow-up is asking for its own follow-up.
+	if got := f.e.transactions() - before; got != 2 {
+		t.Errorf("one establishment during a re-derivation performed %d further re-derivations, want 2", got)
+	}
+}
+
+// TestAnUntaskedElementNeverAsksForARederivation is what makes the request
+// affordable. An element holding no tasking is the state it is in almost all of
+// the time, and there a session establishment must cost nothing beyond itself:
+// the alternative is a walk of every session behind every attach.
+func TestAnUntaskedElementNeverAsksForARederivation(t *testing.T) {
+	f := newEnablerFixture(t)
+	before := f.e.transactions()
+
+	for seid := uint64(1); seid <= 50; seid++ {
+		f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+		if err := f.store.DeleteSession(seid); err != nil {
+			t.Fatalf("DeleteSession: %v", err)
+		}
+	}
+	f.settle(t)
+
+	if got := f.e.transactions() - before; got != 0 {
+		t.Errorf("session churn on an untasked element performed %d re-derivations, want none", got)
+	}
 }
 
 // TestConcurrentRequestsAreCoalesced pins the semantics that make one worker
