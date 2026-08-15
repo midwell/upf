@@ -48,7 +48,20 @@ type ccEnabler struct {
 	// It is not the authority on what *should* be duplicated — that is recomputed
 	// from the live tasking every time — only a record of what the datapath was last
 	// told, so that a re-derivation producing the same answer does not reprogram it.
-	programmed map[farRef]bool
+	//
+	// It is nonetheless load-bearing in one direction: a re-derivation skips a FAR
+	// whose recorded value already equals what the tasking implies, so a *missing*
+	// entry is an instruction to do nothing — and doing nothing is wrong exactly
+	// when the datapath is duplicating and the tasking says it should not be.
+	programmed map[farRef]programmedFAR
+	// writes counts writes to programmed, and is what lets a re-derivation tell an
+	// entry the session path wrote while it ran from one it read itself.
+	//
+	// Deliberately not requested/served/completed. Those count *requests for a
+	// re-derivation*; this counts *writes to the record*. A pass serving generation
+	// G would see its own G on entries written during it and discard them anyway,
+	// so conflating the two silently defeats the carry-over below.
+	writes uint64
 	// push writes changed rules to the datapath. Separate field so a test can
 	// observe what would be programmed without a datapath.
 	push func(all, updated PacketForwardingRules)
@@ -76,8 +89,16 @@ type ccEnabler struct {
 	worker  sync.WaitGroup
 }
 
+// programmedFAR is what this element last told the datapath about one FAR, and
+// when it said so.
+type programmedFAR struct {
+	duplicating bool
+	// written is the value of writes at the moment the entry was recorded.
+	written uint64
+}
+
 func newCCEnabler(tasks *store.Store, push func(all, updated PacketForwardingRules)) *ccEnabler {
-	e := &ccEnabler{tasks: tasks, push: push, programmed: make(map[farRef]bool)}
+	e := &ccEnabler{tasks: tasks, push: push, programmed: make(map[farRef]programmedFAR)}
 	e.pending = sync.NewCond(&e.mu)
 	e.settled = sync.NewCond(&e.mu)
 	e.worker.Add(1)
@@ -284,6 +305,10 @@ func (e *ccEnabler) criteriaOf(tasks []types.InterceptTask) []criterion {
 // datapath; FARs in it are changed alongside the session's own copies, because the
 // datapath acts on what it is pushed and PacketForwardingRules holds values rather
 // than pointers.
+//
+// It deliberately does not record what it derived. The caller does that, through
+// sessionProgrammed, once the session is in the store — see there for why the
+// ordering is the whole of this file's coherence.
 func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules) {
 	if e == nil || s == nil {
 		return
@@ -309,15 +334,58 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 			updated.fars[i].liDuplicate = want[updated.fars[i].farID]
 		}
 	}
+}
 
-	// The caller pushes these rules itself, so record them as programmed: otherwise
-	// the next re-derivation would find a difference that does not exist and rewrite
-	// rules the datapath already has.
+// sessionProgrammed records what the datapath was told about a session's FARs, and
+// asks for a re-derivation where what it was told is something the element must be
+// able to withdraw.
+//
+// **It must be called after the session is in the store, and that ordering is the
+// whole point.** Recording inside applyTasking — before the push and before the
+// store — leaves an interval in which the record says a session's traffic is being
+// duplicated and GetAllSessions does not yet return it. A re-derivation beginning
+// in that interval reads one structure and writes the other, and no stamp can save
+// it: the write it would have to be newer than has already happened. Recording once
+// the session is visible is what makes "written after this pass began looking" imply
+// "this pass cannot have seen the session", which is what transact's carry-over
+// relies on.
+//
+// The same ordering is why transact no longer sees a value the session path wrote
+// mid-flight. It used to, and the consequence was the sharper half of the defect
+// this closes: the pass compared its own stale conclusion against the newer record,
+// found a difference, and pushed the FAR *off* — ending an interception the tasking
+// still required, with nothing logged and the triggering function still believing it
+// was running.
+//
+// The re-derivation is asked for here rather than by the pass that lost the race,
+// because here is the only place ordered after PutSession. It is gated so that an
+// element holding no tasking never asks for one: every FAR reads false, nothing
+// changed, and the walk of every session that a request implies does not happen.
+func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
+	if e == nil || s == nil {
+		return
+	}
+
 	e.mu.Lock()
+	e.writes++
+	stamp := e.writes
+	// Duplicating, because a copy running under tasking that may since have been
+	// withdrawn is the thing that must be re-derived. Changed, because a
+	// modification that took a session *out* of scope has to survive a pass holding
+	// the older view just as much.
+	notable := false
 	for i := range s.fars {
-		e.programmed[farRef{seid: s.localSEID, farID: s.fars[i].farID}] = s.fars[i].liDuplicate
+		ref := farRef{seid: s.localSEID, farID: s.fars[i].farID}
+		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate {
+			notable = true
+		}
+		e.programmed[ref] = programmedFAR{duplicating: s.fars[i].liDuplicate, written: stamp}
 	}
 	e.mu.Unlock()
+
+	if notable {
+		e.request()
+	}
 }
 
 // retask asks for duplication to be re-derived for every session this element
@@ -368,6 +436,10 @@ func (e *ccEnabler) retaskAndWait() {
 func (e *ccEnabler) transact() {
 	e.mu.Lock()
 	sources := append([]SessionsStore(nil), e.sources...)
+	// Taken before any session is read, so an entry written later belongs to a
+	// session this pass cannot have seen — sessionProgrammed writes only once the
+	// session is in the store.
+	mark := e.writes
 	e.mu.Unlock()
 
 	// Parsed once: the criteria are the same for every session, and re-parsing them
@@ -376,7 +448,7 @@ func (e *ccEnabler) transact() {
 
 	// Rebuilt rather than amended, so FARs of sessions that have gone away drop out
 	// instead of accumulating.
-	fresh := make(map[farRef]bool)
+	fresh := make(map[farRef]programmedFAR)
 
 	for _, src := range sources {
 		for _, sess := range src.GetAllSessions() {
@@ -392,8 +464,17 @@ func (e *ccEnabler) transact() {
 			e.mu.Lock()
 			for i := range sess.fars {
 				ref := farRef{seid: sess.localSEID, farID: sess.fars[i].farID}
-				fresh[ref] = want[ref.farID]
-				if e.programmed[ref] == want[ref.farID] {
+				if cur, held := e.programmed[ref]; held && cur.written > mark {
+					// The session path re-derived this FAR from rules this pass did not
+					// read, and programmed the datapath accordingly. Leave both alone: the
+					// FAR body held here is the pre-modification one, so pushing it would
+					// restate the SMF's own forwarding from a copy that has been replaced.
+					// The carry-over at the end keeps the record; the request
+					// sessionProgrammed made brings a pass that has read the new rules.
+					continue
+				}
+				fresh[ref] = programmedFAR{duplicating: want[ref.farID], written: mark}
+				if e.programmed[ref].duplicating == want[ref.farID] {
 					continue
 				}
 				f := sess.fars[i]
@@ -411,6 +492,16 @@ func (e *ccEnabler) transact() {
 	}
 
 	e.mu.Lock()
+	// An entry written while this pass ran wins over its conclusion, whether or not
+	// it reached one: a session established mid-pass is invisible to it, and a
+	// session modified mid-pass was read in a state that has been replaced. Entries
+	// older than the mark and absent from fresh belong to sessions that have gone
+	// away and drop, which is what rebuilding the map was for.
+	for ref, cur := range e.programmed {
+		if cur.written > mark {
+			fresh[ref] = cur
+		}
+	}
 	e.programmed = fresh
 	e.mu.Unlock()
 }
