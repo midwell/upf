@@ -497,7 +497,9 @@ func keepaliveConfig(cfg LiConfig) x2x3.KeepaliveConfig {
 	}
 	// Errors are ignored because config validation has already refused anything that
 	// does not parse; a value reaching here parses.
+	//nolint:errcheck // validateConf refuses an unparseable timer before anything starts
 	ka.TimeP1, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP1)
+	//nolint:errcheck // as above
 	ka.TimeP2, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP2)
 
 	return ka
