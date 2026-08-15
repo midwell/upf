@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -646,4 +647,149 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 		t.Fatalf("X1 port still bound after a rejected trigger_keepalive: %v", err)
 	}
 	_ = ln.Close()
+}
+
+// TestOrdinaryWithdrawalIsNotReportedAsAPurge: this element used to report every
+// removal of tasking as a fail-safe purge — "the triggering function went quiet" —
+// including the withdrawals the triggering function itself ordered. One captured
+// run contains 179 of them. The channel that says a controlling function has
+// stopped answering is the channel the durability of withdrawal depends on, and an
+// operator who sees it on every normal deactivation learns to ignore it.
+func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	rec := &recordingReporter{}
+	// No fail-safe window: nothing here is meant to lapse, so anything reported as a
+	// purge would be this element mislabelling a withdrawal it was asked for.
+	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	if err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+
+	const seid, xid = 4242, types.XID("11111111-1111-4111-8111-111111111111")
+	const did = "33333333-3333-4333-8333-333333333333"
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+	if err := req.ActivateTask(x1.Trigger{
+		XID:           xid,
+		ProductID:     "22222222-2222-4222-8222-222222222222",
+		CorrelationID: 7,
+		SEID:          seid,
+		DIDs:          []string{did},
+	}); err != nil {
+		t.Fatalf("ActivateTask: %v", err)
+	}
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+		t.Fatal("trigger was not installed")
+	}
+
+	if err := req.DeactivateTask(xid); err != nil {
+		t.Fatalf("DeactivateTask: %v", err)
+	}
+
+	// The withdrawal itself must still have happened — the acknowledgement above is
+	// what says so, and this is what it says about.
+	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+		t.Error("the task survived its own deactivation")
+	}
+	for _, issue := range rec.reported() {
+		if issue == x1.NEIssueTaskingPurged {
+			t.Errorf("an explicit DeactivateTask was reported as a fail-safe purge; reported %v",
+				rec.reported())
+		}
+	}
+}
+
+// TestNumberingIsReleasedOnEveryKindOfRemoval: the sequence-numbering state belongs
+// to the tasking that created it, not to the circumstances of its removal. This
+// element holds one context per intercepted session, so a warrant that outlives
+// many sessions would otherwise leave one behind for each — and it is dropped on an
+// ordinary withdrawal and a bulk deactivation alike, even though only the fail-safe
+// purge is reported.
+func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+
+	type tasking struct{ trigger, warrant types.XID }
+	withdrawn := tasking{"11111111-1111-4111-8111-111111111111", "aaaaaaaa-1111-4111-8111-111111111111"}
+	bulked := tasking{"22222222-2222-4222-8222-222222222222", "bbbbbbbb-2222-4222-8222-222222222222"}
+
+	for i, task := range []tasking{withdrawn, bulked} {
+		if err := req.ActivateTask(x1.Trigger{
+			XID:           task.trigger,
+			ProductID:     task.warrant,
+			CorrelationID: uint64(i + 1),
+			SEID:          uint64(4242 + i),
+			DIDs:          []string{did},
+		}); err != nil {
+			t.Fatalf("ActivateTask: %v", err)
+		}
+		// Number one PDU under each, as the shipper does when it delivers content:
+		// that is what creates the state this test is about.
+		ids.Attributes(task.warrant.Bytes(), [x2x3.CorrelationIDLength]byte{byte(i + 1)}, time.Now(), nil, nil)
+	}
+	if n := ids.Contexts(); n != 2 {
+		t.Fatalf("numbering contexts = %d, want 2 — the state this test tracks was never created", n)
+	}
+
+	if err := req.DeactivateTask(withdrawn.trigger); err != nil {
+		t.Fatalf("DeactivateTask: %v", err)
+	}
+	if n := ids.Contexts(); n != 1 {
+		t.Errorf("numbering contexts = %d after an ordinary withdrawal, want 1 (the other task's)", n)
+	}
+
+	if body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", "smf-1", "upf-1")); strings.Contains(body, "errorCode") {
+		t.Fatalf("bulk deactivation refused: %s", body)
+	}
+	if n := ids.Contexts(); n != 0 {
+		t.Errorf("numbering contexts = %d after a bulk deactivation, want 0 — numbering "+
+			"outlived the tasking it belongs to", n)
+	}
 }

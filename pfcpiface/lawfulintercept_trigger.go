@@ -81,32 +81,53 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// for its status. A triggered CC-POI is the one element whose product loss is
 		// invisible everywhere else: a dropped copy produces no record for anybody to miss.
 		x1.WithFaultProbes(probes...),
-		x1.OnDeactivate(func(task types.InterceptTask) {
-			// Whatever duplication this task required and no remaining task does is
-			// withdrawn, before the report: interception stopping is the outcome being
-			// reported, so it must actually have stopped. The re-derivation runs on the
-			// enabler's worker, so this waits for the one it asked for — asking is not
-			// stopping, and reporting on the strength of having asked would make the
-			// report a lie in exactly the window it matters.
+		// One hook for the whole lifecycle: an activation, a modification and a
+		// removal all change what this datapath must duplicate, and all of them are
+		// answered the same way — by re-deriving duplication from the tasking that
+		// remains. The triggering function may also change a task's products or its
+		// criteria without touching its targets, which the previous pair of hooks
+		// could not express and so did not report at all.
+		x1.OnTaskChange(func(prev, next *types.InterceptTask) {
+			// Whatever duplication the tasking requires now, and only that.
+			if next != nil {
+				enabler.retask()
+
+				// A modification keeps the XID, and the numbering state is keyed by it.
+				// Releasing it here would discard contexts this task's own records have
+				// already used.
+				return
+			}
+			// A removal runs before the purge report below, and interception stopping
+			// is the outcome being reported — so it must actually have stopped.
+			// Re-derivation happens on the enabler's worker now, so asking is not
+			// stopping: this waits for the pass it asked for, or the report would be a
+			// lie in exactly the window it matters.
 			enabler.retaskAndWait()
 			// The numbering state goes with the tasking. This element holds one sequence
 			// context per intercepted session, so a warrant that outlives many sessions
-			// would otherwise leave one entry behind for each of them.
-			ids.Forget(task.DeliveryXID().Bytes())
-			if reporter != nil {
-				reporter.Notify(x1.NEIssueTaskingPurged,
-					"content interception tasking removed; the triggering function went quiet")
+			// would otherwise leave one entry behind for each of them. Done on every
+			// removal — an ordinary withdrawal, a bulk deactivation, a fail-safe purge —
+			// because the state belongs to the tasking and not to the circumstances of
+			// its removal.
+			ids.Forget(prev.DeliveryXID().Bytes())
+		}),
+		// A purge is reported only when nobody asked for it. An explicit
+		// DeactivateTask, a retarget and a bulk deactivation are all expected ends of
+		// an interception; reporting them as fail-safe purges — which this element did,
+		// 179 times in one captured run — trains an operator to ignore the one channel
+		// that says the triggering function has stopped answering.
+		x1.OnPurge(func(_ types.InterceptTask, reason x1.PurgeReason) {
+			if reason != x1.PurgeKeepaliveLapse || reporter == nil {
+				return
 			}
+			reporter.Notify(x1.NEIssueTaskingPurged,
+				"content interception tasking removed; the triggering function went quiet")
 		}),
 		// A task is refused unless every detection criterion is one this datapath can
 		// resolve. Acknowledging one it cannot leaves the triggering function believing
 		// an interception is running that can never produce anything — and nothing
 		// outside this element could discover that.
 		x1.CanApply(enabler.canApply),
-		// The traffic a criterion identifies may be traffic the SMF never marked, so
-		// accepting the task is not enough: duplication has to be enabled for it here.
-		// Modifications reach this too, since x1 treats a retarget as an activation.
-		x1.OnActivate(func(types.InterceptTask) { enabler.retask() }),
 		// Someone in the LI trust domain trying to trigger this CC-POI as a triggering
 		// function it is not would be aiming a subject's traffic at a destination of
 		// their choosing. It is refused, but this element logs nothing by design, so
