@@ -638,6 +638,45 @@ func TestEnablerStopEndsTheWorker(t *testing.T) {
 	}
 }
 
+// TestStopLetsATransactionInFlightFinish covers the half of shutdown that matters:
+// a pass already programming the datapath is allowed to complete, rather than being
+// abandoned half-applied — and shutdown does not hang waiting for it.
+//
+// Asserted because stop waits on the worker, so a transaction that could not finish
+// would wedge the shutdown, and the idle-worker case says nothing about that.
+func TestStopLetsATransactionInFlightFinish(t *testing.T) {
+	held := &heldSource{
+		SessionsStore: NewInMemoryStore(),
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) {})
+	e.addSource(held)
+
+	e.retask()
+	<-held.entered // a pass is now inside the transaction
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		e.stop()
+	}()
+
+	// Nothing else can release it, so if stop returned before this the pass was
+	// abandoned rather than completed.
+	held.release <- struct{}{}
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown never returned; a transaction in flight wedged it")
+	}
+
+	if got := e.transactions(); got != 1 {
+		t.Errorf("performed %d transactions, want the one in flight to have completed", got)
+	}
+}
+
 // TestLookupFindsTaskByNonSessionCriterion is the step without which the rest of
 // this is useless. The datapath tags every copy with the session it came from, so
 // a task keyed by anything else — an address, a tunnel, a network instance — has to

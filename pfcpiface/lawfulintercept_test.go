@@ -594,15 +594,29 @@ func TestAWithdrawnTriggersDestinationStopsCounting(t *testing.T) {
 
 // capturingSender records what was delivered to one destination, so a fan-out can be
 // asserted per destination rather than in aggregate.
+//
+// It keeps the wire form as well as the pointer. A shared PDU means every destination
+// holds the same pointer, so comparing pointers says nothing about whether one sender
+// altered the value before the next saw it — and the alteration to fear is specific:
+// a sender stamping its own per-connection sequence number, which is exactly what
+// TS 103 221-2 clause 5.3.9 says the number must not be. Marshalling at the moment of
+// delivery captures what that destination's mediation function would receive.
 type capturingSender struct {
-	mu   sync.Mutex
-	pdus []*x2x3.PDU
+	mu    sync.Mutex
+	pdus  []*x2x3.PDU
+	bytes [][]byte
 }
 
 func (c *capturingSender) Send(pdu *x2x3.PDU) error {
+	b, err := pdu.Marshal()
+	if err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pdus = append(c.pdus, pdu)
+	c.bytes = append(c.bytes, b)
 
 	return nil
 }
@@ -614,6 +628,14 @@ func (c *capturingSender) delivered() []*x2x3.PDU {
 	defer c.mu.Unlock()
 
 	return append([]*x2x3.PDU(nil), c.pdus...)
+}
+
+// onTheWire is what each delivery would have put on its connection.
+func (c *capturingSender) onTheWire() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([][]byte(nil), c.bytes...)
 }
 
 // multiDestinationTrigger is an LI_T3 trigger naming several MDF3s, which the
@@ -674,11 +696,19 @@ func TestShipDeliversToEveryX3Destination(t *testing.T) {
 			len(atFirst), len(atSecond), copies)
 	}
 
+	wireFirst, wireSecond := a.onTheWire(), b.onTheWire()
+
 	for i := range atFirst {
 		// The same pointer at both, which is what "built once and shared" means: a
 		// loop calling shipperPDU per destination would hand out two values.
 		if atFirst[i] != atSecond[i] {
 			t.Errorf("copy %d was framed separately per destination; the framing must be shared", i)
+		}
+		// And byte-identical on both connections, which is the property sharing is
+		// *for*. A sender that altered the shared value — stamping its own sequence
+		// number, say — would leave the pointers equal and these bytes different.
+		if !bytes.Equal(wireFirst[i], wireSecond[i]) {
+			t.Errorf("copy %d reached the two destinations as different bytes; a sender mutated the shared PDU", i)
 		}
 		n := x3AttrsOf(atFirst[i])[x2x3.AttrSequenceNumber]
 		m := x3AttrsOf(atSecond[i])[x2x3.AttrSequenceNumber]
