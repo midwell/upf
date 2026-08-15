@@ -946,3 +946,72 @@ func TestShipperRefusesWithoutAnElementIdentifier(t *testing.T) {
 		t.Errorf("startLIShipper without a network element identifier returned %v, want errNoElementIdentifier", err)
 	}
 }
+
+// triggerToDID is triggerTo with the destination identifier the ADMF provisioned
+// the endpoint under, which is what a destination-scoped fault report names.
+func triggerToDID(xid, addr, did string) types.InterceptTask {
+	t := triggerTo(xid, addr)
+	t.Deliveries[0].DID = did
+
+	return t
+}
+
+// TestTheWatcherSeesWhatTheRetiredSitesReported is the check task 5.2 asks for, and
+// it is the most likely way this change makes something worse.
+//
+// Two sites used to report an unreachable MDF3 the moment they noticed — the
+// delivery-failure hook and the keepalive one. Both now nudge the watcher instead.
+// If the watcher's own view does not cover what they saw, a fault that used to be
+// reported is now reported by nobody, and retiring the sites as a batch is how that
+// happens without anyone noticing.
+func TestTheWatcherSeesWhatTheRetiredSitesReported(t *testing.T) {
+	s := &liShipper{senders: make(map[string]x2x3.Sender), tasks: store.New()}
+
+	const (
+		failingAddr = "10.0.60.122:42069"
+		healthyAddr = "10.0.60.123:42069"
+		failingDID  = "aaaaaaaa-3333-4333-8333-aaaaaaaaaaaa"
+		healthyDID  = "bbbbbbbb-4444-4444-8444-bbbbbbbbbbbb"
+	)
+
+	s.tasks.Activate(triggerToDID("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", failingAddr, failingDID))
+	s.tasks.Activate(triggerToDID("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", healthyAddr, healthyDID))
+	s.senders[failingAddr] = &stubSender{down: true}
+	s.senders[healthyAddr] = &stubSender{}
+
+	health := s.destinationHealth()
+	if len(health) != 2 {
+		t.Fatalf("the watcher sees %d destinations, want 2: %+v", len(health), health)
+	}
+
+	for _, h := range health {
+		switch h.DID {
+		case failingDID:
+			if !h.Unreachable {
+				t.Error("the watcher does not see the destination the retired sites reported; that fault is now reported by nobody")
+			}
+		case healthyDID:
+			if h.Unreachable {
+				t.Error("the watcher reports a working destination as unreachable")
+			}
+		default:
+			t.Errorf("the watcher named a destination nothing provisioned: %+v", h)
+		}
+	}
+}
+
+// TestAnUntriedDestinationIsNotReportedUnreachable keeps the watcher to the same
+// rule the probe follows: an element that has delivered nothing has not found a
+// mediation function unreachable, it has not looked. Without it, every element
+// would report every destination faulty from startup until its first delivery.
+func TestAnUntriedDestinationIsNotReportedUnreachable(t *testing.T) {
+	s := &liShipper{senders: make(map[string]x2x3.Sender), tasks: store.New()}
+	s.tasks.Activate(triggerToDID("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+		"10.0.60.122:42069", "aaaaaaaa-3333-4333-8333-aaaaaaaaaaaa"))
+
+	for _, h := range s.destinationHealth() {
+		if h.Unreachable {
+			t.Errorf("a destination nothing has been sent to is reported unreachable: %+v", h)
+		}
+	}
+}
