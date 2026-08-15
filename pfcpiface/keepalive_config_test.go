@@ -4,8 +4,16 @@
 package pfcpiface
 
 import (
+	"crypto/tls"
+	"encoding/binary"
+	"io"
+	"net"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/omec-project/li/mtls"
+	"github.com/omec-project/li/x2x3"
 )
 
 // TestX2X3KeepaliveConfigIsRefusedWhenUnusable. This network function validates its
@@ -78,4 +86,112 @@ func TestX2X3KeepaliveConfigCarriesTheOperatorsIntent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestX2X3KeepaliveReachesTheShippersClients closes the gap between "the settings were
+// parsed" and "the settings are what the connection runs".
+//
+// This POI is the one that does not use x2x3.Pool — it builds its clients in senderFor —
+// so nothing else covers the path from configuration to connection. Without this, senderFor
+// could be changed to pass a zero KeepaliveConfig and every other test would still pass
+// while the UPF silently stopped keepaliving X3.
+//
+// Asserted through the wire rather than through the struct: what matters is that keepalives
+// arrive at the mediation function at the configured period, not that a field was copied.
+func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	mdfCert, mdfKey := liLeaf(t, dir, caCert, caKey, "MDF", "mdf3-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+
+	mdfMat, err := mtls.Load(mdfCert, mdfKey, caPath)
+	if err != nil {
+		t.Fatalf("load mdf material: %v", err)
+	}
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	// A mediation function that does nothing but count what it is sent.
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", mdfMat.ServerTLS())
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	var (
+		mu         sync.Mutex
+		keepalives int
+	)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				for {
+					var head [12]byte
+					if _, err := io.ReadFull(c, head[:]); err != nil {
+						return
+					}
+					headerLen := binary.BigEndian.Uint32(head[4:8])
+					payloadLen := binary.BigEndian.Uint32(head[8:12])
+					rest := make([]byte, int(headerLen)+int(payloadLen)-len(head))
+					if _, err := io.ReadFull(c, rest); err != nil {
+						return
+					}
+					if binary.BigEndian.Uint16(head[2:4]) == uint16(x2x3.PDUTypeKeepalive) {
+						mu.Lock()
+						keepalives++
+						mu.Unlock()
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	// The shipper as senderFor needs it: credentials, the operator's keepalive settings,
+	// and somewhere to keep the clients it builds. TIME_P2 is long because this test is
+	// about the send, and this mediation function acknowledges nothing.
+	s := &liShipper{
+		tlsConfig: upfMat.ClientTLS(),
+		keepalive: keepaliveConfig(LiConfig{X2X3KeepaliveTimeP1: "25ms", X2X3KeepaliveTimeP2: "1h"}),
+		senders:   make(map[string]x2x3.Sender),
+	}
+
+	sender, err := s.senderFor(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("senderFor: %v", err)
+	}
+	defer sender.Close()
+
+	// A keepalive never dials, so an xCC is what opens the connection it runs on.
+	if err := sender.Send(&x2x3.PDU{
+		Type:          x2x3.PDUTypeX3,
+		PayloadFormat: x2x3.PayloadFormatIPv4,
+		Payload:       []byte{0x45, 0x00},
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := keepalives
+		mu.Unlock()
+
+		if n >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	n := keepalives
+	mu.Unlock()
+	t.Errorf("the mediation function received %d keepalives in 5s at TIME_P1=25ms; "+
+		"the shipper's clients are not running the configured mechanism", n)
 }
