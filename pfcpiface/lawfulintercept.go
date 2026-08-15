@@ -313,8 +313,10 @@ func (s *liShipper) unreachableDestinations() (unreachable, inUse int) {
 	return unreachable, inUse
 }
 
-// destinationsInUse is the X3 endpoint of every trigger this element holds. Nil tasks — a
-// shipper built directly in a test — name nothing.
+// destinationsInUse is every X3 endpoint of every trigger this element holds — all
+// of them, since delivery fans out to all of them and an unreachable second
+// destination is as much a fault as an unreachable first. Nil tasks — a shipper
+// built directly in a test — name nothing.
 func (s *liShipper) destinationsInUse() []string {
 	if s.tasks == nil {
 		return nil
@@ -322,9 +324,7 @@ func (s *liShipper) destinationsInUse() []string {
 
 	var addrs []string
 	for _, task := range s.tasks.Snapshot() {
-		if addr, ok := x3Destination(task); ok {
-			addrs = append(addrs, addr)
-		}
+		addrs = append(addrs, task.DeliveryAddresses(types.DeliveryX3)...)
 	}
 
 	return addrs
@@ -445,39 +445,49 @@ func (s *liShipper) ship(tagged []byte) {
 			"several interception tasks cover one session; content is delivered under one of them")
 	}
 
-	dest, ok := x3Destination(task)
-	if !ok {
+	// Every destination the task named for this product, and only those: a destination
+	// provisioned as X2Only is not one, since delivering content to a signalling
+	// endpoint would be a disclosure to the wrong place. DeliveryAddresses filters on
+	// the delivery type and deduplicates, so two DIDs naming one endpoint deliver once.
+	dests := task.DeliveryAddresses(types.DeliveryX3)
+	if len(dests) == 0 {
 		s.report(x1.NEIssueInvalidConfig, "interception task carries no X3 delivery destination")
 
 		return
 	}
 
-	sender, err := s.senderFor(dest)
-	if err != nil {
-		s.report(x1.NEIssueMDFUnreachable, "X3 delivery destination could not be prepared")
+	// Framed once, before the fan-out, and shared by every destination. Two things
+	// must not happen per destination. The sequence number is taken in here, and it
+	// belongs to the (XID, Correlation Identifier) context rather than to a
+	// connection (TS 103 221-2 clause 5.3.9) — numbering per destination would give
+	// each mediation function a stream whose gaps are indistinguishable from loss.
+	// And the framing is the per-packet cost this path is measured on, so a second
+	// destination must cost its own delivery and nothing else.
+	//
+	// Sharing the value is safe under AsyncSender.Send's contract: the caller must
+	// not mutate a PDU after Send, and nothing here does. Each client marshals it
+	// into its own write.
+	pdu := shipperPDU(tagged, task, s.ids)
 
-		return
-	}
+	for _, dest := range dests {
+		sender, err := s.senderFor(dest)
+		if err != nil {
+			// One mediation function this element cannot deliver to does not deny the
+			// others the warrant's product. The address is named because the triggering
+			// function provisioned several and otherwise cannot tell which one failed.
+			s.report(x1.NEIssueMDFUnreachable,
+				"X3 delivery destination could not be prepared: "+dest)
 
-	// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
-	// a slow/unreachable MDF3 cannot stall the socket read (which would make
-	// BESS drop subsequent copies). Delivery failures are reported from the
-	// worker via the onError hook set in senderFor.
-	//nolint:errcheck // async enqueue never blocks; delivery failures report via onError
-	_ = sender.Send(shipperPDU(tagged, task, s.ids))
-}
-
-// x3Destination returns the task's X3 delivery endpoint. A destination
-// provisioned as X2Only is not one: delivering content to a signalling endpoint
-// would be a disclosure to the wrong place.
-func x3Destination(task types.InterceptTask) (string, bool) {
-	for _, d := range task.Deliveries {
-		if d.Type == types.DeliveryX3 && d.Address != "" {
-			return d.Address, true
+			continue
 		}
-	}
 
-	return "", false
+		// Enqueue for asynchronous delivery and keep reading: Send never blocks, so
+		// a slow/unreachable MDF3 cannot stall the socket read (which would make
+		// BESS drop subsequent copies). Delivery failures are reported from the
+		// worker via the onError hook set in senderFor.
+		//nolint:errcheck // async enqueue never blocks; delivery failures report via onError
+		_ = sender.Send(pdu)
+	}
 }
 
 // senderFor returns the delivery client for an MDF3 address, creating it on first

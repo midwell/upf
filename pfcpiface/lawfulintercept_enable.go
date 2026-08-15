@@ -52,10 +52,130 @@ type ccEnabler struct {
 	// push writes changed rules to the datapath. Separate field so a test can
 	// observe what would be programmed without a datapath.
 	push func(all, updated PacketForwardingRules)
+
+	// The three counters that make a re-derivation atomic with respect to another,
+	// and let a caller find out when the one it asked for has happened. requested is
+	// bumped by every request; served is the request the running transaction is
+	// answering for; completed is the last one that finished. A request is coalesced
+	// rather than queued — a transaction is a full re-derivation from current
+	// tasking, so N pending requests and one imply the same work, and what must hold
+	// is that the state programmed is the state the last of them implies.
+	requested uint64
+	served    uint64
+	completed uint64
+	// passes counts the transactions actually performed, so "N requests are the same
+	// work as one" is assertable rather than asserted.
+	passes uint64
+	// closing stops the worker taking new work and releases anyone waiting on a
+	// generation that will now never arrive.
+	closing bool
+	// pending wakes the worker when a request arrives; settled wakes callers when a
+	// transaction finishes. Both guarded by mu.
+	pending *sync.Cond
+	settled *sync.Cond
+	worker  sync.WaitGroup
 }
 
 func newCCEnabler(tasks *store.Store, push func(all, updated PacketForwardingRules)) *ccEnabler {
-	return &ccEnabler{tasks: tasks, push: push, programmed: make(map[farRef]bool)}
+	e := &ccEnabler{tasks: tasks, push: push, programmed: make(map[farRef]bool)}
+	e.pending = sync.NewCond(&e.mu)
+	e.settled = sync.NewCond(&e.mu)
+	e.worker.Add(1)
+	go e.run()
+
+	return e
+}
+
+// run performs re-derivations, one at a time and never concurrently with another.
+//
+// A single worker is what makes the transaction atomic with respect to itself.
+// Provisioning requests arrive concurrently, and when only the individual reads and
+// writes were protected the pass that began earlier could program and publish last
+// — clearing duplication for a task that is still active, with nothing re-deriving
+// until some unrelated event happened to trigger another pass. That loss is silent
+// by nature: a dropped copy produces no record for any downstream function to miss,
+// so it could persist for the life of the warrant.
+//
+// The alternative was a mutex around the transaction, which is simpler and wrong
+// here: the transaction walks every session of every source, so an X1 request's
+// latency would become a function of session count on the element holding the most
+// sessions.
+func (e *ccEnabler) run() {
+	defer e.worker.Done()
+
+	for {
+		e.mu.Lock()
+		for e.requested == e.served && !e.closing {
+			e.pending.Wait()
+		}
+		if e.closing {
+			e.mu.Unlock()
+
+			return
+		}
+		// Taken before the transaction reads the tasking, so completed can only
+		// understate which requests this pass answered for. A caller waiting on a
+		// later generation then waits for the next pass, which is the safe direction:
+		// the unsafe one is reporting that tasking has been programmed when it has not.
+		gen := e.requested
+		e.served = gen
+		e.mu.Unlock()
+
+		e.transact()
+
+		e.mu.Lock()
+		e.completed = gen
+		e.passes++
+		e.mu.Unlock()
+		e.settled.Broadcast()
+	}
+}
+
+// transactions is how many re-derivations have been performed.
+func (e *ccEnabler) transactions() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.passes
+}
+
+// stop ends the worker. A transaction already in flight finishes — leaving the
+// datapath half-programmed would be worse than waiting for one bounded pass — and
+// nothing new starts. Callers waiting on a generation are released rather than left
+// blocked on one that will never arrive. Safe to call more than once.
+func (e *ccEnabler) stop() {
+	if e == nil {
+		return
+	}
+
+	e.mu.Lock()
+	e.closing = true
+	e.mu.Unlock()
+	e.pending.Broadcast()
+	e.settled.Broadcast()
+
+	e.worker.Wait()
+}
+
+// request registers a re-derivation and returns the generation it was given.
+func (e *ccEnabler) request() uint64 {
+	e.mu.Lock()
+	e.requested++
+	gen := e.requested
+	e.mu.Unlock()
+	e.pending.Signal()
+
+	return gen
+}
+
+// await blocks until a transaction that answers for gen has finished.
+func (e *ccEnabler) await(gen uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for e.completed < gen && !e.closing {
+		e.settled.Wait()
+	}
 }
 
 // addSource registers an association's session store, so tasking already held
@@ -89,7 +209,8 @@ func (e *ccEnabler) removeSource(s SessionsStore) {
 }
 
 // canApply reports whether this CC-POI can carry out a task, and is what refuses
-// one it cannot. It answers on the criteria alone: every one must be something the
+// one it cannot. It answers on two things: the task must require the product this
+// point of interception makes, and every detection criterion must be something the
 // agent can resolve against PFCP state.
 //
 // It deliberately does *not* require that the criteria select something now. A
@@ -101,6 +222,15 @@ func (e *ccEnabler) canApply(task types.InterceptTask) error {
 		// No datapath to resolve against, which happens only in a test that builds a
 		// shipper directly. Answering "yes" keeps that path as it was.
 		return nil
+	}
+	if !producesCC(task) {
+		// Accepting it would cost in both directions: the triggering function is told an
+		// interception is running that will deliver nothing, and the datapath duplicates
+		// a subject's traffic so that every copy can be discarded for want of an X3
+		// destination. Duplicating a subject's traffic is the act interception authority
+		// licenses, and doing it for a task that did not ask for content is doing it
+		// without that authority even though nothing leaves the element.
+		return fmt.Errorf("li: task does not require content of communication, which is the only product this point of interception produces")
 	}
 	if len(task.Targets) == 0 {
 		return fmt.Errorf("li: task carries no detection criteria")
@@ -114,12 +244,24 @@ func (e *ccEnabler) canApply(task types.InterceptTask) error {
 	return nil
 }
 
-// criteriaOf returns the parsed criteria of every active task, dropping any that
-// no longer parse. canApply refused those at tasking time, so a leftover can only
-// come from a task installed before this check existed.
+// producesCC reports whether a task asks for the product this point of interception
+// makes. Every place that reads tasking to decide what the datapath does asks this
+// first, so a task admitted before canApply checked it cannot still cause
+// duplication, and cannot take attribution of a copy away from a task that can
+// actually be delivered for.
+func producesCC(t types.InterceptTask) bool {
+	return t.WantsProduct(types.ProductCC)
+}
+
+// criteriaOf returns the parsed criteria of every active task that requires content,
+// dropping any that no longer parse. canApply refused both of those at tasking time,
+// so a leftover can only come from a task installed before those checks existed.
 func (e *ccEnabler) criteriaOf(tasks []types.InterceptTask) []criterion {
 	var out []criterion
 	for _, t := range tasks {
+		if !producesCC(t) {
+			continue
+		}
 		for _, id := range t.Targets {
 			if c, err := parseCriterion(id); err == nil {
 				out = append(out, c)
@@ -178,27 +320,52 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 	e.mu.Unlock()
 }
 
-// retask re-derives duplication for every session this element holds and programs
-// the difference into the datapath. It runs when the tasking changes — a task
-// activated, modified or withdrawn — which is when a session's rules are correct
-// but the answer about them is not.
+// retask asks for duplication to be re-derived for every session this element
+// holds, and returns as soon as the request is registered. It is called when the
+// tasking changes — a task activated, modified or withdrawn — which is when a
+// session's rules are correct but the answer about them is not.
 //
-// It does not write to the session store. It runs on the X1 goroutine while the
-// PFCP goroutine may be part-way through its own read-modify-write of the same
-// session, and writing back a session read before that started would discard the
-// SMF's update — corrupting a subscriber's own forwarding to serve an interception,
-// which is the one thing this must never do. The datapath's modify path takes only
-// the rules being changed, so a FAR can be reprogrammed without restating the
-// session.
-//
-// The store therefore does not learn about duplication enabled this way. It does
-// not need to: every path that rebuilds a FAR re-derives duplication from the
-// tasking as it goes.
+// The work happens on the enabler's worker, so this does not block an X1 request
+// behind a walk of every session. Where the caller's own report depends on the
+// datapath having actually been reprogrammed, use retaskAndWait: with the worker,
+// this returning no longer means the datapath is programmed.
 func (e *ccEnabler) retask() {
 	if e == nil {
 		return
 	}
 
+	e.request()
+}
+
+// retaskAndWait asks for the same re-derivation and waits for it to be programmed.
+//
+// It exists for the deactivation path, where the element reports that interception
+// has stopped: that report is the outcome being reported, so it must follow the
+// datapath having actually stopped duplicating rather than merely a request to.
+func (e *ccEnabler) retaskAndWait() {
+	if e == nil {
+		return
+	}
+
+	e.await(e.request())
+}
+
+// transact is the re-derivation itself: read the current tasking, derive the rules
+// it implies, program the difference, and record what was programmed. The worker
+// runs one at a time, which is what makes those four steps atomic with respect to
+// another pass.
+//
+// It does not write to the session store. It runs while the PFCP goroutine may be
+// part-way through its own read-modify-write of the same session, and writing back a
+// session read before that started would discard the SMF's update — corrupting a
+// subscriber's own forwarding to serve an interception, which is the one thing this
+// must never do. The datapath's modify path takes only the rules being changed, so a
+// FAR can be reprogrammed without restating the session.
+//
+// The store therefore does not learn about duplication enabled this way. It does
+// not need to: every path that rebuilds a FAR re-derives duplication from the
+// tasking as it goes.
+func (e *ccEnabler) transact() {
 	e.mu.Lock()
 	sources := append([]SessionsStore(nil), e.sources...)
 	e.mu.Unlock()
@@ -300,6 +467,14 @@ func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	// stream.
 	var out []coveredTask
 	for _, task := range e.tasks.Snapshot() {
+		// Same filter as criteriaOf, and for a sharper reason here: a task that cannot
+		// be delivered for must not take attribution of a copy away from one that can.
+		// Snapshot is XID-ordered and the caller takes the first, so a leftover
+		// non-CC task covering the same session would silently swallow the whole
+		// stream of the warrant that does have a destination.
+		if !producesCC(task) {
+			continue
+		}
 		for _, id := range task.Targets {
 			c, err := parseCriterion(id)
 			if err != nil {

@@ -447,6 +447,7 @@ func shipperOver(f *enablerFixture, rec *recordingReporter) *liShipper {
 		enabler:  f.e,
 		reporter: rec,
 		senders:  make(map[string]x2x3.Sender),
+		ids:      x2x3.NewIdentity("upf-1", upfInterceptionPoint),
 	}
 }
 
