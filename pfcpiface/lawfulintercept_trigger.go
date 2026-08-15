@@ -205,14 +205,19 @@ func triggerKeepalive(v string) (time.Duration, error) {
 // ID") and the value the datapath tags onto every duplicated packet, so it is
 // what ties a copy on the wire back to the warrant that authorised taking it.
 //
-// Delivering one copy per warrant is multi-agency work this does not attempt, so
-// when several warrants cover one session the first is chosen. What matters is
-// that "first" is the same on every packet: store.Match orders by XID precisely
-// so this choice is stable. Picking from a map's iteration order instead — as this
-// did — scattered one session's packets across the covering warrants at random,
-// leaving every agency with a partial stream and none with a usable one. The count
-// is returned so the caller can tell the ADMF that a warrant is being served
-// nothing, which is the part of this compromise that must not stay quiet.
+// Where several warrants cover one session the first is chosen. That is a declared
+// scope boundary rather than an unfinished piece of work, and it is declared in
+// `li/CONFORMANCE.md` and its X1 disposition — what is not implemented, what it
+// would cost, and what would make it worth revisiting are stated there and are
+// deliberately not restated here, so the two cannot drift apart.
+//
+// What belongs here is why the code looks like this: "first" must be the same on
+// every packet, and store.Match orders by XID precisely so this choice is stable.
+// Picking from a map's iteration order instead — as this did — scattered one
+// session's packets across the covering warrants at random, leaving every agency
+// with a partial stream and none with a usable one. The count is returned so the
+// caller can tell the ADMF that a warrant is being served nothing, which is the
+// part of this compromise that must not stay quiet.
 func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, copyFilter, int, bool) {
 	if tasks == nil || seid == 0 {
 		return types.InterceptTask{}, copyFilter{}, 0, false
