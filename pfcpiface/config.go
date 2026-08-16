@@ -246,9 +246,20 @@ func validateConf(conf Conf) error {
 		// An unparseable fail-safe window is rejected here rather than treated as
 		// "off": a deployment that asked for the fail-safe and silently did not get
 		// it keeps tasking that nothing will ever reclaim.
-		if _, err := triggerKeepalive(conf.Li.TriggerKeepalive); err != nil {
+		kaWindow, err := triggerKeepalive(conf.Li.TriggerKeepalive)
+		if err != nil {
 			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
 				"must be a positive Go duration (e.g. \"5m\") or empty to disable")
+		}
+		// And long enough to mean what it is for. A triggering function sends
+		// keepalives on a cadence it does not let an operator change, so a window
+		// shorter than a couple of those purges tasking that is live and being
+		// answered for — the fail-safe firing as a fault rather than as a backstop,
+		// and reporting the triggering function as the thing that went silent.
+		if tooShortTriggerKeepalive(kaWindow) {
+			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
+				"must be at least "+minTriggerKeepalive.String()+
+					", or tasking a healthy triggering function still holds will be purged")
 		}
 
 		// The X2/X3 keepalive timers are refused here rather than defaulted, which is
