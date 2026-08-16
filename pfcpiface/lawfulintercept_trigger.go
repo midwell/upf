@@ -186,6 +186,37 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 // leaves the fail-safe off and yields zero; anything unparseable or non-positive
 // is an error rather than a silent "off", since a deployment that asked for the
 // fail-safe and did not get it holds tasking nothing will ever reclaim.
+// ccTFKeepaliveCadence is how often a CC triggering function tells this element it
+// is still there. It is not configurable at the triggering function, so it is the
+// fixed quantity this element's fail-safe window has to be expressed against.
+const ccTFKeepaliveCadence = 60 * time.Second
+
+// minTriggerKeepalive is the shortest fail-safe window that can distinguish a
+// triggering function that has gone away from one that is merely between
+// keepalives. Two cadences plus a margin: at one cadence any jitter, retransmit or
+// scheduling delay reads as absence.
+//
+// Below it the fail-safe stops being a backstop and becomes a fault. It purges
+// live tasking that a healthy triggering function is still answering for, and the
+// element then reports taskingPurged — which names the triggering function as the
+// thing that went silent, sending an operator to investigate an element that was
+// behaving correctly, while interception the agency believes is running has in
+// fact stopped.
+const minTriggerKeepalive = 2*ccTFKeepaliveCadence + 30*time.Second
+
+// tooShortTriggerKeepalive reports whether a configured window is short enough to
+// purge tasking a healthy triggering function is still answering for.
+//
+// Separate from triggerKeepalive, and checked only where operator configuration is
+// validated, because the two answer different questions. triggerKeepalive asks
+// whether a window is usable at all, and the shipper is built directly with short
+// windows in tests that have to observe a purge without waiting minutes for one.
+// This asks whether a window an operator wrote is one the deployment can live
+// with, which is a question only configuration can be wrong about.
+func tooShortTriggerKeepalive(d time.Duration) bool {
+	return d > 0 && d < minTriggerKeepalive
+}
+
 func triggerKeepalive(v string) (time.Duration, error) {
 	if v == "" {
 		return 0, nil
@@ -195,7 +226,6 @@ func triggerKeepalive(v string) (time.Duration, error) {
 	if err != nil || d <= 0 {
 		return 0, fmt.Errorf("li: invalid trigger_keepalive %q", v)
 	}
-
 	return d, nil
 }
 
@@ -237,6 +267,15 @@ func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.I
 			Type:  types.TargetFSEID,
 			Value: strconv.FormatUint(seid, 10),
 		}) {
+			// The same filter tasksCovering applies, and it matters here for the reason
+			// stated there: the caller takes the first task, so a task that requires no
+			// content — and therefore has no X3 destination to deliver it to — would
+			// take attribution of the copy away from the warrant that does, and swallow
+			// the whole stream. Applying it on one path and not the other means the
+			// answer depends on whether a datapath happened to be attached.
+			if !producesCC(task) {
+				continue
+			}
 			matched = append(matched, coveredTask{task: task, filter: unfiltered()})
 		}
 	}

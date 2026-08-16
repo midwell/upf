@@ -920,3 +920,36 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 			"outlived the tasking it belongs to", n)
 	}
 }
+
+// TestTriggerKeepaliveHasAFloor: an unparseable window was already refused; a
+// parseable but far-too-short one was not, and it is the more damaging of the two
+// because the element starts and looks healthy.
+//
+// A triggering function's keepalive cadence is not configurable at the triggering
+// function, so a window shorter than a couple of them purges tasking that is live
+// and being answered for. The fail-safe then fires as a fault rather than as a
+// backstop, and the report it raises names the triggering function as the thing
+// that went silent — sending an operator to investigate an element that was
+// behaving correctly, while interception the agency believes is running has
+// stopped.
+func TestTriggerKeepaliveHasAFloor(t *testing.T) {
+	for _, tc := range []struct {
+		window string
+		reject bool
+	}{
+		{"", false},      // disabled is a choice an operator may state
+		{"5m", false},    // the documented example
+		{"2m30s", false}, // exactly the floor
+		{"1s", true},     // shorter than a single keepalive cadence
+		{"30s", true},
+		{"1m", true}, // one cadence: any jitter reads as absence
+	} {
+		d, err := triggerKeepalive(tc.window)
+		if err != nil {
+			t.Fatalf("triggerKeepalive(%q): %v", tc.window, err)
+		}
+		if got := tooShortTriggerKeepalive(d); got != tc.reject {
+			t.Errorf("tooShortTriggerKeepalive(%q) = %v, want %v", tc.window, got, tc.reject)
+		}
+	}
+}
