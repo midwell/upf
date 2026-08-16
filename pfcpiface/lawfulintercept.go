@@ -358,7 +358,12 @@ func (s *liShipper) destinationHealth() []x1.DestinationHealth {
 		return nil
 	}
 
-	return x1.DestinationHealthOf(s.tasks.Snapshot(), types.DeliveryX3, s.addressUnreachable)
+	// The UPF has no configured fallback for X3: a task carrying no X3 destination is
+	// refused at ship time rather than delivered somewhere this element chose. So what
+	// it delivers to is what the task names, and the resolver says exactly that.
+	return x1.DestinationHealthOf(s.tasks.Snapshot(), types.DeliveryX3,
+		func(t types.InterceptTask) []string { return t.DeliveryAddresses(types.DeliveryX3) },
+		s.addressUnreachable)
 }
 
 // addressUnreachable answers for one endpoint what unreachableDestinations counts
