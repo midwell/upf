@@ -58,6 +58,13 @@ const (
 
 type liShipper struct {
 	sockAddr string
+	// rcvBuf is the punt-socket receive buffer this element was configured with, kept
+	// so reconnect can re-apply it. A reconnected socket is a new socket and starts
+	// at the kernel default: the deepening survives the first dial and not the
+	// second, so an element that has reconnected once quietly runs with a fraction
+	// of the egress capacity it was deployed with, and the only symptom is copies
+	// dropped under burst.
+	rcvBuf   int
 	sock     net.Conn
 	reporter neIssueReporter // nil when NE-initiated reporting is not configured
 	// tasks holds the LI_T3 triggers installed by the CC-TF, indexed by the
@@ -192,6 +199,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	// nothing else in this process can see either.
 	s := &liShipper{
 		sockAddr:  cfg.X3SockAddr,
+		rcvBuf:    cfg.X3RcvBuf,
 		sock:      sock,
 		enabler:   enabler,
 		tlsConfig: mat.ClientTLS(),
@@ -212,6 +220,12 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids, s.faultProbes()...)
 	if err != nil {
 		_ = sock.Close()
+		// The enabler was started above and owns a worker goroutine. A partial
+		// initialisation that returns an error has to leave nothing running, or a
+		// process that retries the bind — or simply reports the failure and carries on
+		// serving, which is what this element does rather than crash-loop — accumulates
+		// a worker per attempt, each holding the session stores it was given.
+		enabler.stop()
 
 		return nil, err
 	}
@@ -662,6 +676,7 @@ func (s *liShipper) reconnect() {
 		var d net.Dialer
 		sock, err := d.DialContext(context.Background(), "unixpacket", s.sockAddr)
 		if err == nil {
+			setPuntReadBuffer(sock, s.rcvBuf)
 			s.sock = sock
 			s.egressDown.Store(false)
 
