@@ -388,6 +388,40 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
 	}
 }
 
+// sessionForgotten drops what this element recorded about a session's FARs,
+// because the session is gone and no re-derivation will ever mention it again.
+//
+// Without this the record only shrinks inside transact, which rebuilds it from
+// the live sessions — and transact only runs when something asks for it. Nothing
+// asks on the strength of an untasked session: sessionProgrammed requests a pass
+// only when a FAR is duplicating or has stopped duplicating, which for a session
+// no task covers is never. So an element with LI configured and its tasking
+// stable — one long-lived warrant, or a target provisioned and not yet active,
+// both ordinary — accumulates an entry per FAR per session for every subscriber
+// that has ever attached, and reclaims none of it. The element keeps intercepting
+// correctly the entire time, which is why nothing about it looks like a fault
+// until the process dies and takes every warrant it holds with it.
+//
+// Keyed off the session's own FARs rather than scanning the record for a matching
+// SEID: the same walk sessionProgrammed does to write them, so teardown costs
+// what establishment did and not a pass over every session the element holds.
+//
+// The entries are only a record of what the datapath was last told. Dropping them
+// for a session that no longer exists cannot lose an instruction, because there
+// is nothing left to instruct.
+func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
+	if e == nil || s == nil {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for i := range s.fars {
+		delete(e.programmed, farRef{seid: s.localSEID, farID: s.fars[i].farID})
+	}
+}
+
 // retask asks for duplication to be re-derived for every session this element
 // holds, and returns as soon as the request is registered. It is called when the
 // tasking changes — a task activated, modified or withdrawn — which is when a

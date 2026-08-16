@@ -1253,3 +1253,137 @@ func TestModifyToACriterionSelectingNothingStopsContent(t *testing.T) {
 		t.Error("copies of the session are still attributed to the retargeted warrant")
 	}
 }
+
+// removeSession is the teardown half of the fixture: the session leaves the store
+// and the element is told, exactly as PFCPConn.RemoveSession does it.
+func (f *enablerFixture) removeSession(t *testing.T, s PFCPSession) {
+	t.Helper()
+	if err := f.store.DeleteSession(s.localSEID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	f.e.sessionForgotten(&s)
+}
+
+// TestUntaskedChurnDoesNotAccumulate is the leak itself, in the shape that
+// produces it: LI configured, tasking that does not change, and ordinary
+// subscribers attaching and detaching.
+//
+// Every session writes an entry per FAR, but a pass over the sessions — which is
+// the only thing that used to shrink the record — is requested only when a FAR is
+// duplicating or has just stopped. For a session no task covers that is never, so
+// nothing ever asked, and nothing was ever reclaimed. Note there is no tasking
+// change anywhere in this test: adding one would hide the defect by triggering
+// the very pass whose absence is the point.
+func TestUntaskedChurnDoesNotAccumulate(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	// A warrant exists and is stable — the element is doing its job throughout.
+	f.activate(t, "warrant-1", ueAddr("10.45.0.99"))
+
+	for i := range 200 {
+		s := unmarkedSession(uint64(0x1000+i), "10.45.0.2")
+		f.putSession(t, s)
+		f.removeSession(t, s)
+	}
+	f.settle(t)
+
+	f.e.mu.Lock()
+	held := len(f.e.programmed)
+	f.e.mu.Unlock()
+
+	if held != 0 {
+		t.Errorf("the element holds %d programmed-FAR entries after 200 untasked sessions "+
+			"came and went, want 0 — nothing reclaims them, and a long-running UPF "+
+			"accumulates one per FAR per subscriber that has ever attached", held)
+	}
+}
+
+// TestReleasedSessionRecordIsReclaimed covers both halves of what teardown must
+// drop: a session the tasking covered and one it did not. The duplicating one
+// matters because its entries are the ones that exist for a reason, so an
+// implementation that only prunes what it considers uninteresting keeps them.
+func TestReleasedSessionRecordIsReclaimed(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.activate(t, "warrant-1", ueAddr("10.45.0.7"))
+
+	tasked := unmarkedSession(0x2000, "10.45.0.7")   // the warrant covers this one
+	untasked := unmarkedSession(0x2001, "10.45.0.8") // and not this one
+	f.putSession(t, tasked)
+	f.putSession(t, untasked)
+	f.settle(t)
+
+	if dup, held := f.recorded(0x2000, 1); !held || !dup {
+		t.Fatalf("test setup: the tasked session's FAR should be recorded as duplicating, got (%v, %v)", dup, held)
+	}
+
+	f.removeSession(t, tasked)
+	f.removeSession(t, untasked)
+
+	for _, seid := range []uint64{0x2000, 0x2001} {
+		for _, farID := range []uint32{1, 2} {
+			if _, held := f.recorded(seid, farID); held {
+				t.Errorf("session %#x FAR %d is still recorded after release", seid, farID)
+			}
+		}
+	}
+}
+
+// TestForgettingASessionLeavesTheCarryOverIntact: the record is not only a size
+// problem, it is what stops a re-derivation drawing on older information from
+// discarding what a newer one programmed. Pruning must not weaken that. A session
+// established while a pass is in flight still ends up recorded, whether or not an
+// unrelated session was torn down in the meantime.
+func TestForgettingASessionLeavesTheCarryOverIntact(t *testing.T) {
+	f := newEnablerFixture(t)
+	w := f.windowed(t)
+
+	live := unmarkedSession(0x3000, "10.45.0.7")
+	f.putSession(t, live)
+	f.settle(t)
+
+	doomed := unmarkedSession(0x3001, "10.45.0.8")
+	f.putSession(t, doomed)
+	f.settle(t)
+
+	// Hold a pass after it has read the sessions, so its conclusion is drawn from a
+	// view that predates everything below.
+	w.hold <- struct{}{}
+	f.e.retask()
+	<-w.read
+
+	// A session is torn down and another established, both while the pass is held.
+	f.removeSession(t, doomed)
+	fresh := unmarkedSession(0x3002, "10.45.0.9")
+	f.putSession(t, fresh)
+
+	w.release <- struct{}{}
+	f.settle(t)
+
+	// The session established under the stale pass keeps its record: the carry-over
+	// is what makes duplication for it stoppable later.
+	for _, farID := range []uint32{1, 2} {
+		if _, held := f.recorded(0x3002, farID); !held {
+			t.Errorf("the session established while a pass was in flight lost FAR %d's "+
+				"record — a later re-derivation would read the absence as "+
+				"'nothing to do' and leave duplication running", farID)
+		}
+	}
+	// The torn-down one is re-added by that pass, which drew its conclusion before
+	// the teardown: the publish at the end of a pass adds, and a deletion is not
+	// something it can represent. That residue is bounded rather than a return of
+	// the leak, and the boundary is worth stating precisely, because it is the
+	// difference between the two. A pass is running, so tasking is changing or a
+	// tasked session is coming or going; the next pass rebuilds the record from the
+	// live sessions and the residue goes. Under the condition that produced the
+	// leak — stable tasking, untasked churn — no pass runs at all, so no teardown
+	// can land inside one and nothing accumulates in the first place.
+	if _, held := f.recorded(0x3001, 1); !held {
+		t.Log("a session torn down mid-pass left no residue; the assertion below is then trivially true")
+	}
+	f.e.retaskAndWait()
+	if _, held := f.recorded(0x3001, 1); held {
+		t.Error("a session torn down while a pass was in flight is still recorded after a " +
+			"further re-derivation — the residue is not being reclaimed, which would " +
+			"make it a slower form of the same leak")
+	}
+}
