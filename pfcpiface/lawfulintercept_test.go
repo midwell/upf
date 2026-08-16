@@ -310,21 +310,35 @@ func TestCheckTagReportsUnusableTag(t *testing.T) {
 		name       string
 		tag        []byte
 		wantReport bool
+		// wantShip is the half that matters to an agency: a reported copy may still
+		// be deliverable, and one that is not must be dropped rather than labelled
+		// with a direction this element cannot read off the tag.
+		wantShip bool
 	}{
 		{
 			name:       "valid uplink tag is not reported",
 			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, farForwardUAndDuplicate},
 			wantReport: false,
+			wantShip:   true,
 		},
 		{
-			name:       "unknown action is reported",
+			name:       "unknown action is reported and dropped",
 			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, 16},
 			wantReport: true,
+			// The action byte selects the payload format and direction, so an
+			// unreadable one leaves no correct label. Delivering it anyway asserts a
+			// fact about the subject's traffic the element does not know, and arrives
+			// indistinguishable from a correct copy — worse than the gap a drop leaves,
+			// which the mediation function can at least see.
+			wantShip: false,
 		},
 		{
-			name:       "zero correlation is reported",
+			name:       "zero correlation is reported but still delivered",
 			tag:        []byte{0, 0, 0, 0, 0, 0, 0, 0, farForwardUAndDuplicate},
 			wantReport: true,
+			// The warrant identifier still attributes this copy, so an agency can hold
+			// it; only the join to that session's signalling is lost.
+			wantShip: true,
 		},
 	}
 
@@ -333,7 +347,9 @@ func TestCheckTagReportsUnusableTag(t *testing.T) {
 			fake := &fakeNEIssueReporter{}
 			s := &liShipper{reporter: fake}
 
-			s.checkTag(append(tt.tag, 0x45, 0x00))
+			if got := s.checkTag(append(tt.tag, 0x45, 0x00)); got != tt.wantShip {
+				t.Errorf("checkTag ship = %v, want %v", got, tt.wantShip)
+			}
 
 			if got := len(fake.issues) > 0; got != tt.wantReport {
 				t.Errorf("reported = %v (%v), want %v", got, fake.issues, tt.wantReport)
