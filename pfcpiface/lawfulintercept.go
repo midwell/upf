@@ -451,8 +451,9 @@ func (s *liShipper) shipLoop() {
 // frameLoop turns punted copies into X3 PDUs and hands them to delivery.
 func (s *liShipper) frameLoop() {
 	for b := range s.punted {
-		s.checkTag(b)
-		s.ship(b)
+		if s.checkTag(b) {
+			s.ship(b)
+		}
 		s.recycle(b)
 	}
 }
@@ -645,18 +646,33 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 // a printed note, and every copy then carries a zero correlation id or an unknown
 // action. Interception would be running but its product would not be correlatable
 // by the MDF, so surface it over X1 — never to general logs.
-func (s *liShipper) checkTag(tagged []byte) {
+// checkTag reports whether a punted copy's datapath tag can be trusted enough to
+// ship. A copy that cannot is dropped rather than delivered.
+//
+// The action byte selects the X3 payload format and direction, so an unknown value
+// leaves no correct label to apply: shipping it anyway sends the mediation function
+// content asserting a direction the element does not actually know, which is worse
+// than the copy going missing. A missing copy is a gap in a sequence the MDF can
+// see; a mislabelled one is a fact about a subject that is untrue and carries no
+// sign of it.
+//
+// A zero correlation is reported but not fatal to the copy: the XID still
+// attributes it to the right warrant, so the MDF can hold it even though it cannot
+// join it to the session's signalling.
+func (s *liShipper) checkTag(tagged []byte) bool {
 	switch tagged[fseidTagLen] {
 	case farForwardDAndDuplicate, farForwardUAndDuplicate:
 	default:
 		s.report(x1.NEIssueX3TagInvalid, "content tag carries an unknown forwarding action")
 
-		return
+		return false
 	}
 
 	if binary.LittleEndian.Uint64(tagged[:fseidTagLen]) == 0 {
 		s.report(x1.NEIssueX3TagInvalid, "content tag carries no session correlation")
 	}
+
+	return true
 }
 
 // reconnect closes the dead X3 egress socket and redials it with capped
