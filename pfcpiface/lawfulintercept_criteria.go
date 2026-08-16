@@ -424,74 +424,8 @@ func exactIf(ok bool) coverage {
 	return coverNone
 }
 
-// resolution is what resolving one criterion produced: the PDRs it selects, and
-// whether duplicating them collects exactly that traffic or more. Filtering is
-// needed only when it is not exact, so this is what lets the common case cost
-// nothing per packet.
-type resolution struct {
-	pdrs []pdrRef
-	// exact is true when every selected PDR corresponds exactly to the criterion
-	// *and* no FAR it forwards through is shared with a PDR the criterion does not
-	// select. Either kind of over-coverage means copies arrive that the criterion
-	// does not identify.
-	exact bool
-	// fars are the FARs to enable duplication on, deduplicated. A FAR is listed once
-	// however many selected PDRs reference it.
-	fars []farRef
-}
-
 // farRef identifies one FAR of one session.
 type farRef struct {
 	seid  uint64
 	farID uint32
-}
-
-// resolveOn resolves the criterion against the given sessions and reports what
-// duplicating the result would cover. A FAR shared with PDRs the criterion does
-// not select makes the coverage approximate even when every selected PDR matched
-// exactly — duplication is set per FAR, so the unselected PDRs' traffic is copied
-// too.
-func (c criterion) resolveOn(sessions []PFCPSession) resolution {
-	refs := c.resolve(sessions)
-	if len(refs) == 0 {
-		return resolution{exact: true}
-	}
-
-	selected := make(map[farRef]struct{}, len(refs))
-	res := resolution{pdrs: refs, exact: true}
-	for _, r := range refs {
-		if r.cover != coverExact {
-			res.exact = false
-		}
-		fr := farRef{seid: r.seid, farID: r.farID}
-		if _, seen := selected[fr]; !seen {
-			selected[fr] = struct{}{}
-			res.fars = append(res.fars, fr)
-		}
-	}
-
-	// A FAR is shared when some PDR referencing it was not selected. Only the
-	// sessions holding a selected FAR need looking at.
-	chosen := make(map[uint64]struct{}, len(res.fars))
-	for _, r := range refs {
-		chosen[r.seid] = struct{}{}
-	}
-	for i := range sessions {
-		if _, ok := chosen[sessions[i].localSEID]; !ok {
-			continue
-		}
-		for j := range sessions[i].pdrs {
-			p := sessions[i].pdrs[j]
-			if _, ok := selected[farRef{seid: p.fseID, farID: p.farID}]; !ok {
-				continue
-			}
-			if c.matchPDR(p) == coverNone {
-				res.exact = false
-
-				return res
-			}
-		}
-	}
-
-	return res
 }
