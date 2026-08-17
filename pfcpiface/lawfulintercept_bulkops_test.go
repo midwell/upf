@@ -259,7 +259,12 @@ func TestBulkSwitchesInTheJSONConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("the mandatory fields are still mandatory", func(t *testing.T) {
+	// The mandatory fields are still mandatory — but they are enforced where a refusal
+	// stops interception rather than the process. Loading the file must *succeed*: a
+	// validateConf error reaches Fatalln and would take the user plane down over an LI
+	// value, printing the field name into the general operator log. The refusal belongs
+	// to the shipper, which has a fault channel and whose failure stops only itself.
+	t.Run("the mandatory fields are still mandatory, and refused by the shipper", func(t *testing.T) {
 		path := t.TempDir() + "/conf.jsonc"
 		mustWriteStringToDisk(`{
 			"mode": "dpdk",
@@ -274,7 +279,12 @@ func TestBulkSwitchesInTheJSONConfig(t *testing.T) {
 			}
 		}`, path)
 
-		if _, err := LoadConfigFile(path); err == nil {
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("loading a config whose li block is incomplete failed with %v; "+
+				"an LI value must not be able to stop this network function", err)
+		}
+		if err := validateLiConfig(conf.Li); err == nil {
 			t.Error("an li block with no ne_id was accepted; the optional switches must not " +
 				"have made the rest of the block optional")
 		}

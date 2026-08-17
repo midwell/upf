@@ -4,7 +4,9 @@
 package pfcpiface
 
 import (
+	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +57,16 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 	t.Cleanup(f.e.stop)
 
 	return f
+}
+
+// coveredEntries is how many sessions the attribution memo holds. It exists so that
+// "this state is bounded by live sessions" is assertable, which is the only way a leak
+// of this kind is noticed before it matters.
+func (f *enablerFixture) coveredEntries() int {
+	f.e.coveredMu.Lock()
+	defer f.e.coveredMu.Unlock()
+
+	return len(f.e.covered)
 }
 
 // record applies to the fake datapath what a push would program.
@@ -1385,5 +1397,176 @@ func TestForgettingASessionLeavesTheCarryOverIntact(t *testing.T) {
 		t.Error("a session torn down while a pass was in flight is still recorded after a " +
 			"further re-derivation — the residue is not being reclaimed, which would " +
 			"make it a slower form of the same leak")
+	}
+}
+
+// ── The per-copy attribution answer, and what invalidates it ──
+//
+// tasksCovering used to recompute from scratch for every duplicated packet: a full
+// store snapshot with a deep clone of every task, then a parse of every criterion of
+// every task, then a resolve over every PDR, then filterFor parsing the same criteria
+// a second time. For a PDR criterion that is an IE parse and a throwaway address pool
+// per packet. It is memoised now, which is only safe if every event that can change
+// the answer invalidates it — so these test the invalidation rather than the cache.
+
+// TestAttributionFollowsATaskingChange: the memo must not answer from tasking that has
+// been withdrawn. A copy attributed to a warrant that no longer exists would be
+// delivered under it, which is content leaving the element without authority.
+func TestAttributionFollowsATaskingChange(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	const xid = types.XID("aaaaaaaa-0000-4000-8000-000000000001")
+	f.activate(t, xid, ueAddr("10.250.0.9"))
+
+	// Attributed once, which is what populates the memo.
+	if got := f.e.tasksCovering(100); len(got) != 1 {
+		t.Fatalf("tasksCovering = %d tasks after activation, want 1", len(got))
+	}
+
+	f.deactivate(t, xid)
+
+	if got := f.e.tasksCovering(100); len(got) != 0 {
+		t.Errorf("tasksCovering = %d tasks after the warrant was withdrawn; a copy would "+
+			"be delivered under a warrant that no longer authorises it", len(got))
+	}
+}
+
+// TestAttributionFollowsANewTask is the same rule in the other direction: a warrant
+// activated after a session's copies have already been attributed must cover it. The
+// failure here is silence rather than excess — an interception the agency believes is
+// running and which produces nothing.
+func TestAttributionFollowsANewTask(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	if got := f.e.tasksCovering(100); len(got) != 0 {
+		t.Fatalf("tasksCovering = %d tasks before any warrant, want 0", len(got))
+	}
+
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+
+	if got := f.e.tasksCovering(100); len(got) != 1 {
+		t.Errorf("tasksCovering = %d tasks after a warrant was activated; the interception "+
+			"was accepted and produces nothing", len(got))
+	}
+}
+
+// TestAttributionFollowsAChangeInTheSessionsOwnRules is the invalidation the epoch
+// cannot supply, because the tasking has not moved: the SMF modifies a session so that
+// a criterion which selected its traffic no longer does, or now does. That is one
+// session's answer and no other's, which is why it is a targeted drop rather than a
+// move of the epoch.
+func TestAttributionFollowsAChangeInTheSessionsOwnRules(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+
+	if got := f.e.tasksCovering(100); len(got) != 1 {
+		t.Fatalf("tasksCovering = %d tasks for the address the warrant names, want 1", len(got))
+	}
+
+	// The SMF re-addresses the session. The warrant is untouched; what changed is
+	// whether its criterion selects anything here.
+	moved := unmarkedSession(100, "10.250.0.77")
+	f.deriveModification(&moved)
+	f.commit(t, moved)
+
+	if got := f.e.tasksCovering(100); len(got) != 0 {
+		t.Errorf("tasksCovering = %d tasks after the session's address changed away from "+
+			"the one the warrant names; copies would be attributed from rules the session "+
+			"no longer has", len(got))
+	}
+}
+
+// TestAttributionIsDroppedWhenTheSessionGoes keeps the memo bounded by live sessions.
+// Local SEIDs are a 64-bit random draw, so a retained entry is never reused and never
+// reclaimed — the same shape as the programmed-FAR leak this file already closes, in a
+// second map.
+func TestAttributionIsDroppedWhenTheSessionGoes(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+
+	s := unmarkedSession(100, "10.250.0.9")
+	f.putSession(t, s)
+
+	if got := f.e.tasksCovering(100); len(got) != 1 {
+		t.Fatalf("tasksCovering = %d tasks, want 1", len(got))
+	}
+	if n := f.coveredEntries(); n != 1 {
+		t.Fatalf("the attribution memo holds %d entries, want 1", n)
+	}
+
+	f.removeSession(t, s)
+
+	if n := f.coveredEntries(); n != 0 {
+		t.Errorf("the attribution memo holds %d entries for a session that no longer "+
+			"exists; nothing will ever reclaim them", n)
+	}
+}
+
+// TestAttributionDoesNotMemoiseAVanishedSession is the case that would put back what
+// removal just dropped. A copy can arrive after its session has gone — the datapath
+// duplicated it before the delete — and the answer for it is "nothing to attribute
+// this to". Storing that answer would recreate the entry, and both of the events that
+// prune the map have already happened for that session.
+func TestAttributionDoesNotMemoiseAVanishedSession(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+
+	if got := f.e.tasksCovering(999); got != nil {
+		t.Fatalf("tasksCovering for a session this element does not hold = %v, want nil", got)
+	}
+	if n := f.coveredEntries(); n != 0 {
+		t.Errorf("the attribution memo holds %d entries for a session that does not exist", n)
+	}
+}
+
+// TestPerCopyAttributionDoesNotParseCriteria is the cost half.
+//
+// The claim the old comment made — "a map lookup and a handful of integer comparisons
+// … small beside the framing and delivery each copy costs anyway" — was the wrong way
+// round: framing is one allocation and a memcpy, delivery amortises across a 32-PDU
+// batch, and this walked and parsed the whole task set per packet. The property that
+// replaces the claim is checkable: repeated attribution of one session allocates
+// nothing that scales with the tasking.
+func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	// Several warrants, so anything walking the task set per copy shows up.
+	for i, xid := range []types.XID{
+		"aaaaaaaa-0000-4000-8000-000000000001",
+		"aaaaaaaa-0000-4000-8000-000000000002",
+		"aaaaaaaa-0000-4000-8000-000000000003",
+	} {
+		addr := "10.250.0.9"
+		if i > 0 {
+			addr = fmt.Sprintf("10.250.1.%d", i)
+		}
+		f.activate(t, xid, ueAddr(addr))
+	}
+
+	// Warm the memo, then measure only the steady state.
+	f.e.tasksCovering(100)
+
+	const copies = 2000
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	for range copies {
+		if got := f.e.tasksCovering(100); len(got) != 1 {
+			t.Fatalf("tasksCovering = %d tasks, want 1", len(got))
+		}
+	}
+
+	runtime.ReadMemStats(&after)
+
+	// A generous bound: what must not happen is an allocation per copy proportional to
+	// the task set, which for three warrants and 2000 copies is thousands of them.
+	if allocs := after.Mallocs - before.Mallocs; allocs > copies/10 {
+		t.Errorf("%d allocations for %d attributions of one session; the per-copy path is "+
+			"still doing work proportional to the tasking", allocs, copies)
 	}
 }

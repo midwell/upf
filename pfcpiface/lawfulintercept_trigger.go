@@ -55,9 +55,10 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	}
 
 	tasks := store.New()
-	if enabler != nil {
-		enabler.tasks = tasks
-	}
+	// setTasks rather than an assignment: it also parses what the store holds, so the
+	// shipping path is not left falling back to the one criterion a bare store lookup
+	// can answer until the first tasking change happens to rebuild it.
+	enabler.setTasks(tasks)
 	// RequireResolvableDIDs is what lets the triggering function find out that this
 	// POI has lost the destination it provisioned — after a restart, say. Accepting
 	// such a trigger would mean duplicating a subject's traffic and discarding every

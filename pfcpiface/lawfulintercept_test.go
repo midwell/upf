@@ -750,6 +750,14 @@ func (nullSender) Close() error         { return nil }
 // framing — which is what building the PDU once buys, and what a loop calling
 // shipperPDU per destination would have thrown away.
 func TestSecondDestinationCostsOnlyItsDelivery(t *testing.T) {
+	if raceEnabled {
+		// The detector allocates on its own account, and this assertion is a
+		// one-allocation margin: it measures instrumentation rather than framing once
+		// -race is on. Skipped rather than loosened, because a bound wide enough to
+		// survive the detector would no longer catch a second framing.
+		t.Skip("allocation counts include the race detector's own allocations")
+	}
+
 	const (
 		first  = "10.0.60.122:42069"
 		second = "10.0.60.123:42069"
@@ -1029,5 +1037,104 @@ func TestAnUntriedDestinationIsNotReportedUnreachable(t *testing.T) {
 		if h.Unreachable {
 			t.Errorf("a destination nothing has been sent to is reported unreachable: %+v", h)
 		}
+	}
+}
+
+// TestShipperStartsBeforeTheDatapathDoes is the initialisation race the two
+// containers make ordinary rather than exotic.
+//
+// `bess` and `pfcp-agent` are ordinary containers in one pod, started concurrently
+// with no readiness gate between them, so the datapath's egress socket may simply
+// not exist when the agent reaches it. That was a single dial: it failed, the
+// CC-POI was absent for the life of the process, and the only trace was a
+// deliberately vague line on the BESS log — because the dial happened *before* the
+// X1 reporter was built, so there was nowhere to report it to.
+//
+// What must hold instead: the shipping loop keeps trying, and everything that does
+// not depend on the datapath is up in the meantime — the element can be tasked and
+// can answer that its egress is down, which is a state a triggering function can
+// act on.
+func TestShipperStartsBeforeTheDatapathDoes(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "li-x3.sock")
+
+	// Confirm the platform has SEQPACKET at all before concluding anything from a
+	// failure to dial one.
+	probeLn, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Skipf("unixpacket sockets unavailable here: %v", err)
+	}
+	if err := probeLn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &liShipper{sockAddr: addr, senders: make(map[string]x2x3.Sender)}
+	s.egressDown.Store(true)
+	egress := s.faultProbes()[1]
+
+	// Nothing is listening yet, which is the whole point.
+	if fault := egress(); fault == nil {
+		t.Fatal("a shipper whose datapath has not arrived answers that nothing is wrong")
+	}
+
+	established := make(chan struct{})
+	go func() {
+		s.establish()
+		close(established)
+	}()
+
+	// Still down while it retries, rather than having given up.
+	select {
+	case <-established:
+		t.Fatal("the shipper established an egress nothing was listening on")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if fault := egress(); !strings.Contains(fault.ErrorDescription, x1.NEIssueX3EgressDown) {
+		t.Errorf("the fault does not name the condition: %q", fault.ErrorDescription)
+	}
+
+	// The datapath arrives.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Fatalf("listening on the egress socket: %v", err)
+	}
+	defer ln.Close()
+
+	select {
+	case <-established:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the shipper never established the egress after the datapath arrived")
+	}
+	if fault := egress(); fault != nil {
+		t.Errorf("the egress is up and the element still reports it down: %q", fault.ErrorDescription)
+	}
+}
+
+// TestEstablishDoesNotSleepBeforeItsFirstAttempt keeps the initial dial from paying
+// the backoff a *redial* is owed. reconnect sleeps first on purpose — a socket that
+// just failed should not be hammered — and establish, carved out of it, must not
+// inherit that for the case where the datapath is already up.
+func TestEstablishDoesNotSleepBeforeItsFirstAttempt(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "li-x3.sock")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Skipf("unixpacket sockets unavailable here: %v", err)
+	}
+	defer ln.Close()
+
+	s := &liShipper{sockAddr: addr, senders: make(map[string]x2x3.Sender)}
+	s.egressDown.Store(true)
+
+	start := time.Now()
+	s.establish()
+
+	if took := time.Since(start); took >= minReconnectDelay {
+		t.Errorf("establish took %s against a datapath that was already up; "+
+			"the first attempt slept before trying", took)
+	}
+	if s.egressDown.Load() {
+		t.Error("the egress is established and the element still reports it down")
+	}
+	if s.sock != nil {
+		_ = s.sock.Close()
 	}
 }
