@@ -223,64 +223,19 @@ func validateConf(conf Conf) error {
 		}
 	}
 
-	// Lawful Interception is opt-in, but if it IS configured every field is
-	// mandatory — an incomplete Li block would otherwise fail open (the UPF runs
-	// healthy while performing no interception), which for LI is a compliance risk.
-	if conf.Li != nil {
-		for name, val := range map[string]string{
-			"li.x3_sockaddr": conf.Li.X3SockAddr,
-			"li.cert":        conf.Li.Cert,
-			"li.key":         conf.Li.Key,
-			"li.ca_cert":     conf.Li.CACert,
-			// The triggering interface is not optional either: a CC-POI with no
-			// LI_T3 listener receives no warrant identity, so it can only produce
-			// content no mediation function is able to attribute.
-			"li.x1_listen": conf.Li.X1Listen,
-			"li.tf_id":     conf.Li.TFID,
-			"li.ne_id":     conf.Li.NEID,
-		} {
-			if val == "" {
-				return ErrInvalidArgumentWithReason(name, val, "required when li is configured")
-			}
-		}
-		// An unparseable fail-safe window is rejected here rather than treated as
-		// "off": a deployment that asked for the fail-safe and silently did not get
-		// it keeps tasking that nothing will ever reclaim.
-		kaWindow, err := triggerKeepalive(conf.Li.TriggerKeepalive)
-		if err != nil {
-			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
-				"must be a positive Go duration (e.g. \"5m\") or empty to disable")
-		}
-		// And long enough to mean what it is for. A triggering function sends
-		// keepalives on a cadence it does not let an operator change, so a window
-		// shorter than a couple of those purges tasking that is live and being
-		// answered for — the fail-safe firing as a fault rather than as a backstop,
-		// and reporting the triggering function as the thing that went silent.
-		if tooShortTriggerKeepalive(kaWindow) {
-			return ErrInvalidArgumentWithReason("li.trigger_keepalive", conf.Li.TriggerKeepalive,
-				"must be at least "+minTriggerKeepalive.String()+
-					", or tasking a healthy triggering function still holds will be purged")
-		}
-
-		// The X2/X3 keepalive timers are refused here rather than defaulted, which is
-		// this network function's idiom: an operator's stated policy reaches the
-		// element or the deployment fails. The relationship between the two — TIME_P2
-		// must exceed TIME_P1 — is checked by the library that owns the mechanism, so
-		// there is one definition of what a usable pair is.
-		for name, value := range map[string]string{
-			"li.x2x3_keepalive_time_p1": conf.Li.X2X3KeepaliveTimeP1,
-			"li.x2x3_keepalive_time_p2": conf.Li.X2X3KeepaliveTimeP2,
-		} {
-			if _, err := parseOptionalDuration(value); err != nil {
-				return ErrInvalidArgumentWithReason(name, value,
-					"must be a Go duration (e.g. \"60s\") or empty for the specification's default")
-			}
-		}
-		if err := keepaliveConfig(*conf.Li).Validate(); err != nil {
-			return ErrInvalidArgumentWithReason("li.x2x3_keepalive_time_p2", conf.Li.X2X3KeepaliveTimeP2, err.Error())
-		}
-	}
-
+	// The `li` block is deliberately NOT validated here.
+	//
+	// A validateConf error reaches logger.InitLog.Fatalln("error reading conf file:",
+	// err) in cmd/pfcpiface/main.go, and these errors are built by
+	// ErrInvalidArgumentWithReason — so a mistyped optional LI value printed
+	// `invalid argument 'li.trigger_keepalive'=30 (…)` into the general operator log
+	// and then took the **user plane** down. Two violations at once: an LI typo causing
+	// a network outage, and an LI-attributable line in a log far more widely readable
+	// than the config file it describes. bess.go's own handling of a startLIShipper
+	// failure is deliberately vague for exactly that reason, so this contradicted it.
+	//
+	// The checks live in startLIShipper instead, where the fault reporter exists and a
+	// refusal stops interception and nothing else.
 	return nil
 }
 

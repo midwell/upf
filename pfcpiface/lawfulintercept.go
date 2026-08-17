@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -154,14 +155,10 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		return nil, err
 	}
 
-	var d net.Dialer
-	sock, err := d.DialContext(context.Background(), "unixpacket", cfg.X3SockAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	setPuntReadBuffer(sock, cfg.X3RcvBuf)
-
+	// The reporter is built before anything that can fail needs it. It used to be
+	// built after the datapath socket was dialled, which meant the step most likely
+	// to fail — the one thing here that depends on another container having got
+	// there first — was the one step with nowhere to report its failure.
 	var reporter *x1.Reporter
 	if cfg.AdmfURL != "" {
 		reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
@@ -174,6 +171,19 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	var issueReporter neIssueReporter
 	if reporter != nil {
 		issueReporter = reporter
+	}
+
+	// The configuration is checked here, and not in validateConf, because a refusal
+	// there took the user plane down and named the offending LI field in the general
+	// operator log. Here it stops interception, tells the ADMF, and leaves the datapath
+	// forwarding — the same policy the AMF and SMF apply to their own LI block.
+	if err := validateLiConfig(cfg); err != nil {
+		if issueReporter != nil {
+			issueReporter.Notify(x1.NEIssueInvalidConfig,
+				"the content-interception configuration is unusable, so interception has not been started")
+		}
+
+		return nil, err
 	}
 
 	// Duplication control before the listener, because the listener refuses tasking
@@ -200,10 +210,9 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	s := &liShipper{
 		sockAddr:  cfg.X3SockAddr,
 		rcvBuf:    cfg.X3RcvBuf,
-		sock:      sock,
 		enabler:   enabler,
 		tlsConfig: mat.ClientTLS(),
-		keepalive: keepaliveConfig(*cfg),
+		keepalive: keepaliveConfig(*cfg, issueReporter),
 		senders:   make(map[string]x2x3.Sender),
 		punted:    make(chan []byte, liFrameQueueDepth),
 		free:      make(chan []byte, liFrameQueueDepth),
@@ -211,15 +220,22 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		// no xCC pays for constructing them, and this is a per-packet path.
 		ids: x2x3.NewIdentity(cfg.NEID, upfInterceptionPoint),
 	}
+	// The egress is down until the shipping loop has established it, which is the
+	// truth from this moment and the answer the x3EgressDown probe owes anyone who
+	// asks in between. sock stays nil until then; nothing but shipLoop reads it.
+	s.egressDown.Store(true)
 	// Only assign when configured: a typed-nil *x1.Reporter in the interface field
 	// would pass the nil check in report() and then panic on use.
 	if reporter != nil {
 		s.reporter = reporter
 	}
 
+	// Before the egress, deliberately. A CC-POI whose datapath has not arrived can
+	// still be tasked and can still be asked how it is — which is a reportable state
+	// a triggering function can act on. One that abandoned its own initialisation is
+	// in no state at all, and is indistinguishable from an element nobody tasked.
 	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids, s.faultProbes()...)
 	if err != nil {
-		_ = sock.Close()
 		// The enabler was started above and owns a worker goroutine. A partial
 		// initialisation that returns an error has to leave nothing running, or a
 		// process that retries the bind — or simply reports the failure and carries on
@@ -230,24 +246,36 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		return nil, err
 	}
 	s.tasks = tasks
-	for range liFrameWorkers {
-		go s.frameLoop()
-	}
 
-	go s.shipLoop()
-	// Loss between the datapath and this shipper is invisible from here — a copy
-	// discarded on the socket write never arrives — so it is watched from the only
-	// vantage point that can see it, the datapath's own accounting.
-	startLIPuntMonitor(client, issueReporter)
 	// One owner for both edges of a destination's reachability: that it failed, and
 	// that it recovered. The delivery and keepalive paths used to report the first
 	// and nothing reported the second, so an ADMF told a destination was unreachable
 	// was never told it came back. A nil stop channel runs for as long as this
 	// element can hold tasking, which is the right lifetime.
+	//
+	// Before the delivery workers start, so a fault seen by the first copy shipped
+	// has somewhere to go.
 	if reporter != nil {
 		s.watcher = x1.NewDestinationWatcher(s.destinationHealth, reporter, 0)
 		go s.watcher.Watch(nil)
 	}
+
+	for range liFrameWorkers {
+		go s.frameLoop()
+	}
+
+	// shipLoop establishes the egress itself, retrying until the datapath answers.
+	// It used to be dialled here, once, and a failure abandoned interception for the
+	// life of the process — with no X1 channel yet built to say so. The two
+	// containers start concurrently with no readiness gate between them, so "the
+	// socket is not there yet" is the ordinary case rather than the exotic one, and
+	// every other peer this element depends on is already retried without limit.
+	go s.shipLoop()
+
+	// Loss between the datapath and this shipper is invisible from here — a copy
+	// discarded on the socket write never arrives — so it is watched from the only
+	// vantage point that can see it, the datapath's own accounting.
+	startLIPuntMonitor(client, issueReporter)
 
 	return s, nil
 }
@@ -412,6 +440,12 @@ func (s *liShipper) report(issueType, description string) {
 // delivers the content labelled with that task's warrant XID and correlation
 // identifier.
 func (s *liShipper) shipLoop() {
+	// The datapath socket is established here rather than at construction, so that a
+	// datapath which is not up yet delays interception instead of cancelling it. This
+	// blocks until it answers; everything else this element does — being tasked,
+	// answering for its own state — is already running by now.
+	s.establish()
+
 	buf := make([]byte, liMaxPunted)
 
 	for {
@@ -566,20 +600,50 @@ func (s *liShipper) ship(tagged []byte) {
 // keepaliveConfig turns the operator's three settings into the clause 6.2.4
 // mechanism's configuration.
 //
-// It encodes no defaults: an unset timer is passed through as zero, which x2x3
-// resolves to the specification's own value. Nothing is validated here either —
-// config.go refuses an unusable pair before this point, which is this network
-// function's own idiom and the loudest outcome available in it.
-func keepaliveConfig(cfg LiConfig) x2x3.KeepaliveConfig {
+// It encodes no defaults of its own: an unset timer is passed through as zero, which
+// x2x3 resolves to the specification's own value — so there is one place where "60
+// seconds" is written down, beside the mechanism rather than in each of the three
+// network functions that run it.
+//
+// An unusable value is **reported and then discarded in favour of those defaults**,
+// which is what the AMF and SMF already do and what this element used to refuse over.
+// Refusing was the wrong instrument twice: the specification supplies these two
+// defaults normatively, so there is something correct to fall back to, and the refusal
+// reached Fatalln — stopping the user plane over a timer, and naming the LI field in
+// the general operator log while doing it.
+func keepaliveConfig(cfg LiConfig, reporter neIssueReporter) x2x3.KeepaliveConfig {
 	ka := x2x3.KeepaliveConfig{
 		Disabled: cfg.X2X3KeepaliveEnabled != nil && !*cfg.X2X3KeepaliveEnabled,
 	}
-	// Errors are ignored because config validation has already refused anything that
-	// does not parse; a value reaching here parses.
-	//nolint:errcheck // validateConf refuses an unparseable timer before anything starts
-	ka.TimeP1, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP1)
-	//nolint:errcheck // as above
-	ka.TimeP2, _ = parseOptionalDuration(cfg.X2X3KeepaliveTimeP2)
+
+	report := func(description string) {
+		if reporter != nil {
+			reporter.Notify(x1.NEIssueInvalidConfig, description)
+		}
+	}
+
+	for name, t := range map[string]struct {
+		value string
+		into  *time.Duration
+	}{
+		"x2x3_keepalive_time_p1": {cfg.X2X3KeepaliveTimeP1, &ka.TimeP1},
+		"x2x3_keepalive_time_p2": {cfg.X2X3KeepaliveTimeP2, &ka.TimeP2},
+	} {
+		d, err := parseOptionalDuration(t.value)
+		if err != nil {
+			report(name + " is not a duration; the specification's default is used instead")
+
+			continue
+		}
+		*t.into = d
+	}
+
+	if err := ka.Validate(); err != nil {
+		report("the configured X2/X3 keepalive timers are unusable and the specification's " +
+			"defaults are used instead: " + err.Error())
+
+		return x2x3.KeepaliveConfig{Disabled: ka.Disabled}
+	}
 
 	return ka
 }
@@ -683,12 +747,30 @@ func (s *liShipper) checkTag(tagged []byte) bool {
 // away says so, and the same element asked after it returns does not.
 func (s *liShipper) reconnect() {
 	s.egressDown.Store(true)
-	_ = s.sock.Close()
+	if s.sock != nil {
+		_ = s.sock.Close()
+	}
 
+	s.establish()
+}
+
+// establish dials the datapath egress and does not give up.
+//
+// Split out of reconnect so the *first* dial uses it too. It used to be a single
+// attempt made during initialisation, and a failure there disabled content
+// interception for the life of the process — while reconnect, three lines away,
+// already retried the identical dial without limit once it had succeeded once. The
+// two containers involved start concurrently with no readiness gate, so the first
+// attempt is the one most likely to fail.
+//
+// It tries before it sleeps, which is the difference from the loop it was carved
+// out of: a redial after a failure should back off first, but an initial dial
+// against a datapath that is already up should not pay 100ms for the privilege.
+//
+// Called only from the shipping loop, which is the sole reader and writer of sock.
+func (s *liShipper) establish() {
 	delay := minReconnectDelay
 	for {
-		time.Sleep(delay)
-
 		var d net.Dialer
 		sock, err := d.DialContext(context.Background(), "unixpacket", s.sockAddr)
 		if err == nil {
@@ -698,6 +780,8 @@ func (s *liShipper) reconnect() {
 
 			return
 		}
+
+		time.Sleep(delay)
 
 		if delay < maxReconnectDelay {
 			delay *= 2
@@ -815,4 +899,52 @@ func payloadFormatOf(pkt []byte) x2x3.PayloadFormat {
 	}
 
 	return x2x3.PayloadFormatIPv4
+}
+
+// validateLiConfig refuses a content-interception configuration this element cannot
+// carry out.
+//
+// It lives beside the shipper rather than in validateConf for the reason stated there:
+// a refusal at configuration-validation time is fatal to the whole process and names
+// the field that caused it, which for an LI field is both an outage and a disclosure.
+//
+// Every field it requires is required because its absence makes interception silently
+// impossible rather than degraded — a CC-POI with no triggering interface receives no
+// warrant identity and can only produce content no mediation function can attribute.
+func validateLiConfig(cfg *LiConfig) error {
+	for name, val := range map[string]string{
+		"li.x3_sockaddr": cfg.X3SockAddr,
+		"li.cert":        cfg.Cert,
+		"li.key":         cfg.Key,
+		"li.ca_cert":     cfg.CACert,
+		// The triggering interface is not optional either: a CC-POI with no LI_T3
+		// listener receives no warrant identity, so it can only produce content no
+		// mediation function is able to attribute.
+		"li.x1_listen": cfg.X1Listen,
+		"li.tf_id":     cfg.TFID,
+		"li.ne_id":     cfg.NEID,
+	} {
+		if val == "" {
+			return fmt.Errorf("li: %s is required when li is configured", name)
+		}
+	}
+
+	// An unparseable fail-safe window is rejected rather than treated as "off": a
+	// deployment that asked for the fail-safe and silently did not get it keeps tasking
+	// that nothing will ever reclaim.
+	window, err := triggerKeepalive(cfg.TriggerKeepalive)
+	if err != nil {
+		return fmt.Errorf("li: trigger_keepalive %q must be a positive Go duration (e.g. %q) or empty to disable",
+			cfg.TriggerKeepalive, "5m")
+	}
+	// And long enough to mean what it is for. A triggering function sends keepalives on
+	// a cadence it does not let an operator change, so a window shorter than a couple of
+	// those purges tasking that is live and being answered for — the fail-safe firing as
+	// a fault rather than as a backstop.
+	if tooShortTriggerKeepalive(window) {
+		return fmt.Errorf("li: trigger_keepalive %q must be at least %s, or tasking a healthy triggering function still holds will be purged",
+			cfg.TriggerKeepalive, minTriggerKeepalive)
+	}
+
+	return nil
 }

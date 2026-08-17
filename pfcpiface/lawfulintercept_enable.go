@@ -6,6 +6,7 @@ package pfcpiface
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
@@ -38,6 +39,30 @@ import (
 // modifications.
 type ccEnabler struct {
 	tasks *store.Store
+
+	// parsed is the live tasking with every task's detection criteria already parsed,
+	// as an immutable snapshot behind an atomic pointer.
+	//
+	// The shipping path reads it per duplicated copy, on four workers. Parsing there
+	// meant a strconv or a hex decode per criterion per copy — and for a PDR criterion
+	// an IE parse and a throwaway address pool per copy — on the one path in this
+	// element whose cost is per packet, in front of a socket queue that holds ten
+	// datagrams by default and whose overflow is intercept product. A snapshot swapped
+	// on tasking changes costs the hot path one atomic load.
+	parsed atomic.Pointer[[]parsedTask]
+
+	// epoch changes when the tasking changes, and stamps the memo below. A memo entry
+	// from an older epoch is recomputed rather than trusted, so the memo cannot answer
+	// from tasking that has been withdrawn — and a writer that forgot to bump this
+	// would invalidate nothing rather than invalidate one thing wrongly, which is the
+	// failure direction an index maintained incrementally does not have.
+	epoch atomic.Uint64
+
+	// coveredMu guards covered, which memoises the per-session attribution answer.
+	// Separate from mu because it is taken per copy and mu is held across walks of
+	// every session this element holds.
+	coveredMu sync.Mutex
+	covered   map[uint64]coveredEntry
 
 	mu sync.Mutex
 	// sources are the per-association session stores. A task's criteria are
@@ -89,6 +114,22 @@ type ccEnabler struct {
 	worker  sync.WaitGroup
 }
 
+// parsedTask is one content task with its criteria in the form the agent compares
+// against PFCP state. Parsed when the tasking changes rather than when a copy
+// arrives; a task whose criteria do not parse contributes none, which canApply
+// already refused at tasking time.
+type parsedTask struct {
+	task     types.InterceptTask
+	criteria []criterion
+}
+
+// coveredEntry is the attribution answer for one session, stamped with the tasking
+// epoch it was computed under.
+type coveredEntry struct {
+	epoch uint64
+	tasks []coveredTask
+}
+
 // programmedFAR is what this element last told the datapath about one FAR, and
 // when it said so.
 type programmedFAR struct {
@@ -98,7 +139,13 @@ type programmedFAR struct {
 }
 
 func newCCEnabler(tasks *store.Store, push func(all, updated PacketForwardingRules)) *ccEnabler {
-	e := &ccEnabler{tasks: tasks, push: push, programmed: make(map[farRef]programmedFAR)}
+	e := &ccEnabler{
+		tasks:      tasks,
+		push:       push,
+		programmed: make(map[farRef]programmedFAR),
+		covered:    make(map[uint64]coveredEntry),
+	}
+	e.reparse()
 	e.pending = sync.NewCond(&e.mu)
 	e.settled = sync.NewCond(&e.mu)
 	e.worker.Add(1)
@@ -293,6 +340,75 @@ func (e *ccEnabler) criteriaOf(tasks []types.InterceptTask) []criterion {
 	return out
 }
 
+// setTasks gives the enabler the task store and parses what it holds.
+//
+// Assigning the field alone would leave the parsed snapshot empty until the first
+// tasking change, and until then every copy would fall through to the store lookup
+// that only the session-identity criterion can answer — an interception narrower
+// than the one accepted, for as long as nothing happened to change the tasking.
+func (e *ccEnabler) setTasks(tasks *store.Store) {
+	if e == nil {
+		return
+	}
+
+	e.tasks = tasks
+	e.reparse()
+}
+
+// reparse rebuilds the parsed snapshot from the live tasking and moves the epoch on.
+//
+// The epoch moves *after* the snapshot is published, so a memo entry stamped with the
+// new epoch cannot have been computed from the old snapshot. The other order would
+// let a copy arriving in between be memoised under the new stamp from the old
+// tasking, and nothing would recompute it.
+func (e *ccEnabler) reparse() {
+	if e == nil || e.tasks == nil {
+		return
+	}
+
+	tasks := e.tasks.Snapshot()
+	fresh := make([]parsedTask, 0, len(tasks))
+
+	for _, t := range tasks {
+		if !producesCC(t) {
+			// A task that does not require content must not take attribution of a copy
+			// away from one that does — the caller takes the first covering task, and a
+			// task with no X3 destination would swallow the whole stream of the warrant
+			// that has one.
+			continue
+		}
+
+		criteria := make([]criterion, 0, len(t.Targets))
+		for _, id := range t.Targets {
+			if c, err := parseCriterion(id); err == nil {
+				criteria = append(criteria, c)
+			}
+		}
+		if len(criteria) == 0 {
+			continue
+		}
+		fresh = append(fresh, parsedTask{task: t, criteria: criteria})
+	}
+
+	e.parsed.Store(&fresh)
+	e.epoch.Add(1)
+}
+
+// forgetCovered drops the memoised attribution answer for one session.
+//
+// Called where a session's own rules change or the session goes away, which is
+// precise: those events affect that session's answer and no other's. A change in
+// *tasking* affects every session's, and moves the epoch instead.
+func (e *ccEnabler) forgetCovered(seid uint64) {
+	if e == nil {
+		return
+	}
+
+	e.coveredMu.Lock()
+	defer e.coveredMu.Unlock()
+	delete(e.covered, seid)
+}
+
 // applyTasking sets duplication on every FAR of the session whose traffic live
 // tasking selects, and clears the duplication this element enabled on the rest.
 //
@@ -383,6 +499,11 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
 	}
 	e.mu.Unlock()
 
+	// This session's rules have changed, so an attribution answer computed from the
+	// previous ones is wrong for it — and for it alone, which is why this is a delete
+	// rather than a move of the epoch.
+	e.forgetCovered(s.localSEID)
+
 	if notable {
 		e.request()
 	}
@@ -414,6 +535,8 @@ func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
 		return
 	}
 
+	e.forgetCovered(s.localSEID)
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -436,6 +559,10 @@ func (e *ccEnabler) retask() {
 		return
 	}
 
+	// Before the request, not after: a transaction that began first would otherwise
+	// derive duplication from the previous snapshot while the request that prompted it
+	// was already counted as served.
+	e.reparse()
 	e.request()
 }
 
@@ -449,6 +576,7 @@ func (e *ccEnabler) retaskAndWait() {
 		return
 	}
 
+	e.reparse()
 	e.await(e.request())
 }
 
@@ -566,17 +694,69 @@ type coveredTask struct {
 // tasksCovering returns the active tasks whose detection criteria select traffic in
 // the session the datapath tagged a copy with, in XID order.
 //
-// Computed per copy rather than kept as an index. An index would have to be
-// invalidated wherever tasking or session rules change, and going stale would show
-// up as product attributed to the wrong warrant or dropped as untasked — neither
-// visible from outside this element. The work is a map lookup and a handful of
-// integer comparisons against rules already in memory, which is small beside the
-// framing and delivery each copy costs anyway.
+// **The answer is memoised per session, and the objection this used to carry is the
+// reason it is stamped rather than indexed.** An index maintained incrementally has to
+// be invalidated at every site that changes tasking or session rules, and a site that
+// forgets goes stale silently — product attributed to the wrong warrant, or dropped as
+// untasked, neither visible from outside this element. An entry stamped with the
+// tasking epoch it was computed under cannot: a forgotten bump invalidates *everything*
+// rather than one thing wrongly, which fails toward recomputation.
+//
+// Two writers, and they invalidate different amounts because they affect different
+// amounts. A change in tasking moves the epoch, which retires every session's answer.
+// A change in one session's own rules, or that session going away, drops that session's
+// entry — reparse would be the wrong instrument there, since the tasking has not moved.
+//
+// What this replaced, and why the previous comment's cost estimate was the wrong way
+// round. Per copy it did: a full store snapshot with a deep clone of every task's four
+// slices, then a parse of every criterion of every task, then a resolve over every PDR,
+// then filterFor parsing the same criteria a second time — and for a PDR criterion an
+// IE parse and a throwaway address pool. Measured at about 95 allocations per copy for
+// three warrants against one session, where framing is one allocation and a memcpy and
+// delivery amortises across a 32-PDU batch. This is the one path in this element whose
+// cost is per packet, in front of a socket queue holding ten datagrams by default whose
+// overflow is intercept product nothing downstream can recover.
 func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	if e == nil || e.tasks == nil {
 		return nil
 	}
 
+	// The epoch is read first. Reading it after computing would let a tasking change
+	// that landed during the computation be stamped as though it had been accounted
+	// for, and nothing would recompute it.
+	epoch := e.epoch.Load()
+
+	e.coveredMu.Lock()
+	held, ok := e.covered[seid]
+	e.coveredMu.Unlock()
+
+	if ok && held.epoch == epoch {
+		return held.tasks
+	}
+
+	out := e.resolveCovering(seid)
+
+	e.coveredMu.Lock()
+	// Only where the session still exists. A session that has gone away is dropped by
+	// forgetCovered, and storing an answer for it here would put back the entry that
+	// just removed — an entry nothing would ever remove again, since the events that
+	// prune this map have both already happened for that session.
+	if out != nil {
+		e.covered[seid] = coveredEntry{epoch: epoch, tasks: out}
+	}
+	e.coveredMu.Unlock()
+
+	return out
+}
+
+// resolveCovering is tasksCovering's answer computed from scratch: which of the live
+// content tasks' criteria select traffic in this session, in XID order.
+//
+// The order is the snapshot's, which is ordered by XID — the caller picks one task
+// when several cover a session, and picking a different one per packet would split a
+// session's product across the covering warrants so that no agency gets a whole
+// stream.
+func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 	sess, ok := e.sessionFor(seid)
 	if !ok {
 		// The session went away between the datapath duplicating the packet and this
@@ -584,29 +764,21 @@ func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 		return nil
 	}
 
+	parsed := e.parsed.Load()
+	if parsed == nil {
+		return nil
+	}
+
 	one := []PFCPSession{sess}
 
-	// Snapshot is ordered by XID, so the order here is too — the caller picks one
-	// task when several cover a session, and picking a different one per packet would
-	// split a session's product across warrants so that no agency gets a whole
-	// stream.
 	var out []coveredTask
-	for _, task := range e.tasks.Snapshot() {
-		// Same filter as criteriaOf, and for a sharper reason here: a task that cannot
-		// be delivered for must not take attribution of a copy away from one that can.
-		// Snapshot is XID-ordered and the caller takes the first, so a leftover
-		// non-CC task covering the same session would silently swallow the whole
-		// stream of the warrant that does have a destination.
-		if !producesCC(task) {
-			continue
-		}
-		for _, id := range task.Targets {
-			c, err := parseCriterion(id)
-			if err != nil {
-				continue
-			}
+	for _, pt := range *parsed {
+		for _, c := range pt.criteria {
 			if len(c.resolve(one)) > 0 {
-				out = append(out, coveredTask{task: task, filter: filterFor(task, sess)})
+				out = append(out, coveredTask{
+					task:   pt.task,
+					filter: filterFrom(pt.criteria, sess),
+				})
 
 				break
 			}

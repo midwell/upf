@@ -56,15 +56,28 @@ type filterArm struct {
 
 // filterFor resolves a task's criteria against one session. Copies of that
 // session's traffic can then be decided from the result alone.
+//
+// It parses as it goes, which is right for a caller that has a task and nothing else.
+// The shipping path does not: it holds criteria parsed when the tasking changed, and
+// calls filterFrom directly — parsing here per copy was half the per-packet cost this
+// filter exists to justify.
 func filterFor(task types.InterceptTask, sess PFCPSession) copyFilter {
+	criteria := make([]criterion, 0, len(task.Targets))
+	for _, id := range task.Targets {
+		if c, err := parseCriterion(id); err == nil {
+			criteria = append(criteria, c)
+		}
+	}
+
+	return filterFrom(criteria, sess)
+}
+
+// filterFrom resolves already-parsed criteria against one session.
+func filterFrom(criteria []criterion, sess PFCPSession) copyFilter {
 	one := []PFCPSession{sess}
 
 	var f copyFilter
-	for _, id := range task.Targets {
-		c, err := parseCriterion(id)
-		if err != nil {
-			continue
-		}
+	for _, c := range criteria {
 		refs := c.resolve(one)
 		if len(refs) == 0 {
 			// This criterion selects nothing in this session. Another may.
