@@ -301,6 +301,12 @@ func (f *fakeNEIssueReporter) Notify(issueType, _ string) {
 	f.issues = append(f.issues, issueType)
 }
 
+// NotifyAsync records synchronously; see recordingReporter.NotifyAsync for why the
+// double does not reproduce the dispatch.
+func (f *fakeNEIssueReporter) NotifyAsync(issueType, description string) {
+	f.Notify(issueType, description)
+}
+
 // TestCheckTagReportsUnusableTag proves an unusable content tag is reported to the
 // ADMF over X1 instead of silently shipping product the MDF cannot
 // correlate. A tag whose metadata never reached the datapath encap carries a zero
@@ -966,7 +972,7 @@ func TestShipperPDUNumbersUnderConcurrentFraming(t *testing.T) {
 // that refuses to come up over its LI configuration tells every operator it is
 // LI-provisioned.
 func TestShipperRefusesWithoutAnElementIdentifier(t *testing.T) {
-	if _, err := startLIShipper(&LiConfig{X3SockAddr: "/nonexistent.sock"}, nil, nil); !errors.Is(err, errNoElementIdentifier) {
+	if err := startLIShipper(&LiConfig{X3SockAddr: "/nonexistent.sock"}, nil, nil); !errors.Is(err, errNoElementIdentifier) {
 		t.Errorf("startLIShipper without a network element identifier returned %v, want errNoElementIdentifier", err)
 	}
 }
