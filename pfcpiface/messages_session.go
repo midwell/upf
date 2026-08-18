@@ -262,7 +262,7 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// across it — all on arrays that the interception plane is concurrently reading
 	// from its own goroutines. See PacketForwardingRules.privateCopy for why the copy
 	// belongs here and not in the store's getters, and for the two readers it protects.
-	session.PacketForwardingRules = session.PacketForwardingRules.privateCopy()
+	session.PacketForwardingRules = session.privateCopy()
 
 	var fseidIP uint32
 
