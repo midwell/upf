@@ -5,7 +5,6 @@ package pfcpiface
 
 import (
 	"fmt"
-	"github.com/wmnsk/go-pfcp/ie"
 	"net"
 	"runtime"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // enablerFixture is a CC-POI duplication control wired to an in-memory session

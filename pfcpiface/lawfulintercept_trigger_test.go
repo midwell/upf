@@ -12,7 +12,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
-	"github.com/wmnsk/go-pfcp/ie"
 	"math/big"
 	"net"
 	"net/url"
@@ -28,6 +27,7 @@ import (
 	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/li/x2x3"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // liCA creates one throwaway LI certificate authority, writes its certificate to
