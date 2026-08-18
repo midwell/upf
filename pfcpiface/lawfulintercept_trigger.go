@@ -121,7 +121,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			if reason != x1.PurgeKeepaliveLapse || reporter == nil {
 				return
 			}
-			reporter.Notify(x1.NEIssueTaskingPurged,
+			// Off the caller's goroutine, for OnAuthFailure's reason and one more: a
+			// purge reaches here from the X1 request goroutine (DeactivateAllTasks) as
+			// well as from the fail-safe watchdog, and the transition lock this
+			// callback now runs under serialises every other X1 operation behind it.
+			// A blocking POST here would make one provisioning request wait on the
+			// ADMF's own reachability and hold the rest of the interface behind it.
+			reporter.NotifyAsync(x1.NEIssueTaskingPurged,
 				"content interception tasking removed; the triggering function went quiet")
 		}),
 		// A task is refused unless every detection criterion is one this datapath can
@@ -133,13 +139,31 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// function it is not would be aiming a subject's traffic at a destination of
 		// their choosing. It is refused, but this element logs nothing by design, so
 		// without this the attempt leaves no trace at all.
+		//
+		// Reported off the X1 request goroutine. OnAuthFailure documents that it runs
+		// synchronously on that goroutine and must not block, and a report is an mTLS
+		// round trip to the ADMF bounded only by its own 10s timeout — so reporting a
+		// refusal by holding the triggering interface open for the duration of a POST
+		// to a peer that may itself be unreachable turns a refused request into a
+		// stalled X1 channel, and makes this element's response time depend on whether
+		// the ADMF is up. The AMF and SMF have honoured this contract since it was
+		// written; this element did not, which is what NotifyAsync now settles in one
+		// place for all three.
 		x1.OnAuthFailure(func(code int) {
 			if reporter != nil {
-				reporter.Notify(x1.NEIssueX1AuthFailed,
+				reporter.NotifyAsync(x1.NEIssueX1AuthFailed,
 					fmt.Sprintf("LI_T3 triggering refused: peer failed authentication (error %d)", code))
 			}
 		}),
 	}
+	// This element acts on a provisioned correlation value: it stamps task.CorrelationID
+	// on every X3 PDU it delivers, and an LI_T3 trigger carries one mandatorily. So a
+	// task carrying the field is accepted here, where an IRI-POI refuses it — the
+	// correlation joining *its* records to a session is the session's, and one
+	// provisioned value across the many sessions a task covers would collapse them at
+	// the mediation function.
+	opts = append(opts, x1.HonoursCorrelationID())
+
 	// The two bulk operations the standard settles by advance agreement rather than by
 	// what the element is. Unset leaves its defaults; li/x1 owns what unset means.
 	opts = append(opts, x1.BulkOptions(cfg.DeactivateAllTasks, cfg.RemoveAllDestinations)...)

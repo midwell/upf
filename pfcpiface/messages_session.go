@@ -255,6 +255,15 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		return sendError(ErrNotFoundWithParam("PFCP session", "localSEID", localSEID))
 	}
 
+	// Copy-on-write, before the first mutation below and after the last read of the
+	// stored session. This handler is the only writer to a session the store already
+	// holds, and it writes in place: UpdateFAR replaces a whole far inside the array,
+	// RemoveFAR shifts the remainder down inside it, and applyTasking sets liDuplicate
+	// across it — all on arrays that the interception plane is concurrently reading
+	// from its own goroutines. See PacketForwardingRules.privateCopy for why the copy
+	// belongs here and not in the store's getters, and for the two readers it protects.
+	session.PacketForwardingRules = session.PacketForwardingRules.privateCopy()
+
 	var fseidIP uint32
 
 	if smreq.CPFSEID != nil {

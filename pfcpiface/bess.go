@@ -850,7 +850,7 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	if conf.Li != nil {
 		// The shipper owns its own goroutines and socket for the life of the process,
 		// so nothing here needs to hold on to it.
-		if _, err := startLIShipper(conf.Li, b.client, u); err != nil {
+		if err := startLIShipper(conf.Li, b.client, u); err != nil {
 			// Do not name the subsystem or echo err (which carries LI-identifying
 			// text) on the general BESS log: that would reveal to an unauthorized
 			// operator that this NE is LI-provisioned, which network-element-level

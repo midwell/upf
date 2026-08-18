@@ -132,27 +132,36 @@ const upfInterceptionPoint = "UPF-CC-POI"
 
 // neIssueReporter surfaces LI-plane faults to the ADMF over X1. An interface (like
 // the x2x3.Sender above) so tests can assert what a fault reports without an ADMF.
-// It exposes the fire-and-forget form (*x1.Reporter.Notify): reporting is
-// best-effort by design and a failed report has nowhere to go, so the outcome is
-// not returned.
+// It exposes the fire-and-forget forms (*x1.Reporter.Notify and NotifyAsync):
+// reporting is best-effort by design and a failed report has nowhere to go, so the
+// outcome is not returned.
+//
+// Two forms because two kinds of caller. NotifyAsync consults the throttle on the
+// calling goroutine and dispatches the POST off it, which is what every report raised
+// from the shipping loop, a framing worker or the X1 request goroutine must use: a
+// report is an mTLS round trip bounded only by its own 10s timeout, and those paths
+// may not wait for one. Notify is the blocking form, and what still uses it is
+// startup — a configuration this element will not run with, reported before there is
+// a loop to stall.
 type neIssueReporter interface {
 	Notify(issueType, description string)
+	NotifyAsync(issueType, description string)
 }
 
 // startLIShipper dials the datapath's X3 egress socket, prepares X3 delivery to
 // the MDF3 (mutual TLS), and starts the shipping loop.
-func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShipper, error) {
+func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// Without an identifier for this network element, content would reach a mediation
 	// function that cannot attribute it to the element that produced it. Interception
 	// does not start; the datapath carries on forwarding, because a UPF that refuses to
 	// come up over its LI configuration tells every operator it is LI-provisioned.
 	if cfg.NEID == "" {
-		return nil, errNoElementIdentifier
+		return errNoElementIdentifier
 	}
 
 	mat, err := mtls.Load(cfg.Cert, cfg.Key, cfg.CACert)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// The reporter is built before anything that can fail needs it. It used to be
@@ -183,7 +192,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 				"the content-interception configuration is unusable, so interception has not been started")
 		}
 
-		return nil, err
+		return err
 	}
 
 	// Duplication control before the listener, because the listener refuses tasking
@@ -191,9 +200,20 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	// builds a shipper without a datapath.
 	var enabler *ccEnabler
 	if u != nil {
-		enabler = newCCEnabler(nil, func(all, updated PacketForwardingRules) {
-			u.SendMsgToUPF(upfMsgTypeMod, all, updated)
-		})
+		enabler = newCCEnabler(nil,
+			// The datapath's cause is carried back rather than discarded. A FAR it
+			// refused is not recorded as programmed, so the next re-derivation
+			// attempts it again — and the refusal is reported, since an interception
+			// this element accepted and is not carrying out is a condition only the
+			// ADMF can act on.
+			func(all, updated PacketForwardingRules) uint8 {
+				return u.SendMsgToUPF(upfMsgTypeMod, all, updated)
+			},
+			func(issueType, description string) {
+				if issueReporter != nil {
+					issueReporter.NotifyAsync(issueType, description)
+				}
+			})
 		u.ccEnabler = enabler
 	}
 
@@ -242,8 +262,16 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 		// serving, which is what this element does rather than crash-loop — accumulates
 		// a worker per attempt, each holding the session stores it was given.
 		enabler.stop()
+		// And clear it, or every subsequent session establishment runs applyTasking
+		// against a stopped enabler and queues requests nothing will ever serve. Benign
+		// today because the queue is bounded and the worker is gone, but the field is
+		// what tells the session path there is an interception plane to consult:
+		// leaving it set says yes when the answer is no.
+		if u != nil {
+			u.ccEnabler = nil
+		}
 
-		return nil, err
+		return err
 	}
 	s.tasks = tasks
 
@@ -277,7 +305,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) (*liShip
 	// vantage point that can see it, the datapath's own accounting.
 	startLIPuntMonitor(client, issueReporter)
 
-	return s, nil
+	return nil
 }
 
 // setPuntReadBuffer asks the kernel for a deeper receive buffer on the egress
@@ -428,9 +456,21 @@ func (s *liShipper) addressUnreachable(addr string) bool {
 
 // report surfaces an LI-plane fault to the ADMF over X1 (throttled, NE-level, no
 // target id), never to general logs. No-op when reporting is not configured.
+//
+// **Every caller of this is a path that may not block, so it dispatches off the
+// caller's goroutine.** The read loop reports the egress being down and copies dropped
+// before framing; the framing workers report untasked content, overlapping tasks, an
+// unusable configuration, an unreachable MDF and an invalid tag; the delivery worker
+// reports copies dropped from its queue. All of them are driven by packet rate, in
+// front of a datagram queue whose whole invariant is that everything done before
+// returning to Read is time that queue spends filling — so a synchronous mTLS POST
+// here made the report that says copies were dropped the reason the next several
+// hundred were. NotifyAsync takes the throttle decision here (a mutex, no I/O) and
+// spawns only for a report that is actually going out, which is why this is safe at
+// packet rate and plain `go` would not be.
 func (s *liShipper) report(issueType, description string) {
 	if s.reporter != nil {
-		s.reporter.Notify(issueType, description)
+		s.reporter.NotifyAsync(issueType, description)
 	}
 }
 

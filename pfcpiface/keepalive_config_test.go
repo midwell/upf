@@ -178,9 +178,16 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 	// The shipper as senderFor needs it: credentials, the operator's keepalive settings,
 	// and somewhere to keep the clients it builds. TIME_P2 is long because this test is
 	// about the send, and this mediation function acknowledges nothing.
+	// The mechanism is driven directly rather than through keepaliveConfig, because
+	// what this test needs is a timer fast enough to observe and "25ms" is not a value
+	// an operator may write: TS 103 221-2 clause 6.2.4 expresses these in integer
+	// seconds, so KeepaliveConfig.Validate — which keepaliveConfig applies to the
+	// operator's input — refuses anything under a second and falls back to the
+	// specification's own timers. Going through that path would test the validation,
+	// not the sending, and would wait sixty seconds to do it.
 	s := &liShipper{
 		tlsConfig: upfMat.ClientTLS(),
-		keepalive: keepaliveConfig(LiConfig{X2X3KeepaliveTimeP1: "25ms", X2X3KeepaliveTimeP2: "1h"}, nil),
+		keepalive: x2x3.KeepaliveConfig{TimeP1: 25 * time.Millisecond, TimeP2: time.Hour},
 		senders:   make(map[string]x2x3.Sender),
 	}
 

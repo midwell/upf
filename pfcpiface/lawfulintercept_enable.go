@@ -10,6 +10,8 @@ import (
 
 	"github.com/omec-project/li/store"
 	"github.com/omec-project/li/types"
+	"github.com/omec-project/li/x1"
+	"github.com/wmnsk/go-pfcp/ie"
 )
 
 // A triggered CC-POI cannot rely on the SMF having marked the traffic it is told to
@@ -87,9 +89,20 @@ type ccEnabler struct {
 	// G would see its own G on entries written during it and discard them anyway,
 	// so conflating the two silently defeats the carry-over below.
 	writes uint64
-	// push writes changed rules to the datapath. Separate field so a test can
-	// observe what would be programmed without a datapath.
-	push func(all, updated PacketForwardingRules)
+	// push writes changed rules to the datapath and answers with the datapath's
+	// cause. Separate field so a test can observe what would be programmed without a
+	// datapath.
+	//
+	// **The answer is the point.** This record exists so the element knows what to
+	// change, and a re-derivation programs only the difference between what the
+	// tasking implies and what the record says is in place. Recording a refused
+	// program as done therefore does not lose one attempt — it removes the rule from
+	// every subsequent difference, so nothing ever retries it. Duplication for that
+	// traffic never happens, this element's own account says it is happening, and the
+	// only event that could correct the record is a change in tasking.
+	push func(all, updated PacketForwardingRules) uint8
+	// report surfaces an LI-plane fault to the ADMF. nil when no ADMF is configured.
+	report func(issueType, description string)
 
 	// The three counters that make a re-derivation atomic with respect to another,
 	// and let a caller find out when the one it asked for has happened. requested is
@@ -138,10 +151,15 @@ type programmedFAR struct {
 	written uint64
 }
 
-func newCCEnabler(tasks *store.Store, push func(all, updated PacketForwardingRules)) *ccEnabler {
+func newCCEnabler(
+	tasks *store.Store,
+	push func(all, updated PacketForwardingRules) uint8,
+	report func(issueType, description string),
+) *ccEnabler {
 	e := &ccEnabler{
 		tasks:      tasks,
 		push:       push,
+		report:     report,
 		programmed: make(map[farRef]programmedFAR),
 		covered:    make(map[uint64]coveredEntry),
 	}
@@ -623,6 +641,20 @@ func (e *ccEnabler) transact() {
 			}
 
 			var changed []far
+			// What the record said before this pass touched it, for the FARs this pass
+			// is about to program. If the datapath refuses them, the record has to go
+			// back to describing what the datapath actually holds — not forward to
+			// what was intended, and not to nothing: an entry deleted for a rule the
+			// element was *turning off* would leave the next pass finding nothing to
+			// do while the datapath went on duplicating.
+			type priorEntry struct {
+				ref  farRef
+				held bool
+				was  programmedFAR
+			}
+
+			var prior []priorEntry
+
 			e.mu.Lock()
 			for i := range sess.fars {
 				ref := farRef{seid: sess.localSEID, farID: sess.fars[i].farID}
@@ -642,13 +674,34 @@ func (e *ccEnabler) transact() {
 				f := sess.fars[i]
 				f.liDuplicate = want[ref.farID]
 				changed = append(changed, f)
+				was, held := e.programmed[ref]
+				prior = append(prior, priorEntry{ref: ref, held: held, was: was})
 			}
 			e.mu.Unlock()
 
 			if len(changed) > 0 && e.push != nil {
 				// Only the changed FARs: the datapath's modify path programs what it is
 				// given, and restating the rest would rewrite rules it already has.
-				e.push(PacketForwardingRules{}, PacketForwardingRules{fars: changed})
+				cause := e.push(PacketForwardingRules{}, PacketForwardingRules{fars: changed})
+				if cause != ie.CauseRequestAccepted {
+					// The datapath answered, and the answer was that none of this was
+					// programmed. It is one cause for the whole write, so the whole
+					// write is what is refused. fresh is this pass's own map and no
+					// other goroutine reads it, so no lock is needed; the carry-over
+					// below still lets a newer write win over this restoration, which
+					// is what keeps a session modified mid-pass authoritative.
+					for _, p := range prior {
+						if p.held {
+							fresh[p.ref] = p.was
+						} else {
+							delete(fresh, p.ref)
+						}
+					}
+					if e.report != nil {
+						e.report(x1.NEIssueDuplicationRefused,
+							"the datapath refused a duplication rule for an accepted interception task")
+					}
+				}
 			}
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"github.com/wmnsk/go-pfcp/ie"
 	"math/big"
 	"net"
 	"net/url"
@@ -444,6 +445,14 @@ func (r *recordingReporter) Notify(issueType, description string) {
 	r.descriptions = append(r.descriptions, description)
 }
 
+// NotifyAsync records synchronously. The double is not where the non-blocking
+// property lives — that belongs to x1.Reporter and is asserted against the real one —
+// so recording here keeps every existing assertion about *what* was reported exact,
+// and keeps a test from having to wait for a goroutine to say so.
+func (r *recordingReporter) NotifyAsync(issueType, description string) {
+	r.Notify(issueType, description)
+}
+
 // reported returns a copy of what has been raised so far.
 func (r *recordingReporter) reported() []string {
 	r.mu.Lock()
@@ -565,6 +574,12 @@ type orderingReporter struct{ note func(string) }
 
 func (o orderingReporter) Notify(issueType, _ string) { o.note("report:" + issueType) }
 
+// NotifyAsync notes synchronously: this double exists to assert the *order* of a
+// report against the work it reports on, which a goroutine would make unobservable.
+func (o orderingReporter) NotifyAsync(issueType, description string) {
+	o.Notify(issueType, description)
+}
+
 // TestTheStopReportFollowsTheStop pins the ordering obligation the asynchronous
 // re-derivation created: the element reports that content interception has ceased,
 // and that report has to follow the datapath actually having been programmed to stop
@@ -604,7 +619,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		t.Fatalf("PutSession: %v", err)
 	}
 
-	enabler := newCCEnabler(nil, func(_, updated PacketForwardingRules) {
+	enabler := newCCEnabler(nil, func(_, updated PacketForwardingRules) uint8 {
 		for i := range updated.fars {
 			if updated.fars[i].Duplicates() {
 				note("program:on")
@@ -612,7 +627,9 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 				note("program:off")
 			}
 		}
-	})
+
+		return ie.CauseRequestAccepted
+	}, nil)
 	t.Cleanup(enabler.stop)
 	enabler.addSource(sessions)
 

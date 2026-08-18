@@ -5,8 +5,10 @@ package pfcpiface
 
 import (
 	"fmt"
+	"github.com/wmnsk/go-pfcp/ie"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +39,11 @@ type enablerFixture struct {
 	mu       sync.Mutex
 	pushed   []PacketForwardingRules
 	datapath map[farRef]bool
+	// cause is what the datapath answers with. Zero means accepted, so every test
+	// written before the enabler read this answer is unaffected.
+	cause uint8
+	// reported is the LI-plane faults the enabler raised, in order.
+	reported []string
 }
 
 func newEnablerFixture(t *testing.T) *enablerFixture {
@@ -45,11 +52,26 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 		tasks: store.New(), store: NewInMemoryStore(),
 		datapath: make(map[farRef]bool),
 	}
-	f.e = newCCEnabler(f.tasks, func(_, updated PacketForwardingRules) {
+	f.e = newCCEnabler(f.tasks, func(_, updated PacketForwardingRules) uint8 {
 		f.mu.Lock()
 		f.pushed = append(f.pushed, updated)
+		cause := f.cause
 		f.mu.Unlock()
-		f.record(updated)
+		if cause == 0 {
+			cause = ie.CauseRequestAccepted
+		}
+		// A refused write programs nothing, so the fixture's model of the datapath
+		// must not record it either — otherwise the test asserts against a datapath
+		// that accepted what it refused.
+		if cause == ie.CauseRequestAccepted {
+			f.record(updated)
+		}
+
+		return cause
+	}, func(issueType, description string) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.reported = append(f.reported, issueType)
 	})
 	f.e.addSource(f.store)
 	// The worker belongs to the element, so it must not outlive it — a test that
@@ -1008,7 +1030,7 @@ func TestConcurrentRequestsAreCoalesced(t *testing.T) {
 		entered:       make(chan struct{}),
 		release:       make(chan struct{}),
 	}
-	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) {})
+	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }, nil)
 	t.Cleanup(e.stop)
 	e.addSource(held)
 
@@ -1067,7 +1089,7 @@ func TestStopLetsATransactionInFlightFinish(t *testing.T) {
 		entered:       make(chan struct{}),
 		release:       make(chan struct{}),
 	}
-	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) {})
+	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }, nil)
 	e.addSource(held)
 
 	e.retask()
@@ -1568,5 +1590,63 @@ func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
 	if allocs := after.Mallocs - before.Mallocs; allocs > copies/10 {
 		t.Errorf("%d allocations for %d attributions of one session; the per-copy path is "+
 			"still doing work proportional to the tasking", allocs, copies)
+	}
+}
+
+// TestARefusedProgramIsRetriedRatherThanRecordedAsDone is the record following the
+// datapath's answer rather than the element's intention.
+//
+// The record exists so the element knows what to change: a re-derivation programs only
+// the difference between what the tasking implies and what the record says is in
+// place. So recording a refused program as done does not lose one attempt — it removes
+// the rule from every subsequent difference, and nothing retries it. Duplication for
+// that traffic never happens, this element's own account says it is happening, and the
+// only event that could correct the record is a change in tasking, which a steadily
+// tasked element is not guaranteed to see.
+//
+// It is Accepting a task means interception happens, failing in the one way the
+// element could have detected without help: the datapath answered, and the answer was
+// thrown away.
+func TestARefusedProgramIsRetriedRatherThanRecordedAsDone(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+
+	f.mu.Lock()
+	f.cause = ie.CauseRequestRejected
+	f.mu.Unlock()
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.settle(t)
+
+	// Not recorded as programmed: the record says what the datapath holds, and the
+	// datapath holds nothing for this rule.
+	if value, held := f.recorded(100, 1); held && value {
+		t.Error("a rule the datapath refused is recorded as duplicating; nothing will ever retry it")
+	}
+	if f.datapath[farRef{seid: 100, farID: 1}] {
+		t.Fatal("the fixture's datapath recorded a refused program; this test would assert nothing")
+	}
+
+	// Reported, because an interception this element accepted and is not carrying out
+	// is a condition only the ADMF can act on.
+	f.mu.Lock()
+	reported := append([]string(nil), f.reported...)
+	f.mu.Unlock()
+	if !slices.Contains(reported, x1.NEIssueDuplicationRefused) {
+		t.Errorf("the refusal was not reported (%v); interception is authorised, absent, and silent", reported)
+	}
+
+	// And eligible again: the datapath recovers, the next pass finds the difference
+	// still outstanding and programs it.
+	f.mu.Lock()
+	f.cause = ie.CauseRequestAccepted
+	f.mu.Unlock()
+
+	f.e.retaskAndWait()
+	f.settle(t)
+
+	if !f.datapath[farRef{seid: 100, farID: 1}] {
+		t.Error("the rule was not retried once the datapath would take it; " +
+			"the refusal removed it from every subsequent difference")
 	}
 }
