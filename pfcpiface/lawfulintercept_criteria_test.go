@@ -160,27 +160,13 @@ func TestResolveCriteria(t *testing.T) {
 			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: "10.250.0.99"},
 			want: nil,
 		},
-		{
-			name: "PDR ID selects that rule in every session holding it",
-			id:   types.TargetIdentifier{Type: types.TargetPDRID, Value: "2"},
-			want: []sel{{targetSEID, 2, coverExact}, {sharedSEID, 2, coverExact}},
-		},
-		{
-			name: "QER ID selects every PDR the QER polices",
-			id:   types.TargetIdentifier{Type: types.TargetQERID, Value: "4"},
-			want: []sel{
-				{targetSEID, 1, coverExact},
-				{targetSEID, 2, coverExact},
-				{otherSEID, 1, coverExact},
-				{sharedSEID, 1, coverExact},
-				{sharedSEID, 2, coverExact},
-			},
-		},
-		{
-			name: "QER ID no session uses selects nothing",
-			id:   types.TargetIdentifier{Type: types.TargetQERID, Value: "77"},
-			want: nil,
-		},
+		// The three cases that used to sit here asserted that a PDR ID selects "that rule
+		// in every session holding it" and that a QER ID selects every PDR it polices
+		// across three different sessions. That is the defect written down as expected
+		// behaviour: those identifiers are allocated per PFCP session and reused, so what
+		// the tests pinned was the interception of subjects the warrant never named. They
+		// are gone, and the refusal is asserted in TestParseCriterionRefusals — replaced
+		// rather than added to, so nothing is left asserting the old reading.
 		{
 			name: "network instance spans every session on the DNN",
 			id:   types.TargetIdentifier{Type: types.TargetNetworkInstance, Value: niHex},
@@ -341,6 +327,25 @@ func TestParseCriterionRefusals(t *testing.T) {
 		{
 			name: "an encoded PDR, which needs comparison semantics we do not have",
 			id:   types.TargetIdentifier{Type: types.TargetPDR, Value: "0a01"},
+		},
+		// The two rule identifiers, and this is the refusal that matters most in this file.
+		// They are allocated per PFCP session and reused from a low number, so matching one
+		// selected the rule of that number in *every* session this element holds — the
+		// traffic of every subscriber whose session happens to hold a PDR 2, duplicated,
+		// attributed and delivered under that warrant, indistinguishable downstream from
+		// the traffic it did name.
+		//
+		// A session cannot qualify them: a task's identifiers are alternatives, so naming
+		// an F-SEID beside the rule ID widens the interception rather than narrowing it.
+		// TS 33.128 table 6.2.3-7 lists both, so this is a declared gap and not a silent
+		// one.
+		{
+			name: "a PDR ID, which is allocated per session and reused across sessions",
+			id:   types.TargetIdentifier{Type: types.TargetPDRID, Value: "2"},
+		},
+		{
+			name: "a QER ID, likewise",
+			id:   types.TargetIdentifier{Type: types.TargetQERID, Value: "4"},
 		},
 		{
 			name: "a subscriber identity, which the UPF holds none of",
@@ -598,6 +603,72 @@ func TestPDRCriterionRefusals(t *testing.T) {
 				Type: types.TargetPDR, Value: c.value,
 			}); err == nil {
 				t.Error("parseCriterion accepted a PDR criterion it cannot resolve")
+			}
+		})
+	}
+}
+
+// TestAPortCriterionDoesNotDeliverTheOtherProtocol is *coverage is a property of every
+// dimension, not the first one checked*.
+//
+// A transport-port criterion constrains two things: the protocol and the port. The protocol
+// was used only to exclude — a rule pinning a different protocol matched nothing — and never
+// to widen, so a rule that pinned the port exactly and left the protocol unconstrained
+// returned coverExact. Exact means the copy is delivered without inspection, so a TCP-port
+// criterion delivered the UDP traffic on that port too: traffic the warrant does not name,
+// under the warrant's own identifier, indistinguishable downstream from the traffic it did.
+//
+// The `default:` branch of the same switch already noticed the interaction — "and the proto
+// may be unconstrained too" — one case away from where it mattered.
+func TestAPortCriterionDoesNotDeliverTheOtherProtocol(t *testing.T) {
+	const port = 443
+
+	for _, tc := range []struct {
+		name      string
+		protoMask uint8
+		proto     uint8
+		want      coverage
+	}{
+		{
+			// The case the fix is about: the rule pins the port and not the protocol, so it
+			// carries the UDP traffic on that port as well as the TCP.
+			name: "the rule pins the port and not the protocol", protoMask: 0,
+			want: coverBroader,
+		},
+		{
+			// Both dimensions pinned: the rule carries exactly what the criterion names.
+			name: "the rule pins both", protoMask: 0xff, proto: protoTCP,
+			want: coverExact,
+		},
+		{
+			name: "the rule pins the other protocol", protoMask: 0xff, proto: protoUDP,
+			want: coverNone,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := parseCriterion(types.TargetIdentifier{
+				Type: types.TargetTCPPort, Value: "443",
+			})
+			if err != nil {
+				t.Fatalf("parseCriterion: %v", err)
+			}
+
+			// A downlink rule, so the criterion's port is compared against the destination
+			// range — the direction the appFilter fields below describe.
+			p := pdr{
+				pdrID: 2, fseID: 100, farID: 2,
+				srcIface: core, srcIfaceMask: 0xff,
+				appFilter: applicationFilter{
+					proto: tc.proto, protoMask: tc.protoMask,
+					srcPortRange: newWildcardPortRange(),
+					dstPortRange: newExactMatchPortRange(port),
+				},
+			}
+
+			if got := c.matchPDR(p); got != tc.want {
+				t.Errorf("coverage = %s, want %s: an exact match means the copy is delivered "+
+					"without inspection, so a rule that does not pin the protocol delivers the "+
+					"other transport's traffic on that port under this warrant", got, tc.want)
 			}
 		})
 	}
