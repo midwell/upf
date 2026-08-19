@@ -839,6 +839,18 @@ func (e *ccEnabler) transact() {
 // where one of the two has finished writing.
 var beforeTransactPush func()
 
+// lostContent reports a copy this element made and did not deliver, through the condition
+// every other content loss uses. Nil-safe in both directions: an enabler without a reporter
+// says nothing, which is the certificate-less/no-ADMF case.
+func (e *ccEnabler) lostContent() {
+	if e == nil || e.report == nil {
+		return
+	}
+	e.report(x1.NEIssueX3DeliveryLost,
+		"a fragment of an authorised datagram was discarded because its first fragment "+
+			"had not been seen")
+}
+
 // sessionFor returns the session with the given SEID from whichever association
 // holds it.
 func (e *ccEnabler) sessionFor(seid uint64) (PFCPSession, bool) {
@@ -947,8 +959,11 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 		for _, c := range pt.criteria {
 			if len(c.resolve(one)) > 0 {
 				out = append(out, coveredTask{
-					task:   pt.task,
-					filter: filterFrom(pt.criteria, sess),
+					task: pt.task,
+					// The reporter is this element's, so the memo built inside can report a
+					// fragment it had to discard through the same channel every other content
+					// loss uses.
+					filter: filterFrom(pt.criteria, sess, e.lostContent),
 				})
 
 				break
