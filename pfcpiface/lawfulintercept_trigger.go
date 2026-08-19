@@ -6,6 +6,7 @@ package pfcpiface
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"strconv"
@@ -93,9 +94,25 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			if next != nil {
 				enabler.retask()
 
-				// A modification keeps the XID, and the numbering state is keyed by it.
-				// Releasing it here would discard contexts this task's own records have
-				// already used.
+				// A modification keeps the *task's* XID, and leaving the numbering alone
+				// is right for every modification but one: the numbering is keyed by the
+				// **delivery** XID, which here is the warrant's ProductID, and a relabel
+				// moves it. The context under the superseded label is then stranded —
+				// every copy from this point carries the new label, so nothing will
+				// number under the old one again.
+				//
+				// Released per context, not per XID, and this is the case that shows why:
+				// the triggering function relabels a warrant's triggers one at a time, so
+				// while this one is being modified its sibling sessions are still
+				// delivering under the old label. Forget would take their numbering with
+				// it, which is the defect this granularity exists to avoid, reached from
+				// the modification path instead of the removal path.
+				if prev != nil && prev.DeliveryXID() != next.DeliveryXID() {
+					var corr [x2x3.CorrelationIDLength]byte
+					binary.BigEndian.PutUint64(corr[:], prev.CorrelationID)
+					ids.ForgetContext(prev.DeliveryXID().Bytes(), corr)
+				}
+
 				return
 			}
 			// A removal runs before the purge report below, and interception stopping
@@ -104,13 +121,30 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			// stopping: this waits for the pass it asked for, or the report would be a
 			// lie in exactly the window it matters.
 			enabler.retaskAndWait()
-			// The numbering state goes with the tasking. This element holds one sequence
-			// context per intercepted session, so a warrant that outlives many sessions
-			// would otherwise leave one entry behind for each of them. Done on every
-			// removal — an ordinary withdrawal, a bulk deactivation, a fail-safe purge —
-			// because the state belongs to the tasking and not to the circumstances of
-			// its removal.
-			ids.Forget(prev.DeliveryXID().Bytes())
+			// The numbering state goes with the tasking — **this task's context, not the
+			// delivery XID's.**
+			//
+			// The granularity is the whole point here and it is not the same as at an
+			// IRI-POI. The triggering function allocates one task per (warrant, session,
+			// UPF) and gives them all the warrant's ProductID, which is what travels on
+			// the wire as the XID, so several live tasks share it. Releasing by XID when
+			// one PDU session ends therefore restarts the numbering of every other
+			// session that warrant is still intercepting at this element — measured as a
+			// sibling session's next xCC numbered 0 where it should have been 3.
+			//
+			// That is worse than the leak it was written to prevent. A sequence number is
+			// how a mediation function detects loss, so numbering that resets under a
+			// live context makes this element emit a sequence the receiver must read as
+			// duplication or as a gap: the loss signal forged by the state that governs
+			// it. Releasing one context leaves at worst an entry per ended session,
+			// bounded by live tasking and visible through Identity.Contexts().
+			//
+			// Done on every removal — an ordinary withdrawal, a bulk deactivation, a
+			// fail-safe purge — because the state belongs to the tasking and not to the
+			// circumstances of its removal.
+			var corr [x2x3.CorrelationIDLength]byte
+			binary.BigEndian.PutUint64(corr[:], prev.CorrelationID)
+			ids.ForgetContext(prev.DeliveryXID().Bytes(), corr)
 		}),
 		// A purge is reported only when nobody asked for it. An explicit
 		// DeactivateTask, a retarget and a bulk deactivation are all expected ends of
