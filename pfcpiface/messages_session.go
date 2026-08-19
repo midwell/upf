@@ -467,8 +467,21 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 	cause = upf.SendMsgToUPF(upfMsgTypeDel, deleted, PacketForwardingRules{})
 	if cause == ie.CauseRequestRejected {
+		// Lawful Interception: the created and updated rules above were pushed to the
+		// datapath before this stage ran, and this return is before PutSession — so
+		// sessionProgrammed, the only thing that records a push, never happens. Record it
+		// here or the datapath duplicates with nothing in this element able to say so, and
+		// nothing able to turn it off. See farsPushed.
+		upf.ccEnabler.farsPushed(localSEID, updated.fars)
+
 		return sendError(ErrWriteToDatapath)
 	}
+
+	// Lawful Interception: the removed FARs are gone from the session, so nothing that walks
+	// it will ever reclaim what this element recorded about them — and a FAR re-created under
+	// the same identifier would inherit the stale claim and never be programmed. See
+	// farsRemoved.
+	upf.ccEnabler.farsRemoved(localSEID, delFARs)
 
 	err := pConn.store.PutSession(session)
 	if err != nil {
