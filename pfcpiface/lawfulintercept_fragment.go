@@ -11,7 +11,7 @@ import (
 
 // A transport-port criterion has to read the packet, and a fragmented IPv4 datagram carries
 // its transport header in the first fragment only. So every fragment after the first was
-// unreadable, `uePortOf` reported false, and the copy was dropped — **every non-initial
+// unreadable, the port comparison reported false, and the copy was dropped — **every non-initial
 // fragment of a datagram this element had just decided was authorised**. An agency receives
 // the head of each datagram and nothing else, which downstream is not a gap it can see: the
 // X3 sequence is unbroken, because the dropped copies were dropped before framing.

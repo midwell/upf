@@ -976,6 +976,10 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 // Reading the number is the point. A count of contexts passes against a release that
 // dropped the wrong entry and recreated it on the next PDU, which is precisely the
 // defect's shape: the surviving context looks present and starts again from zero.
+// The label is a parameter because the numbering is keyed by it: the relabel tests pass a
+// superseded one and the current one to the same helper, and which they pass is the property.
+//
+//nolint:unparam // xid is the numbering key under test, not incidental
 func nextSequenceNumber(t *testing.T, ids *x2x3.Identity, xid types.XID, corr uint64) uint32 {
 	t.Helper()
 

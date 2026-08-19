@@ -7,11 +7,10 @@ import (
 	"context"
 	"time"
 
-	"google.golang.org/protobuf/types/known/anypb"
-
 	"github.com/omec-project/li/x1"
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // Content of communication leaves the datapath through a userspace socket, and a
