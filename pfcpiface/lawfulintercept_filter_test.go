@@ -27,7 +27,7 @@ func ethIPv4(l3 []byte) []byte {
 	return append(frame, l3...)
 }
 
-// ipv4 builds an IPv4 packet carrying payload, with the given protocol.
+// ipv4Packet builds an IPv4 packet carrying payload, with the given protocol.
 func ipv4Packet(src, dst string, proto uint8, payload []byte) []byte {
 	p := make([]byte, 20, 20+len(payload))
 	p[0] = 0x45 // version 4, 5-word header

@@ -166,7 +166,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		X1Listen: freePort(t),
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	rec := &recordingReporter{}
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: busy.Addr().String()}
 
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err == nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err == nil {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
@@ -493,7 +493,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), orderingReporter{note: note},
-		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	// Nothing may be left listening when the window is rejected.
 	addr := freePort(t)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
-	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err == nil {
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
 	var lc net.ListenConfig
@@ -815,7 +815,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	// purge would be this element mislabelling a withdrawal it was asked for.
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 
@@ -1021,7 +1021,7 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
@@ -1120,7 +1120,7 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
