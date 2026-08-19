@@ -207,6 +207,24 @@ func (b *bess) SendMsgToUPF(
 	rc := b.GRPCJoin(calls, Timeout, done)
 	if !rc {
 		logger.BessLog.Errorln(errGRPCCallFailed)
+		// **The cause has to say what happened.** This function used to initialise
+		// `cause` to accepted and never assign it again: a failed or timed-out batch was
+		// logged and reported as success. Every caller that tests for
+		// CauseRequestRejected — the establishment, modification and deletion handlers —
+		// therefore had an unreachable rejection branch, and so did the interception
+		// enabler, whose whole record of "what the datapath accepted" was this value.
+		// A refusal recorded as success is removed from every subsequent difference, so
+		// nothing ever retries it.
+		//
+		// Coarse by construction, and deliberately in the safe direction: the fan-out
+		// joins per-rule calls through a channel carrying only a bool, so one refused
+		// rule marks the batch refused and the next re-derivation retries rules that
+		// were programmed. Reprogramming an unchanged rule is idempotent; recording a
+		// refused one as programmed is not recoverable at all.
+		//
+		// The success path is unchanged — it returns accepted exactly as before — so no
+		// caller sees a different value for a batch the datapath took.
+		cause = ie.CauseRequestRejected
 	}
 
 	return cause
@@ -753,7 +771,10 @@ func (b *bess) clearState() {
 		return
 	}
 
-	b.processFAR(ctx, anyExactClear, upfMsgTypeClear)
+	// The clear path has no cause to report and no caller to tell — it runs on
+	// association teardown — so the error is logged inside processFAR and dropped here.
+	//nolint:errcheck // teardown: logged inside, nothing to report it to
+	_ = b.processFAR(ctx, anyExactClear, upfMsgTypeClear)
 
 	clearGtpuPathMonitoringCmd := &pb.GtpuPathMonitoringCommandClearArg{}
 
@@ -1196,10 +1217,26 @@ func (b *bess) delApplicationQER(
 	}
 }
 
-func (b *bess) processFAR(ctx context.Context, arg *anypb.Any, method upfMsgType) {
+// processFAR programs one FAR into the datapath's forwarding table and reports
+// whether the datapath took it.
+//
+// **The return value is the point.** This used to log the failure and return nothing,
+// so addFAR and delFAR signalled success to GRPCJoin whatever the datapath answered,
+// and SendMsgToUPF's cause could not be anything but accepted. Three rejection
+// branches were unreachable behind it — the establishment and modification handlers'
+// own, and the interception enabler's whole record of what the datapath accepted, a
+// refusal recorded there as success being removed from every later difference so that
+// nothing ever retries it.
+//
+// Scoped to FARs, which is where this matters and all the interception plane pushes.
+// processPDR and processQER still only log, so a batch's cause is derived from its FAR
+// calls; widening it would change when a session establishment is refused, which is a
+// separate decision from making the LI remedy reachable.
+func (b *bess) processFAR(ctx context.Context, arg *anypb.Any, method upfMsgType) error {
 	if method != upfMsgTypeAdd && method != upfMsgTypeDel && method != upfMsgTypeClear {
 		logger.BessLog.Errorln(errInvalidMethodName, method)
-		return
+
+		return fmt.Errorf("%s: %v", errInvalidMethodName, method)
 	}
 
 	methods := [...]string{"add", "add", "delete", "clear"}
@@ -1212,9 +1249,18 @@ func (b *bess) processFAR(ctx context.Context, arg *anypb.Any, method upfMsgType
 
 	logger.BessLog.Debugf("farlookup resp: %v", resp)
 
-	if err != nil || resp.GetError() != nil {
+	if err != nil {
 		logger.BessLog.Errorf("farLookup method failed with resp: %v, err: %v", resp, err)
+
+		return err
 	}
+	if e := resp.GetError(); e != nil {
+		logger.BessLog.Errorf("farLookup method failed with resp: %v", resp)
+
+		return fmt.Errorf("farLookup %s: %s", methods[method], e.String())
+	}
+
+	return nil
 }
 
 func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, method upfMsgType) {
@@ -1319,7 +1365,10 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		b.processFAR(ctx, arg, upfMsgTypeAdd)
+		// The datapath's answer, carried to GRPCJoin rather than only logged: the caller
+		// derives its PFCP cause from it, and an interception whose FAR was refused has
+		// to stay in the difference the next re-derivation computes.
+		programmed := b.processFAR(ctx, arg, upfMsgTypeAdd) == nil
 
 		if enableGtpuPathMonitoring {
 			g := &pb.GtpuPathMonitoringCommandAddDeleteArg{
@@ -1335,7 +1384,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 			b.processGtpuPathMonitoring(ctx, arg, upfMsgTypeAdd)
 		}
 
-		done <- true
+		done <- programmed
 	}()
 }
 
@@ -1359,7 +1408,7 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		b.processFAR(ctx, arg, upfMsgTypeDel)
+		removed := b.processFAR(ctx, arg, upfMsgTypeDel) == nil
 
 		if enableGtpuPathMonitoring {
 			g := &pb.GtpuPathMonitoringCommandAddDeleteArg{
@@ -1375,7 +1424,7 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 			b.processGtpuPathMonitoring(ctx, arg, upfMsgTypeDel)
 		}
 
-		done <- true
+		done <- removed
 	}()
 }
 
