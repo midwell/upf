@@ -7,6 +7,8 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/protobuf/types/known/anypb"
+
 	"github.com/omec-project/li/x1"
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 	"google.golang.org/grpc"
@@ -46,18 +48,36 @@ const (
 type bessCounters interface {
 	GetModuleInfo(ctx context.Context, in *pb.GetModuleInfoRequest, opts ...grpc.CallOption) (*pb.GetModuleInfoResponse, error)
 	GetPortStats(ctx context.Context, in *pb.GetPortStatsRequest, opts ...grpc.CallOption) (*pb.GetPortStatsResponse, error)
+	// ModuleCommand is how a module's own accounting is read — Queue.get_status here,
+	// which is the only counter that sees a discard on enqueue.
+	ModuleCommand(ctx context.Context, in *pb.CommandRequest, opts ...grpc.CallOption) (*pb.CommandResponse, error)
 }
 
 // liEgressModules are the modules that may sit immediately upstream of the egress
 // port, in preference order.
 //
-// Whichever is *adjacent* to the port is the right one to compare against: packets
-// between it and the port are either sent or discarded, never in flight. A
-// pipeline that buffers copies has the queue there; one that does not has the
-// merge. Accepting both means the accounting keeps working when the datapath
-// configuration and this binary are not upgraded in lockstep — which is not
-// hypothetical, since they ship in different images.
+// Whichever is *adjacent* to the port is the right one to compare against. A pipeline that
+// buffers copies has the queue there; one that does not has the merge. Accepting both means
+// the accounting keeps working when the datapath configuration and this binary are not
+// upgraded in lockstep — which is not hypothetical, since they ship in different images.
+//
+// **The comparison is sound for a merge and structurally blind for a queue**, and the
+// preference order puts the queue first, so it was blind in the configuration this element
+// actually runs. The reasoning it rested on — packets between the stage and the port "are
+// either sent or discarded, never in flight" — is true of a merge and false of a queue: a
+// queue discards on *enqueue*, and its output-gate accounting counts packets *dequeued*
+// toward the port. So during sustained overflow the two counters agree exactly and the
+// difference is zero: the one condition this monitor exists to detect is the one condition
+// the comparison cannot see.
+//
+// A queue therefore has its own dropped counter read as well (see queueDropped). The
+// comparison is kept for what it does handle — loss on the port's write, which is the
+// merge case and is real either way.
 var liEgressModules = []string{"liQueue", "liMerge"}
+
+// liQueueModule is the buffering stage, named separately because it is the one whose
+// discards the comparison cannot see.
+const liQueueModule = "liQueue"
 
 // liPuntMonitor watches for content discarded between the datapath and the
 // shipper.
@@ -71,6 +91,11 @@ type liPuntMonitor struct {
 	// absolute figure includes anything lost before this monitor started, and a
 	// steady gap is one fault, not a fault per poll.
 	lost uint64
+	// dropped is the buffering stage's own cumulative discard count, tracked the same way
+	// and for the same reason. It is a separate figure rather than added to lost, because
+	// the two are different losses at different points and a datapath restart resets them
+	// independently.
+	dropped uint64
 }
 
 // startLIPuntMonitor begins comparing the LI egress accounting. It is silent when
@@ -96,19 +121,33 @@ func (m *liPuntMonitor) run() {
 
 // check reads both counters once and reports any new shortfall.
 func (m *liPuntMonitor) check() {
-	handed, ok := m.handedToPort()
+	// **The buffering stage's own discards, which the comparison below cannot see.** A queue
+	// drops on enqueue and counts its output gate on dequeue, so both sides of the
+	// comparison exclude the dropped packets equally and the difference stays zero while
+	// content is being lost.
+	m.checkQueueDrops()
+
+	// **Downstream first.** The two reads are not atomic, so traffic passing between them
+	// lands on whichever side is read second. Reading the port last made a busy egress
+	// legitimately report sent > handed, which the branch below then took for a datapath
+	// restart and used to clear the loss baseline — turning ordinary traffic into a reason to
+	// forget a real gap. Read in this order the same traffic makes the comparison
+	// conservative: `handed` is at least as current as `sent`, so the difference errs toward
+	// under-reporting rather than toward a false restart.
+	sent, ok := m.sentPackets()
 	if !ok {
 		return
 	}
 
-	sent, ok := m.sentPackets()
+	handed, ok := m.handedToPort()
 	if !ok {
 		return
 	}
 
 	// The port cannot have sent more than it was given; if it appears to have, the
 	// counters were read across a datapath restart and the comparison is
-	// meaningless rather than reassuring.
+	// meaningless rather than reassuring. With the reads in the order above, ordinary
+	// traffic no longer produces this.
 	if sent > handed {
 		m.lost = 0
 
@@ -130,6 +169,66 @@ func (m *liPuntMonitor) check() {
 	// only if it is told.
 	m.reporter.Notify(x1.NEIssueX3PuntLost,
 		"content copies discarded at the datapath egress socket")
+}
+
+// checkQueueDrops reports growth in the buffering stage's own discard count.
+//
+// This is the counter that sees the loss the module-out-versus-port-sent comparison is
+// structurally blind to: a Queue discards on enqueue, when it is full, and those packets
+// never reach the output gate the comparison reads. So the comparison agrees exactly while
+// copies are being dropped — the condition the monitor was built for is the one it could not
+// detect.
+//
+// Silent where the stage is not a queue, or where its status cannot be read: a pipeline
+// using the merge has nothing to ask, and an unreadable module is already reported once by
+// handedToPort's blind branch rather than twice from here.
+func (m *liPuntMonitor) checkQueueDrops() {
+	dropped, ok := m.queueDropped()
+	if !ok {
+		return
+	}
+
+	if dropped <= m.dropped {
+		// Either steady — already reported — or reset by a datapath restart, which is a
+		// new baseline rather than a recovery.
+		m.dropped = dropped
+
+		return
+	}
+
+	m.dropped = dropped
+	m.reporter.Notify(x1.NEIssueX3PuntLost,
+		"content copies discarded by the datapath egress queue")
+}
+
+// queueDropped reads the egress queue's cumulative discard count, and reports whether
+// there was one to read.
+func (m *liPuntMonitor) queueDropped() (uint64, bool) {
+	arg, err := anypb.New(&pb.QueueCommandGetStatusArg{})
+	if err != nil {
+		return 0, false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+
+	res, err := m.client.ModuleCommand(ctx, &pb.CommandRequest{
+		Name: liQueueModule,
+		Cmd:  "get_status",
+		Arg:  arg,
+	})
+	if err != nil || res.GetError() != nil {
+		// No queue in this pipeline, or a datapath that will not answer. Neither is a
+		// statement about loss, and handedToPort already reports the unreadable case.
+		return 0, false
+	}
+
+	var status pb.QueueCommandGetStatusResponse
+	if err := res.GetData().UnmarshalTo(&status); err != nil {
+		return 0, false
+	}
+
+	return status.GetDropped(), true
 }
 
 // handedToPort returns the number of duplicated packets the datapath passed to the
