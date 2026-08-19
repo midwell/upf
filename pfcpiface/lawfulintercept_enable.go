@@ -99,6 +99,28 @@ type ccEnabler struct {
 	// Entries are dropped by the pass that acts on them, so this is bounded by the
 	// deletions a single pass can miss rather than by uptime.
 	forgotten map[uint64]uint64
+	// forgottenFARs is the same record one level down: the write stamp at which a session
+	// *modification* removed one FAR while the session itself carried on.
+	//
+	// A separate map because the two cannot be expressed as one. `forgotten` answers "is
+	// anything about this SEID stale", which a pass uses to discard its whole conclusion for
+	// that session — right when the session is gone, and wrong here: this pass may already
+	// have pushed duplication for the session's *other* FARs, and discarding the record of
+	// that push would leave the datapath duplicating with nothing able to turn it off. So a
+	// removed FAR invalidates that FAR and nothing else.
+	//
+	// It is needed at all because a deletion is invisible to the carry-over, exactly as the
+	// session-level case documents: without it the pass's own `fresh` map still holds the
+	// entry it planned from the pre-modification FAR list, `e.programmed = fresh` puts it
+	// back, and the record then claims duplication for a FAR the SMF has removed. The next
+	// pass would compare against that claim and conclude there was nothing to do — and if
+	// the session later re-creates a FAR with the same identifier, which a path switch
+	// does routinely, the claim says duplication is already in place and the freshly created
+	// FAR is never programmed. Interception silently stops for that traffic while this
+	// element's own account says it is running.
+	//
+	// Bounded like the map above: entries are dropped by the pass that acts on them.
+	forgottenFARs map[farRef]uint64
 	// push writes changed rules to the datapath and answers with the datapath's
 	// cause. Separate field so a test can observe what would be programmed without a
 	// datapath.
@@ -167,12 +189,13 @@ func newCCEnabler(
 	report func(issueType, description string),
 ) *ccEnabler {
 	e := &ccEnabler{
-		tasks:      tasks,
-		push:       push,
-		report:     report,
-		programmed: make(map[farRef]programmedFAR),
-		forgotten:  make(map[uint64]uint64),
-		covered:    make(map[uint64]coveredEntry),
+		tasks:         tasks,
+		push:          push,
+		report:        report,
+		programmed:    make(map[farRef]programmedFAR),
+		forgotten:     make(map[uint64]uint64),
+		forgottenFARs: make(map[farRef]uint64),
+		covered:       make(map[uint64]coveredEntry),
 	}
 	e.reparse()
 	e.pending = sync.NewCond(&e.mu)
@@ -589,6 +612,93 @@ func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
 	}
 }
 
+// farsRemoved drops what this element recorded about FARs a session modification removed,
+// while the session itself carried on.
+//
+// Nothing else reclaims them. sessionProgrammed walks the session's *remaining* FARs, so it
+// never sees the one that went; sessionForgotten walks the same list at teardown, so the
+// entry outlives the session that owned it; and transact rebuilds the record from live
+// sessions, but only when something asks for a pass — and a removal that leaves nothing
+// duplicating asks for none.
+//
+// So the record grows with every FAR any subscriber's session has ever had removed, and an
+// element whose tasking is stable — one long-lived warrant, which is the ordinary case —
+// reclaims none of it. That is the same leak sessionForgotten exists to prevent, reached
+// through a different door, and it has the same shape: the element keeps intercepting
+// correctly the whole time, so nothing looks like a fault until the process dies and takes
+// every warrant it holds with it.
+//
+// **What the stale entry does not do is suppress a later interception**, and the distinction
+// is worth stating because it is the first thing this looks like. Every path that creates a
+// FAR pushes it to the datapath unconditionally — the record is consulted only to decide
+// what a re-derivation needs to *change* — so a FAR re-created under the same identifier is
+// programmed from the tasking either way. This is a leak, not a missed copy.
+//
+// It moves the write counter for the reason sessionForgotten documents: a deletion is
+// invisible to transact's carry-over otherwise, and a pass planned from the pre-modification
+// FAR list would put the entry straight back. That carry-over is not the only thing the
+// stamp buys — a pass holding the older FAR list may be about to push the removed FAR, and
+// the datapath's modify path programs what it is given, so it would re-create a rule the SMF
+// has deleted.
+func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
+	if e == nil || len(removed) == 0 {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.writes++
+
+	for i := range removed {
+		ref := farRef{seid: seid, farID: removed[i].farID}
+		delete(e.programmed, ref)
+		e.forgottenFARs[ref] = e.writes
+	}
+}
+
+// farsPushed records duplication the datapath has been told to apply, for FARs whose session
+// may never reach the store.
+//
+// The modification handler pushes its created and updated rules to the datapath *before* it
+// processes the removals, and a failure in that removal stage returns a rejection — before
+// PutSession, and so before sessionProgrammed, which is the only thing that would have
+// recorded the push. The datapath is left duplicating and this element holds no record of
+// it. A later pass then computes the tasking's answer, finds no entry, reads that as "not
+// duplicating", and where the tasking says it should not be duplicating either, concludes
+// there is nothing to do. The copies keep being made for a session no warrant covers, which
+// is over-collection, and nothing in the element can turn it off.
+//
+// Only the FARs that were actually pushed. Recording the session's whole FAR list here would
+// claim the datapath holds what this element *wants* for FARs it never sent — and a claim of
+// "not duplicating" against a FAR that is duplicating is the one direction the record must
+// never be wrong in.
+//
+// It does not ask for a pass, deliberately. The handler that calls this has just failed to
+// store the session, so the store still holds the pre-modification rules; a pass reading
+// them would plan FAR bodies the datapath has already replaced, which is the one thing
+// transact's own contract says it must not do. The record is what matters here — the next
+// tasking change or the SMF's retry of the modification reconciles the datapath, and both
+// now have something correct to reconcile against.
+func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
+	if e == nil || len(fars) == 0 {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.writes++
+	stamp := e.writes
+
+	for i := range fars {
+		e.programmed[farRef{seid: seid, farID: fars[i].farID}] = programmedFAR{
+			duplicating: fars[i].liDuplicate,
+			written:     stamp,
+		}
+	}
+}
+
 // retask asks for duplication to be re-derived for every session this element
 // holds, and returns as soon as the request is registered. It is called when the
 // tasking changes — a task activated, modified or withdrawn — which is when a
@@ -761,6 +871,15 @@ func (e *ccEnabler) transact() {
 					if cur, held := e.programmed[ref]; held && cur.written > mark {
 						continue
 					}
+					// Removed while this pass ran. Pushing it would not merely restate a
+					// stale body — the datapath's modify path programs what it is given,
+					// so it would re-create a FAR the SMF has deleted, on the strength of
+					// the interception plane wanting to duplicate it.
+					if gone, removed := e.forgottenFARs[ref]; removed && gone > mark {
+						delete(fresh, ref)
+
+						continue
+					}
 					kept = append(kept, changed[i])
 					keptPrior = append(keptPrior, prior[i])
 				}
@@ -807,6 +926,25 @@ func (e *ccEnabler) transact() {
 			fresh[ref] = cur
 		}
 	}
+	// And the deletions, which the loop above cannot express: an entry that is *gone* from
+	// e.programmed is not there to be carried over, so a pass that planned one from a view
+	// predating the deletion would write its own copy straight back.
+	//
+	// The push block already does this for the sessions and FARs it pushed. It is not
+	// enough on its own: that block runs only when this pass had something to push, and a
+	// pass that concluded nothing was to be changed still planned an entry for every FAR it
+	// walked. That is the ordinary case for an element whose tasking is stable, which is
+	// also the case sessionForgotten exists to reclaim.
+	for ref := range fresh {
+		if gone, deleted := e.forgotten[ref.seid]; deleted && gone > mark {
+			delete(fresh, ref)
+
+			continue
+		}
+		if gone, removed := e.forgottenFARs[ref]; removed && gone > mark {
+			delete(fresh, ref)
+		}
+	}
 	e.programmed = fresh
 
 	// The deletions that predate this pass: it read the world after them, so no pass will
@@ -820,6 +958,11 @@ func (e *ccEnabler) transact() {
 	for seid, gone := range e.forgotten {
 		if gone <= mark {
 			delete(e.forgotten, seid)
+		}
+	}
+	for ref, gone := range e.forgottenFARs {
+		if gone <= mark {
+			delete(e.forgottenFARs, ref)
 		}
 	}
 	e.mu.Unlock()
