@@ -63,7 +63,7 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 				DeactivateAllTasks: c.configured,
 			}
 
-			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
+			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
 			if err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
@@ -157,7 +157,7 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 				RemoveAllDestinations: c.configured,
 			}
 
-			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err != nil {
+			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
 
@@ -332,4 +332,103 @@ func bulkRequest(msgType, tfID, neID string) []byte {
     <ns1:x1TransactionId>aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa</ns1:x1TransactionId>
   </ns1:x1RequestMessage>
 </ns1:X1Request>`)
+}
+
+// TestLiBlockRefusesUnknownKeys covers the whole load path, not strictLiBlock alone: the property
+// is that a mistyped LI key stops the user plane from starting on a configuration whose settings
+// it silently ignored, and that is only true if LoadConfigFile calls the check.
+//
+// The two keys below are chosen because their defaults fail *unsafely* and neither is mandatory,
+// so validateLiConfig cannot see them go missing. A dropped `trigger_keepalive` leaves the
+// fail-safe off, and this CC-POI keeps duplicating content after the triggering function
+// responsible for it is gone. A dropped `admf_url` leaves the fault channel a no-op, so nothing
+// this element is required to report — that one included — reaches the ADMF.
+//
+// This refusal is a load-time one, which is a deliberate exception to the rule the test above
+// states: an LI value must not stop this network function. Nothing is intercepting yet at load
+// time, so refusing costs no interception and no traffic; and the alternative is a deployment that
+// carries a setting no part of the element will ever read. Once the shipper is running, the rule
+// holds and a fault goes to the ADMF instead.
+func TestLiBlockRefusesUnknownKeys(t *testing.T) {
+	li := func(extra string) string {
+		return `{
+			"mode": "dpdk",
+			"li": {
+				"x3_sockaddr": "/pod-share/x3",
+				"cert": "/li/upf.crt",
+				"key": "/li/upf.key",
+				"ca_cert": "/li/ca.crt",
+				"x1_listen": ":8443",
+				"tf_id": "smf-1",
+				"ne_id": "upf-1"` + extra + `
+			}
+		}`
+	}
+
+	t.Run("a conformant li block loads", func(t *testing.T) {
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(li(`,
+				"trigger_keepalive": "5m",
+				"admf_url": "https://admf:9443"`), path)
+
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("a conformant li block was refused: %v", err)
+		}
+		if conf.Li.TriggerKeepalive != "5m" || conf.Li.AdmfURL != "https://admf:9443" {
+			t.Errorf("the strict pass disturbed the decode: keepalive %q, admf %q",
+				conf.Li.TriggerKeepalive, conf.Li.AdmfURL)
+		}
+	})
+
+	for _, typo := range []string{"trigger_keepalve", "admf_uri"} {
+		t.Run(typo, func(t *testing.T) {
+			path := t.TempDir() + "/conf.jsonc"
+			mustWriteStringToDisk(li(`,
+				"`+typo+`": "5m"`), path)
+
+			_, err := LoadConfigFile(path)
+			if err == nil {
+				t.Fatalf("%q was accepted, so the setting the operator wrote never reached the "+
+					"element and its unsafe default stands with nothing saying so", typo)
+			}
+			if !strings.Contains(err.Error(), typo) {
+				t.Errorf("the refusal does not name the key that was wrong: %v", err)
+			}
+		})
+	}
+
+	t.Run("a key outside the li block is still tolerated", func(t *testing.T) {
+		// The scope of the check, asserted rather than assumed. This fork tracks an upstream that
+		// adds configuration keys; if strictness leaked past the li object, the next upstream
+		// field would stop every deployment carrying it from starting.
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(`{
+			"mode": "dpdk",
+			"a_key_this_fork_does_not_model": 1,
+			"li": {
+				"x3_sockaddr": "/pod-share/x3",
+				"cert": "/li/upf.crt",
+				"key": "/li/upf.key",
+				"ca_cert": "/li/ca.crt",
+				"x1_listen": ":8443",
+				"tf_id": "smf-1",
+				"ne_id": "upf-1"
+			}
+		}`, path)
+
+		if _, err := LoadConfigFile(path); err != nil {
+			t.Fatalf("an unmodelled key outside the li block was refused, which would stop this "+
+				"fork starting on the next upstream field: %v", err)
+		}
+	})
+
+	t.Run("no li block at all", func(t *testing.T) {
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(`{"mode": "dpdk"}`, path)
+
+		if _, err := LoadConfigFile(path); err != nil {
+			t.Fatalf("a configuration without interception was refused: %v", err)
+		}
+	})
 }

@@ -320,6 +320,14 @@ func LoadConfigFile(filepath string) (Conf, error) {
 		return Conf{}, err
 	}
 
+	// The decode above is upstream's and stays lenient — this fork must keep starting when
+	// upstream adds a key it does not model. The LI object is held to a stricter standard, on
+	// its own, because a key dropped there lands on a default that fails unsafely and says
+	// nothing: see strictLiBlock.
+	if err = strictLiBlock([]byte(jsonData)); err != nil {
+		return Conf{}, err
+	}
+
 	// Set defaults, when missing.
 	if conf.RespTimeout == "" {
 		conf.RespTimeout = respTimeoutDefault.String()
