@@ -31,11 +31,6 @@ const (
 	liTagLen    = fseidTagLen + 1 // + 1-byte FAR action
 )
 
-// liShipper is the UPF's Lawful Interception CC-POI. It reads the content-of-
-// communication copies the BESS datapath tees to a userspace socket (for a FAR
-// carrying the DUPL apply-action) and delivers each one to the MDF3 as an ETSI
-// TS 103 221-2 X3 PDU over mutual TLS. Opt-in: created only when LI is
-// configured, and it logs nothing that reveals which subscriber is intercepted.
 // reconnect backoff bounds for the X3 egress socket.
 const (
 	minReconnectDelay = 100 * time.Millisecond
@@ -57,6 +52,11 @@ const (
 	liMaxPunted = 1 << 16
 )
 
+// liShipper is the UPF's Lawful Interception CC-POI. It reads the content-of-
+// communication copies the BESS datapath tees to a userspace socket (for a FAR
+// carrying the DUPL apply-action) and delivers each one to the MDF3 as an ETSI
+// TS 103 221-2 X3 PDU over mutual TLS. Opt-in: created only when LI is
+// configured, and it logs nothing that reveals which subscriber is intercepted.
 type liShipper struct {
 	sockAddr string
 	// rcvBuf is the punt-socket receive buffer this element was configured with, kept
@@ -255,7 +255,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// a triggering function can act on. One that abandoned its own initialisation is
 	// in no state at all, and is indistinguishable from an element nobody tasked.
 	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids,
-		s.reclaimUnreferencedSenders, s.faultProbes()...)
+		s.reclaimUnreferencedSenders, s.addressUnreachable, s.faultProbes()...)
 	if err != nil {
 		// The enabler was started above and owns a worker goroutine. A partial
 		// initialisation that returns an error has to leave nothing running, or a
@@ -691,10 +691,6 @@ func (s *liShipper) ship(tagged []byte) {
 	}
 }
 
-// senderFor returns the delivery client for an MDF3 address, creating it on first
-// use. Destinations arrive per task over X1, so they are not known at startup, and
-// several agencies' destinations may be in use at once — hence one sender per
-// address rather than one for the process.
 // keepaliveConfig turns the operator's three settings into the clause 6.2.4
 // mechanism's configuration.
 //
@@ -755,6 +751,10 @@ func parseOptionalDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// senderFor returns the delivery client for an MDF3 address, creating it on first
+// use. Destinations arrive per task over X1, so they are not known at startup, and
+// several agencies' destinations may be in use at once — hence one sender per
+// address rather than one for the process.
 func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -828,14 +828,14 @@ func (s *liShipper) reportDeliveryError(err error) {
 	s.watcher.Nudge()
 }
 
-// checkTag reports an unusable LI tag to the ADMF. The tag's fields reach liEncap
-// as BESS per-packet metadata, whose offsets are assigned from the pipeline graph;
-// a wiring in which they do not reach the encap is accepted at load time with only
-// a printed note, and every copy then carries a zero correlation id or an unknown
-// action. Interception would be running but its product would not be correlatable
-// by the MDF, so surface it over X1 — never to general logs.
 // checkTag reports whether a punted copy's datapath tag can be trusted enough to
 // ship. A copy that cannot is dropped rather than delivered.
+//
+// A tag can be wrong at all because its fields reach liEncap as BESS per-packet
+// metadata, whose offsets are assigned from the pipeline graph: a wiring in which they
+// do not reach the encap is accepted at load time with only a printed note, and every
+// copy then carries a zero correlation id or an unknown action. Either way the fault is
+// reported over X1 and never to general logs.
 //
 // The action byte selects the X3 payload format and direction, so an unknown value
 // leaves no correct label to apply: shipping it anyway sends the mediation function

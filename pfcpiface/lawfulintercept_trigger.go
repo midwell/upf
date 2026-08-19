@@ -44,7 +44,8 @@ import (
 // knowledge is the shipper's. They are passed in rather than built here because this
 // function owns the interface and not the delivery.
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter,
-	enabler *ccEnabler, ids *x2x3.Identity, onTasking func(), probes ...x1.FaultProbe,
+	enabler *ccEnabler, ids *x2x3.Identity, onTasking func(),
+	unreachable func(addr string) bool, probes ...x1.FaultProbe,
 ) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
@@ -83,6 +84,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// for its status. A triggered CC-POI is the one element whose product loss is
 		// invisible everywhere else: a dropped copy produces no record for anybody to miss.
 		x1.WithFaultProbes(probes...),
+		// And the same knowledge at destination scope, for the triggering function that asks
+		// about one destination rather than about this element. Without it the answer was
+		// activeAndWorking unconditionally, while this element was reporting the same
+		// endpoint unreachable over ReportDestinationIssue — and a CC-POI is the element
+		// where that matters most, since a dropped copy leaves no record anywhere else for
+		// the discrepancy to show up in.
+		x1.WithDestinationReachability(unreachable),
 		// One hook for the whole lifecycle: an activation, a modification and a
 		// removal all change what this datapath must duplicate, and all of them are
 		// answered the same way — by re-deriving duplication from the tasking that

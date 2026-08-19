@@ -192,7 +192,7 @@ func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 
 	reporter := &slowFormReporter{block: 10 * time.Second}
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), reporter, nil,
-		x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err != nil {
+		x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 
