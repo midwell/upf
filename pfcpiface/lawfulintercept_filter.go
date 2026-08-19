@@ -178,7 +178,7 @@ func (f copyFilter) matches(action byte, frame []byte) bool {
 //
 // **A fragmented datagram is decided once, from the fragment that carries the transport
 // header, and every later fragment follows that decision.** Before this, a later fragment
-// simply had no ports to read: uePortOf reported false and the copy was dropped — every
+// simply had no ports to read: the port comparison reported false and the copy was dropped — every
 // non-initial fragment of a datagram this element had just decided was authorised. An agency
 // received the head of each datagram and nothing else, and downstream that is invisible,
 // because the dropped copies never reached framing so the X3 sequence has no gap in it.
@@ -255,48 +255,13 @@ func (f copyFilter) portMatches(l3 []byte, uplink bool, a filterArm) bool {
 	return proto == a.proto && port == a.port
 }
 
-// uePortOf returns the target's own transport port in a teed copy, with the
-// protocol carrying it. It reports false for anything it cannot read with
-// certainty — a truncated frame, a protocol without ports, a tunnel it cannot
-// walk — and the caller then treats the copy as not matching. That is the safe
-// direction: a copy delivered on a guess is collection the warrant may not cover,
-// while one dropped is a copy of traffic this element could not confirm was the
-// criterion's.
-//
-// The two directions carry different things. The uplink copy is teed after
-// decapsulation, so it is the target's own IP packet and the target is its source.
-// The downlink copy is teed after GTP-U encapsulation, so the target's packet is
-// inside the tunnel and the target is its destination.
-func uePortOf(frame []byte, uplink bool) (uint8, uint16, bool) {
-	l3, ok := ueNetworkLayer(frame, uplink)
-	if !ok {
-		return 0, 0, false
-	}
-
-	proto, transport, ok := transportOf(l3)
-	if !ok {
-		return 0, 0, false
-	}
-
-	src, dst, ok := portsOf(proto, transport)
-	if !ok {
-		return 0, 0, false
-	}
-
-	if uplink {
-		return proto, src, true
-	}
-
-	return proto, dst, true
-}
-
 // ueNetworkLayer returns the target's own IP header inside a teed copy.
 //
 // The two directions carry different things, which is the whole reason this is a function:
 // the uplink copy is teed after decapsulation, so it *is* the target's packet; the downlink
 // copy is teed after GTP-U encapsulation, so the target's packet is inside the tunnel.
 //
-// Extracted from uePortOf because the fragment decision needs the same bytes: reading the
+// Split out from the port comparison because the fragment decision needs the same bytes: reading the
 // header twice, once for the ports and once for the fragmentation state, would have walked the
 // tunnel twice on the one path in this element whose cost is per packet.
 func ueNetworkLayer(frame []byte, uplink bool) ([]byte, bool) {

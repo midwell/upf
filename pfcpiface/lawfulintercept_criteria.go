@@ -67,7 +67,6 @@ type criterion struct {
 	ueIP        uint32 // TargetUEIPv4
 	port        uint16 // TargetTCPPort, TargetUDPPort
 	proto       uint8  // the transport the port belongs to
-	ruleID      uint32 // TargetPDRID, TargetQERID
 	netInstance string // TargetNetworkInstance, as the wire octets
 	uplink      bool   // TargetGTPTunnelDirection
 	// rule is a whole PDR to compare a session's rules against (TargetPDR). It is

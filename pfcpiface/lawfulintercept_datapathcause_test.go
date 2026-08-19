@@ -4,6 +4,7 @@
 package pfcpiface
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func bessWithNoDatapath(t *testing.T) *bess {
 
 	// A port nothing is listening on. Bound and closed, so the address is real and
 	// nothing can have taken it in between.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +165,13 @@ func TestARefusedDuplicationFARIsRetriedAndReported(t *testing.T) {
 	select {
 	case issue := <-reportedAt:
 		reported = append(reported, issue)
+		if issue != x1.NEIssueDuplicationRefused {
+			t.Errorf("the retry was reported as %q, want %q", issue, x1.NEIssueDuplicationRefused)
+		}
+		if len(reported) != 2 {
+			t.Errorf("the ADMF was told %d time(s), want twice: a refusal that is retried and "+
+				"refused again is still an interception that is not running", len(reported))
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("the second re-derivation pushed nothing: the refused FAR was recorded as "+
 			"programmed and has dropped out of the difference, so this interception will never "+

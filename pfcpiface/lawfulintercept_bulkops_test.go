@@ -321,6 +321,11 @@ func postX1(t *testing.T, addr string, mat *mtls.Material, body []byte) string {
 
 // bulkRequest builds one of the two bulk X1 messages: the one that stops every
 // interception on this element, or the one that removes every destination it holds.
+// The identifiers are parameters even though every caller passes the deployment's own:
+// they are the two fields the element authorises the request against, and a builder that
+// hard-coded them would be the wrong shape for the test that sends a wrong one.
+//
+//nolint:unparam // tfID is the field under authorisation; a constant builder would hide it
 func bulkRequest(msgType, tfID, neID string) []byte {
 	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <ns1:X1Request xmlns:ns1="http://uri.etsi.org/03221/X1/2017/10" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
