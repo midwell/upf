@@ -680,6 +680,47 @@ func (e *ccEnabler) transact() {
 			e.mu.Unlock()
 
 			if len(changed) > 0 && e.push != nil {
+				// **Re-read immediately before the push, because the plan above and the
+				// push below are not one step.** The lock is dropped between them — it
+				// has to be, since the push is a round trip to the datapath and holding
+				// e.mu across it would serialise every session handler behind one gRPC
+				// call — so the session path can complete its own read-modify-write of
+				// one of these FARs in the interval, program the datapath with the new
+				// body, and record the write. This pass would then restate the body it
+				// planned from a snapshot that has been replaced: the interception plane
+				// corrupting the subscriber's own forwarding, which is the one thing this
+				// function's own contract says it must never do.
+				//
+				// The same test the plan applies, at the moment it matters: an entry
+				// written past this pass's mark belongs to a writer that has read rules
+				// this pass did not, so the last writer to PutSession wins. The
+				// carry-over at the end keeps its record; the request its write made
+				// brings a pass that has read the new rules.
+				// Set only by tests, and it exists because this interleaving is a few
+				// instructions wide: a property this consequential asserted by racing two
+				// goroutines and hoping is one that passes against the defect. See
+				// TestATaskingPassDoesNotRestateAStaleForwardingBody.
+				if beforeTransactPush != nil {
+					beforeTransactPush()
+				}
+
+				e.mu.Lock()
+				kept := make([]far, 0, len(changed))
+				keptPrior := make([]priorEntry, 0, len(prior))
+				for i := range changed {
+					ref := farRef{seid: sess.localSEID, farID: changed[i].farID}
+					if cur, held := e.programmed[ref]; held && cur.written > mark {
+						continue
+					}
+					kept = append(kept, changed[i])
+					keptPrior = append(keptPrior, prior[i])
+				}
+				e.mu.Unlock()
+
+				changed, prior = kept, keptPrior
+			}
+
+			if len(changed) > 0 && e.push != nil {
 				// Only the changed FARs: the datapath's modify path programs what it is
 				// given, and restating the rest would rewrite rules it already has.
 				cause := e.push(PacketForwardingRules{}, PacketForwardingRules{fars: changed})
@@ -720,6 +761,20 @@ func (e *ccEnabler) transact() {
 	e.programmed = fresh
 	e.mu.Unlock()
 }
+
+// beforeTransactPush is called after a pass has planned a session's FAR bodies and
+// before it re-reads them for the push. Set only by tests; nil otherwise.
+//
+// **What this remedy closes and what it does not.** The re-read means a modification
+// that has completed its PutSession by this point wins: the pass drops that FAR and
+// leaves the datapath holding the SMF's body. What remains is the width of the push
+// itself — two writers whose round trips genuinely overlap reach the datapath in an
+// order neither controls — and closing that would mean serialising the interception
+// plane's pushes against the session handler's, which is a lock on the session
+// signalling path rather than a change here. The residual is stated rather than
+// implied: "last writer to PutSession wins" is the property, and it is only meaningful
+// where one of the two has finished writing.
+var beforeTransactPush func()
 
 // sessionFor returns the session with the given SEID from whichever association
 // holds it.
