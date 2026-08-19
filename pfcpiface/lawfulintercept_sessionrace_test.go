@@ -498,3 +498,78 @@ func TestATaskingPassDoesNotRestateAStaleForwardingBody(t *testing.T) {
 			"subscriber's own forwarding", got.dstIntf, ie.DstInterfaceCore)
 	}
 }
+
+// TestASessionDeletedDuringAPassIsNotReAddedToTheDatapath is the third writer this
+// invariant has to survive, and the one the per-FAR ordering cannot express.
+//
+// A pass takes its mark, plans a session's FAR bodies, drops the lock and pushes. A
+// *modification* landing in that interval is caught by comparing each FAR's write stamp
+// against the mark. A *deletion* is not: the session has no FARs left to compare stamps
+// against, and `sessionForgotten` removed its entries from the record without moving the
+// write counter — so the carry-over could not see the deletion, `e.programmed = fresh` put
+// the pass's own planned entries back, and the push re-added the FAR to the datapath after
+// the delete. Duplication reinstated on a session that has been torn down, recorded as
+// programmed, with nothing left to turn it off.
+//
+// **Asserted on the datapath operations rather than on the `programmed` map**, because the
+// map is this element's belief and the datapath is the fact: a fix that tidied the map while
+// still pushing would pass a map-level test and leave a subscriber's traffic being copied.
+func TestASessionDeletedDuringAPassIsNotReAddedToTheDatapath(t *testing.T) {
+	sessions := NewInMemoryStore()
+	sess := storedSession(500, "10.250.0.14")
+	if err := sessions.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	dp := newRecordingDP()
+
+	tasks := store.New()
+	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) uint8 {
+		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
+	}, nil)
+	t.Cleanup(e.stop)
+	e.addSource(sessions)
+
+	// The session is deleted between the pass's plan and its push, which is the interleaving
+	// the dropped lock admits. Driven through the seam rather than by racing goroutines: the
+	// window is a few instructions wide.
+	var once sync.Once
+	beforeTransactPush = func() {
+		once.Do(func() {
+			// Exactly what the deletion handler does: remove the session from the store and
+			// tell the interception plane it has gone.
+			if err := sessions.DeleteSession(500); err != nil {
+				t.Errorf("DeleteSession: %v", err)
+			}
+			e.sessionForgotten(&sess)
+		})
+	}
+	t.Cleanup(func() { beforeTransactPush = nil })
+
+	if !tasks.Activate(ccTask("W1", ueAddr("10.250.0.14"))) {
+		t.Fatal("Activate failed")
+	}
+	e.retaskAndWait()
+
+	if _, programmed := dp.lastFor(1); programmed {
+		t.Error("a FAR was programmed into the datapath for a session that had already been " +
+			"deleted: the pass planned it, the session went, and the push re-added duplication " +
+			"to a session that no longer exists — so nothing will ever turn it off")
+	}
+
+	// And the record does not resurrect it either, which is what the next pass differences
+	// against.
+	e.mu.Lock()
+	held := 0
+	for ref := range e.programmed {
+		if ref.seid == 500 {
+			held++
+		}
+	}
+	e.mu.Unlock()
+
+	if held != 0 {
+		t.Errorf("the record holds %d entries for a deleted session: the pass's own map put "+
+			"them back over the deletion", held)
+	}
+}

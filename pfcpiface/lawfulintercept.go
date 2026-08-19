@@ -254,7 +254,8 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// still be tasked and can still be asked how it is — which is a reportable state
 	// a triggering function can act on. One that abandoned its own initialisation is
 	// in no state at all, and is indistinguishable from an element nobody tasked.
-	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids, s.faultProbes()...)
+	tasks, err := startTriggerListener(cfg, mat.ServerTLS(), issueReporter, enabler, s.ids,
+		s.reclaimUnreferencedSenders, s.faultProbes()...)
 	if err != nil {
 		// The enabler was started above and owns a worker goroutine. A partial
 		// initialisation that returns an error has to leave nothing running, or a
@@ -412,6 +413,63 @@ func (s *liShipper) destinationsInUse() []string {
 	}
 
 	return addrs
+}
+
+// reclaimUnreferencedSenders closes and drops the delivery client for every address no
+// trigger this element holds still names.
+//
+// **`senders` was append-only.** A destination is created on first use and never removed, so
+// destination churn — a warrant relabelled to a new MDF3, an agency's endpoint moved, a
+// triggering function that re-provisions after its own restart — accumulated a delivery
+// worker, a TLS connection and a keepalive timer per address for the life of the process. On
+// an element that also keepalives each of them, that is a growing set of connections to
+// mediation functions this element no longer answers for, and the keepalives on them are
+// indistinguishable at the far end from an element that is still delivering.
+//
+// Called wherever the tasking changes, which is the same event that changes the answer to
+// "which destinations are in use". Closing is what stops the worker and the keepalive; the
+// sender drains what it holds first, bounded by its own deadline.
+func (s *liShipper) reclaimUnreferencedSenders() {
+	s.mu.Lock()
+
+	inUse := make(map[string]bool)
+	for _, addr := range s.destinationsInUse() {
+		inUse[addr] = true
+	}
+
+	var stale []x2x3.Sender
+	for addr, sender := range s.senders {
+		if inUse[addr] {
+			continue
+		}
+		stale = append(stale, sender)
+		delete(s.senders, addr)
+	}
+	s.mu.Unlock()
+
+	// Outside the lock: Close drains the queue, and the delivery path takes this lock.
+	for _, sender := range stale {
+		//nolint:errcheck // a close failure loses nothing that was not already going
+		_ = sender.Close()
+	}
+}
+
+// close tears the shipper down: every delivery client it holds, whether or not a trigger
+// still names it.
+//
+// It exists because there was no teardown path at all — the shipper's senders lived as long
+// as the process, so a reconfiguration or a shutdown left workers running and connections
+// open to mediation functions with nothing left to send them.
+func (s *liShipper) close() {
+	s.mu.Lock()
+	senders := s.senders
+	s.senders = make(map[string]x2x3.Sender)
+	s.mu.Unlock()
+
+	for _, sender := range senders {
+		//nolint:errcheck // teardown; see reclaimUnreferencedSenders
+		_ = sender.Close()
+	}
 }
 
 // destinationHealth is the watcher's view of the same destinations

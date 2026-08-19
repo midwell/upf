@@ -63,7 +63,7 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 				DeactivateAllTasks: c.configured,
 			}
 
-			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 			if err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
@@ -157,7 +157,7 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 				RemoveAllDestinations: c.configured,
 			}
 
-			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err != nil {
+			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
 

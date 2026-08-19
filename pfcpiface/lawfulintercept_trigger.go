@@ -44,7 +44,7 @@ import (
 // knowledge is the shipper's. They are passed in rather than built here because this
 // function owns the interface and not the delivery.
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter,
-	enabler *ccEnabler, ids *x2x3.Identity, probes ...x1.FaultProbe,
+	enabler *ccEnabler, ids *x2x3.Identity, onTasking func(), probes ...x1.FaultProbe,
 ) (*store.Store, error) {
 	// Parse the fail-safe window before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
@@ -91,6 +91,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// could not express and so did not report at all.
 		x1.OnTaskChange(func(prev, next *types.InterceptTask) {
 			// Whatever duplication the tasking requires now, and only that.
+			//
+			// onTasking is the shipper's: which destinations are in use is a function of the
+			// tasking, so this is the one event that can make a delivery client
+			// unreferenced. Called on every branch, including the removal below.
+			if onTasking != nil {
+				defer onTasking()
+			}
 			if next != nil {
 				enabler.retask()
 
