@@ -136,11 +136,36 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 		}
 
 	case types.TargetPDRID, types.TargetQERID:
-		id, err := strconv.ParseUint(t.Value, 10, 32)
-		if err != nil {
-			return criterion{}, fmt.Errorf("li: invalid rule ID %q", t.Value)
-		}
-		c.ruleID = uint32(id)
+		// **Refused, and this is the sharpest refusal in the file.**
+		//
+		// A PDR ID and a QER ID are allocated *per PFCP session* and reused across sessions
+		// from a low number, and matchPDR compares them against every session this element
+		// holds. So a task naming PDR 2 duplicates, attributes and delivers the traffic of
+		// every subscriber whose session happens to hold a PDR of that number — under that
+		// warrant, indistinguishable downstream from the traffic it did name. That is
+		// interception of subjects the warrant does not name, which is the one failure this
+		// plane may never have.
+		//
+		// The library's own type documentation already said so: these identifiers "are
+		// scoped to a PFCP session, so a criterion using one is only unambiguous alongside
+		// the session it belongs to". The hazard was written down and then implemented.
+		//
+		// **A session cannot qualify them.** A task's identifiers are *alternatives* — the
+		// same package documents that, and a CC-POI is required to intercept traffic
+		// matching any of them — so naming an F-SEID beside the rule ID widens the
+		// interception rather than narrowing it. Nor can the filter recover it: every
+		// session holding a rule of that number holds it legitimately, so there is nothing
+		// in a duplicated copy that distinguishes the intended one.
+		//
+		// TS 33.128 table 6.2.3-7 lists these among the criteria a CC-POI supports, so
+		// refusing them is a declared gap rather than a silent one — README.md and the
+		// conformance disposition say which and why. Refusal is also the only conformant
+		// option available: accepting a criterion that over-collects is worse than
+		// answering that this element cannot honour it.
+		return criterion{}, fmt.Errorf(
+			"li: %s identifies a rule allocated per PFCP session and reused across sessions, so it "+
+				"cannot select one subject's traffic; this element refuses it rather than "+
+				"intercepting every session holding a rule of that number", t.Type)
 
 	case types.TargetNetworkInstance:
 		// xs:hexBinary on the wire; compared against the octets the PDI carried.
@@ -239,6 +264,26 @@ func parsePDRCriterion(value string) (*pdr, error) {
 		// instruction, not a description of traffic, and the address it yielded here
 		// belongs to a throwaway pool — so this criterion could never match anything.
 		return nil, fmt.Errorf("li: PDR criterion leaves the UE address to be allocated")
+	}
+	if rule.UPAllocateFteid {
+		// **The same case through the other field, and the same answer.** A CH F-TEID asks
+		// the UPF to choose the tunnel endpoint, so the criterion names a tunnel this
+		// element assigns rather than one it can recognise: whatever TEID the session holds,
+		// it was not in the criterion, so the rule can never compare equal and the
+		// interception is acknowledged and produces nothing.
+		//
+		// Two remedies were legitimate — refuse it, as the UE-address case above already
+		// is, or normalise the element-assigned fields out of sameRule as the
+		// session-assigned ones already are. **Refusal is the decision**, recorded here
+		// because it is a choice and not a derivation: a criterion that says "the tunnel the
+		// UPF chooses" identifies no traffic on its own, so normalising the field away
+		// would leave a criterion matching every session whose remaining fields agree —
+		// widening the interception to make an unusable criterion usable. Normalisation
+		// stays available if a triggering function ever needs it, and it would need its own
+		// requirement, because it changes what a PDR criterion *means*.
+		return nil, fmt.Errorf(
+			"li: PDR criterion leaves the tunnel endpoint to be allocated by this element, so it " +
+				"names no traffic it could match")
 	}
 
 	return &rule, nil
@@ -351,18 +396,12 @@ func (c criterion) matchPDR(p pdr) coverage {
 	case types.TargetTCPPort, types.TargetUDPPort:
 		return c.matchPort(p)
 
-	case types.TargetPDRID:
-		return exactIf(p.pdrID == c.ruleID)
-
-	case types.TargetQERID:
-		// A QER is shared by the PDRs it polices, so this selects each of them, and
-		// each exactly: the criterion is the QER's traffic, not a subset of it.
-		for _, q := range p.qerIDList {
-			if q == c.ruleID {
-				return coverExact
-			}
-		}
-
+	case types.TargetPDRID, types.TargetQERID:
+		// Unreachable: parseCriterion refuses these, because a rule identifier is
+		// allocated per PFCP session and reused, so matching it here selected the rule of
+		// that number in *every* session this element holds. Left as an explicit
+		// coverNone rather than deleted, so a criterion that somehow reached here matches
+		// nothing instead of falling through to the default and matching by accident.
 		return coverNone
 
 	case types.TargetNetworkInstance:
@@ -392,6 +431,21 @@ func (c criterion) matchPDR(p pdr) coverage {
 // interception ordered by port produces nothing on a session whose rules happen to
 // be wildcard, which is the common case.
 func (c criterion) matchPort(p pdr) coverage {
+	// **Coverage is computed from every dimension the criterion constrains, as a
+	// conjunction, rather than returned early from the first one checked.**
+	//
+	// A transport-port criterion constrains two things: the protocol and the port. The
+	// protocol was used only to *exclude* — a rule pinning a different protocol matched
+	// nothing — and never to widen, so a rule that pinned the port exactly and left the
+	// protocol unconstrained returned coverExact. Exact means the copy is delivered without
+	// inspection, so a TCP-port criterion delivered the UDP traffic on that port too:
+	// traffic the warrant does not name, under the warrant's own identifier. The `default:`
+	// branch below already noticed the interaction — "and the proto may be unconstrained
+	// too" — one case away from where it mattered.
+	//
+	// Written as a conjunction so that a dimension added later cannot silently reintroduce
+	// an exact match that is not exact: each dimension reports whether the rule pins it, and
+	// coverage is exact only where every one of them does.
 	if p.appFilter.protoMask != 0 && p.appFilter.proto != c.proto {
 		return coverNone
 	}
@@ -401,19 +455,29 @@ func (c criterion) matchPort(p pdr) coverage {
 		r = p.appFilter.srcPortRange
 	}
 
+	// The port dimension: does the rule carry this port, and does it carry only this port.
 	switch {
 	case r.isWildcardMatch():
 		// No port constraint: the traffic is in there, along with every other port.
 		return coverBroader
 	case c.port < r.low || c.port > r.high:
 		return coverNone
-	case r.isExactMatch():
-		return coverExact
-	default:
-		// A range containing the port, so the PDR also carries the rest of the range,
-		// and the proto may be unconstrained too.
-		return coverBroader
 	}
+	portExact := r.isExactMatch()
+
+	// The protocol dimension: the criterion names one, so a rule that does not pin it
+	// carries the other transports' traffic on the same port as well.
+	protoExact := p.appFilter.protoMask != 0
+
+	if portExact && protoExact {
+		return coverExact
+	}
+
+	// Anything else is broader than the criterion in at least one dimension, so the copy is
+	// inspected rather than assumed. The cost is a packet inspection on rules that pin a
+	// port and not a protocol, on a path that is already per copy of already-duplicated
+	// traffic — and the alternative is delivering traffic the warrant does not name.
+	return coverBroader
 }
 
 func exactIf(ok bool) coverage {

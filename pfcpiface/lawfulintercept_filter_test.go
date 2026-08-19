@@ -142,9 +142,15 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
 		},
 		{
-			name:        "QER ID covers the whole session, both PDRs being policed",
+			// A QER ID used to appear here, covering the whole session because both its
+			// PDRs are policed by the QER. It is gone with the criterion: a rule identifier
+			// is allocated per PFCP session and reused, so it selected the rule of that
+			// number in every session this element holds, and the criterion is now refused.
+			// The network instance above covers the same shape — a criterion broad enough
+			// to make the filter trivial — without encoding the defect.
+			name:        "network instance again, on the wildcard session",
 			session:     wildcardSession(),
-			ids:         []types.TargetIdentifier{{Type: types.TargetQERID, Value: "4"}},
+			ids:         []types.TargetIdentifier{{Type: types.TargetNetworkInstance, Value: niHex}},
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
 		},
 		{
@@ -173,9 +179,15 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			wantTrivial: false, wantUplink: false, wantDownlink: true,
 		},
 		{
-			name:        "PDR ID selects the direction of that rule",
-			session:     sharedFARSession(),
-			ids:         []types.TargetIdentifier{{Type: types.TargetPDRID, Value: "2"}},
+			// A PDR ID used to appear here, selecting the direction of that rule. Gone with
+			// the criterion, for the reason above; the outbound-direction case immediately
+			// preceding it asserts the same one-direction property with a criterion that
+			// selects one subject's traffic.
+			name:    "outbound direction again, on the shared-FAR session",
+			session: sharedFARSession(),
+			ids: []types.TargetIdentifier{
+				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
+			},
 			wantTrivial: false, wantUplink: false, wantDownlink: true,
 		},
 		{
@@ -184,7 +196,9 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			name:    "a broad criterion beside a narrow one covers everything",
 			session: sharedFARSession(),
 			ids: []types.TargetIdentifier{
-				{Type: types.TargetPDRID, Value: "2"},
+				// A one-direction criterion beside a session-wide one. It was a PDR ID
+				// before, which is refused now.
+				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
 				ueAddr("10.250.0.9"),
 			},
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
