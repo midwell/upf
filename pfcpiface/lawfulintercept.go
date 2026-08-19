@@ -727,32 +727,12 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	// buys is not the observation but its promptness: without it the ADMF would learn
 	// of a failed destination one sampling interval after this element did, which
 	// would be a regression dressed up as a refactor.
-	// **Except for one error, which is not about the destination at all.**
-	// ErrUnitDropped says delivery to this MDF3 is working and one content copy of it
-	// was lost: a partial write on a stream framer cannot be resumed without corrupting
-	// the framing, so the unit is dropped whole and the connection is remade. The
-	// library deliberately stops calling that unreachability — a healthy MDF must not be
-	// reported unreachable over one truncated write — and these hooks discarded the
-	// error, so the loss was reported by nothing while the watcher went on sampling a
-	// destination it correctly considered reachable. Content missing from an agency's
-	// record with every channel that could have said so reporting normality.
-	//
-	// Reported as x3DeliveryLost, the same condition a full queue raises: from the
-	// agency's side the two are one fact — a copy this element made and did not deliver.
-	lost := func(err error) {
-		if errors.Is(err, x2x3.ErrUnitDropped) {
-			s.report(x1.NEIssueX3DeliveryLost,
-				"a content copy was partially written to a reachable mediation function and dropped")
-		}
-		s.watcher.Nudge()
-	}
-
 	keepalive := s.keepalive
-	keepalive.OnFault = lost
+	keepalive.OnFault = s.reportDeliveryError
 
 	sender := x2x3.NewAsyncSender(
 		x2x3.NewClient(addr, s.tlsConfig, keepalive), 0,
-		lost,
+		s.reportDeliveryError,
 		// A full queue is lost content, and it is not covered by the delivery-failure
 		// report above: that fires when the MDF is unreachable, whereas the queue
 		// overflows when the MDF is reachable but slower than the offered rate. Left
@@ -762,6 +742,32 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	s.senders[addr] = sender
 
 	return sender, nil
+}
+
+// reportDeliveryError is what this element does with a failure its delivery worker or its
+// keepalive reports — both hooks, because both carry the same errors.
+//
+// **The error is inspected, not discarded.** ErrUnitDropped says delivery to this MDF3 is
+// working and one content copy of it was lost — a unit the write stopped inside, which the
+// library resends whole on a fresh connection and reports as dropped only where that resend
+// did not land either. The library deliberately refuses to call that unreachability, because
+// a healthy mediation function must not be reported unreachable over one truncated write; these
+// hooks discarded the error, so the loss was reported by nothing while the watcher went on
+// sampling a destination it correctly considered reachable. Content missing from an agency's
+// record with every channel that could have said so reporting normality.
+//
+// Reported as x3DeliveryLost, the same condition a full delivery queue raises: from the
+// agency's side the two are one fact — a copy this element made and did not deliver.
+//
+// A method rather than a closure inside senderFor so the mapping can be asserted directly.
+// What produces ErrUnitDropped is the transport, tested where it lives in li/x2x3; what this
+// element does with it is this function.
+func (s *liShipper) reportDeliveryError(err error) {
+	if errors.Is(err, x2x3.ErrUnitDropped) {
+		s.report(x1.NEIssueX3DeliveryLost,
+			"a content copy was partially written to a reachable mediation function and dropped")
+	}
+	s.watcher.Nudge()
 }
 
 // checkTag reports an unusable LI tag to the ADMF. The tag's fields reach liEncap
