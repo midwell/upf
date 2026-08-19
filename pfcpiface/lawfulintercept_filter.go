@@ -36,6 +36,16 @@ type copyFilter struct {
 	// built without session state to resolve against has to deliver, not discard.
 	all  bool
 	arms []filterArm
+	// frags remembers what the initial fragment of each fragmented datagram was classified
+	// as, so the datagram's later fragments — which carry no transport header — are
+	// delivered or dropped with it rather than being dropped for not repeating it.
+	//
+	// A pointer, because a copyFilter is held by value in a coveredTask and copied to every
+	// caller: the memo has to be the same one for every worker deciding copies of the same
+	// session under the same tasking. Nil for a filter with no inspecting arm, which is
+	// every filter that does not have to read the packet — so the ordinary paths allocate
+	// nothing.
+	frags *fragmentMemo
 }
 
 // filterArm is one criterion resolved against one session — enough to decide any
@@ -69,11 +79,16 @@ func filterFor(task types.InterceptTask, sess PFCPSession) copyFilter {
 		}
 	}
 
-	return filterFrom(criteria, sess)
+	return filterFrom(criteria, sess, nil)
 }
 
 // filterFrom resolves already-parsed criteria against one session.
-func filterFrom(criteria []criterion, sess PFCPSession) copyFilter {
+//
+// onLoss reports a fragment discarded because this element had no classification for its
+// datagram — the existing X3 content-loss condition. It is a parameter rather than reached
+// through anything, because the only caller that has a reporting channel is the enabler, and
+// a filter built without one (a test, or a shipper with no datapath) must still work.
+func filterFrom(criteria []criterion, sess PFCPSession, onLoss func()) copyFilter {
 	one := []PFCPSession{sess}
 
 	var f copyFilter
@@ -104,6 +119,17 @@ func filterFrom(criteria []criterion, sess PFCPSession) copyFilter {
 			return copyFilter{all: true}
 		}
 		f.arms = append(f.arms, arm)
+	}
+
+	// Only where something has to read the packet. A filter whose arms all settle on the
+	// datapath's own direction tag never looks at a fragment header, so it needs no memo and
+	// pays for none.
+	for _, a := range f.arms {
+		if a.inspect {
+			f.frags = newFragmentMemo(onLoss)
+
+			break
+		}
 	}
 
 	return f
@@ -140,12 +166,93 @@ func (f copyFilter) matches(action byte, frame []byte) bool {
 		if !a.inspect {
 			return true
 		}
-		if proto, port, ok := uePortOf(frame, uplink); ok && proto == a.proto && port == a.port {
+		if f.inspected(frame, uplink, a) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// inspected decides one inspecting arm against a copy, reading the packet.
+//
+// **A fragmented datagram is decided once, from the fragment that carries the transport
+// header, and every later fragment follows that decision.** Before this, a later fragment
+// simply had no ports to read: uePortOf reported false and the copy was dropped — every
+// non-initial fragment of a datagram this element had just decided was authorised. An agency
+// received the head of each datagram and nothing else, and downstream that is invisible,
+// because the dropped copies never reached framing so the X3 sequence has no gap in it.
+func (f copyFilter) inspected(frame []byte, uplink bool, a filterArm) bool {
+	l3, ok := ueNetworkLayer(frame, uplink)
+	if !ok {
+		return false
+	}
+
+	key, offset, more, ok := fragmentOf(l3, uplink)
+	if !ok {
+		// Not a header this element can read. Unchanged: a copy it cannot parse is not one
+		// it can confirm belongs to the criterion, and delivering on a guess is collection
+		// the warrant may not cover.
+		return false
+	}
+
+	// The ordinary case, and the one that must stay allocation-free: an unfragmented
+	// datagram carries its own transport header and settles on its own.
+	if offset == 0 && !more {
+		return f.portMatches(l3, uplink, a)
+	}
+
+	if offset == 0 {
+		// The initial fragment of a fragmented datagram. It carries the transport header, so
+		// it is decided normally — and the decision is remembered for the fragments that
+		// follow, which carry none.
+		matched := f.portMatches(l3, uplink, a)
+		f.frags.classify(key, matched)
+
+		return matched
+	}
+
+	// A later fragment. Its ports are not in it: the bytes at those offsets are payload,
+	// and the offset field is the far end's to choose.
+	if matched, known := f.frags.decision(key); known {
+		return matched
+	}
+
+	// No classification: the fragment arrived before the one carrying the transport header,
+	// or the decision expired, or the memo was at its ceiling. The copy is discarded — and
+	// **reported**, because this element cannot tell whether it was authorised and a loss it
+	// cannot see is the one thing this plane may not produce. A *known* non-match is not
+	// reported: dropping those fragments is what the criterion asked for.
+	//
+	// Holding such a fragment until its first arrives is deliberately not done; see
+	// lawfulintercept_fragment.go for why, and x2x3/CONFORMANCE.md, where the limit is
+	// declared rather than left to be discovered.
+	if f.frags != nil && f.frags.onLoss != nil {
+		f.frags.onLoss()
+	}
+
+	return false
+}
+
+// portMatches reads the transport header of a datagram that carries one and compares it
+// against the arm.
+func (f copyFilter) portMatches(l3 []byte, uplink bool, a filterArm) bool {
+	proto, transport, ok := transportOf(l3)
+	if !ok {
+		return false
+	}
+
+	src, dst, ok := portsOf(proto, transport)
+	if !ok {
+		return false
+	}
+
+	port := dst
+	if uplink {
+		port = src
+	}
+
+	return proto == a.proto && port == a.port
 }
 
 // uePortOf returns the target's own transport port in a teed copy, with the
@@ -161,19 +268,9 @@ func (f copyFilter) matches(action byte, frame []byte) bool {
 // The downlink copy is teed after GTP-U encapsulation, so the target's packet is
 // inside the tunnel and the target is its destination.
 func uePortOf(frame []byte, uplink bool) (uint8, uint16, bool) {
-	l3, format := networkLayerOf(frame)
-	if format == x2x3.PayloadFormatEthernet {
-		// networkLayerOf reports Ethernet when it found no network layer at all. The
-		// bytes it returns are then the frame as given, whose first nibble could still
-		// look like an IP version.
+	l3, ok := ueNetworkLayer(frame, uplink)
+	if !ok {
 		return 0, 0, false
-	}
-
-	if !uplink {
-		var ok bool
-		if l3, ok = gtpuPayloadOf(l3); !ok {
-			return 0, 0, false
-		}
 	}
 
 	proto, transport, ok := transportOf(l3)
@@ -191,6 +288,34 @@ func uePortOf(frame []byte, uplink bool) (uint8, uint16, bool) {
 	}
 
 	return proto, dst, true
+}
+
+// ueNetworkLayer returns the target's own IP header inside a teed copy.
+//
+// The two directions carry different things, which is the whole reason this is a function:
+// the uplink copy is teed after decapsulation, so it *is* the target's packet; the downlink
+// copy is teed after GTP-U encapsulation, so the target's packet is inside the tunnel.
+//
+// Extracted from uePortOf because the fragment decision needs the same bytes: reading the
+// header twice, once for the ports and once for the fragmentation state, would have walked the
+// tunnel twice on the one path in this element whose cost is per packet.
+func ueNetworkLayer(frame []byte, uplink bool) ([]byte, bool) {
+	l3, format := networkLayerOf(frame)
+	if format == x2x3.PayloadFormatEthernet {
+		// networkLayerOf reports Ethernet when it found no network layer at all. The
+		// bytes it returns are then the frame as given, whose first nibble could still
+		// look like an IP version.
+		return nil, false
+	}
+
+	if !uplink {
+		var ok bool
+		if l3, ok = gtpuPayloadOf(l3); !ok {
+			return nil, false
+		}
+	}
+
+	return l3, true
 }
 
 // transportOf skips an IP header and returns the protocol it carries with the bytes
