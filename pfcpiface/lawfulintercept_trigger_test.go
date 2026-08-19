@@ -864,6 +864,16 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	}
 }
 
+// correlationBytes is the correlation value as it reaches the numbering context: the
+// same big-endian encoding shipPDU puts in x2x3.PDU.CorrelationID. Written once so a
+// test cannot assert against a context the element never numbers under.
+func correlationBytes(v uint64) [x2x3.CorrelationIDLength]byte {
+	var corr [x2x3.CorrelationIDLength]byte
+	binary.BigEndian.PutUint64(corr[:], v)
+
+	return corr
+}
+
 // TestNumberingIsReleasedOnEveryKindOfRemoval: the sequence-numbering state belongs
 // to the tasking that created it, not to the circumstances of its removal. This
 // element holds one context per intercepted session, so a warrant that outlives
@@ -900,9 +910,16 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 
+	// **One ProductID for both.** They used to carry two different ones, which is the
+	// one arrangement in which the defect this test now also covers cannot appear: this
+	// element's triggering function allocates a task per (warrant, session, UPF) and
+	// gives them all the warrant's ProductID, so two live tasks sharing a delivery XID
+	// is the *ordinary* case here rather than an exotic one. With two XIDs, releasing
+	// numbering by XID happens to be correct.
 	type tasking struct{ trigger, warrant types.XID }
-	withdrawn := tasking{"11111111-1111-4111-8111-111111111111", "aaaaaaaa-1111-4111-8111-111111111111"}
-	bulked := tasking{"22222222-2222-4222-8222-222222222222", "bbbbbbbb-2222-4222-8222-222222222222"}
+	const oneWarrant = types.XID("aaaaaaaa-1111-4111-8111-111111111111")
+	withdrawn := tasking{"11111111-1111-4111-8111-111111111111", oneWarrant}
+	bulked := tasking{"22222222-2222-4222-8222-222222222222", oneWarrant}
 
 	for i, task := range []tasking{withdrawn, bulked} {
 		if err := req.ActivateTask(x1.Trigger{
@@ -914,9 +931,14 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("ActivateTask: %v", err)
 		}
-		// Number one PDU under each, as the shipper does when it delivers content:
-		// that is what creates the state this test is about.
-		ids.Attributes(task.warrant.Bytes(), [x2x3.CorrelationIDLength]byte{byte(i + 1)}, time.Now(), nil, nil)
+		// Number one PDU under each, as the shipper does when it delivers content: that
+		// is what creates the state this test is about.
+		//
+		// The correlation bytes are built the way the shipper builds them — big-endian,
+		// as x2x3.PDU.CorrelationID is filled — not as a byte pattern of this test's own.
+		// A hand-made pattern is a context the element never numbers under, so the
+		// release would be asserted against state nothing produced.
+		ids.Attributes(task.warrant.Bytes(), correlationBytes(uint64(i+1)), time.Now(), nil, nil)
 	}
 	if n := ids.Contexts(); n != 2 {
 		t.Fatalf("numbering contexts = %d, want 2 — the state this test tracks was never created", n)
@@ -926,7 +948,9 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 		t.Fatalf("DeactivateTask: %v", err)
 	}
 	if n := ids.Contexts(); n != 1 {
-		t.Errorf("numbering contexts = %d after an ordinary withdrawal, want 1 (the other task's)", n)
+		t.Errorf("numbering contexts = %d after an ordinary withdrawal, want 1 (the other task's): "+
+			"the two share a delivery XID, so releasing by XID takes the surviving session's "+
+			"numbering with it", n)
 	}
 
 	if body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", "smf-1", "upf-1")); strings.Contains(body, "errorCode") {
@@ -935,6 +959,232 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 	if n := ids.Contexts(); n != 0 {
 		t.Errorf("numbering contexts = %d after a bulk deactivation, want 0 — numbering "+
 			"outlived the tasking it belongs to", n)
+	}
+	// The fail-safe purge needs no case of its own, and that is a property of the library
+	// rather than an omission here: x1.purgeAllTasking is the one implementation behind
+	// both the bulk deactivation above and the keepalive lapse, differing only in the
+	// PurgeReason it reports, and it calls notifyRemoved per task — so the release is per
+	// task in both. What could have differed is exactly what this now checks: that
+	// releasing per context still empties the state when every task goes.
+}
+
+// nextSequenceNumber is the number the identity would put on the next PDU of a
+// context, read from the attributes it builds. It advances the context by one, which is
+// what a delivered PDU does — so a test asserts on the number rather than on how many
+// contexts exist.
+//
+// Reading the number is the point. A count of contexts passes against a release that
+// dropped the wrong entry and recreated it on the next PDU, which is precisely the
+// defect's shape: the surviving context looks present and starts again from zero.
+func nextSequenceNumber(t *testing.T, ids *x2x3.Identity, xid types.XID, corr uint64) uint32 {
+	t.Helper()
+
+	for _, a := range ids.Attributes(xid.Bytes(), correlationBytes(corr), time.Now(), nil, nil) {
+		if a.Type == x2x3.AttrSequenceNumber && len(a.Value) == 4 {
+			return binary.BigEndian.Uint32(a.Value)
+		}
+	}
+	t.Fatal("the identity built no sequence number attribute")
+
+	return 0
+}
+
+// TestEndingOneSessionDoesNotRenumberAnother is the numbering-integrity property at the
+// element, in the arrangement this element actually runs in.
+//
+// The CC Triggering Function allocates one task per (warrant, session, UPF) and gives
+// them all the warrant's ProductID, which is what goes on the wire as the XID. So one
+// delivery XID is shared by every session that warrant is intercepting here, and
+// releasing the numbering state *by XID* when one session ends restarts the numbering of
+// all the others.
+//
+// That is not a leak, it is a forgery. A sequence number is how a mediation function
+// detects loss on this interface, so numbering that resets under a live context makes
+// this element emit a sequence the receiver must read as duplication or as a gap — for a
+// warrant whose product is otherwise entirely correct. Under a target with two
+// concurrent PDU sessions, or under ULCL where a branching point and a session anchor
+// both serve one session, this is the ordinary case.
+func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+
+	// One warrant, two of its PDU sessions at this UPF. Same ProductID, different
+	// correlation values and different detection criteria — exactly what the triggering
+	// function sends.
+	const warrant = types.XID("aaaaaaaa-1111-4111-8111-111111111111")
+	sessionA := struct {
+		trigger types.XID
+		corr    uint64
+		seid    uint64
+	}{"11111111-1111-4111-8111-111111111111", 0x2632898145f4d191, 4242}
+	sessionB := struct {
+		trigger types.XID
+		corr    uint64
+		seid    uint64
+	}{"22222222-2222-4222-8222-222222222222", 0x7ab3120945f4d192, 4243}
+
+	for _, s := range []struct {
+		trigger types.XID
+		corr    uint64
+		seid    uint64
+	}{sessionA, sessionB} {
+		if err := req.ActivateTask(x1.Trigger{
+			XID:           s.trigger,
+			ProductID:     warrant,
+			CorrelationID: s.corr,
+			SEID:          s.seid,
+			DIDs:          []string{did},
+		}); err != nil {
+			t.Fatalf("ActivateTask: %v", err)
+		}
+	}
+
+	// Both sessions deliver content: three copies of A, three of B. The next number in
+	// each context is therefore 3.
+	for range 3 {
+		nextSequenceNumber(t, ids, warrant, sessionA.corr)
+		nextSequenceNumber(t, ids, warrant, sessionB.corr)
+	}
+
+	// Session A ends — an ordinary PDU-session release, which the triggering function
+	// turns into a DeactivateTask for that session's trigger alone. Session B is
+	// untouched and its interception is still live.
+	if err := req.DeactivateTask(sessionA.trigger); err != nil {
+		t.Fatalf("DeactivateTask: %v", err)
+	}
+
+	if got := nextSequenceNumber(t, ids, warrant, sessionB.corr); got != 3 {
+		t.Errorf("the surviving session's next xCC is numbered %d, want 3: ending one of this "+
+			"warrant's sessions restarted the numbering of another one it is still intercepting, "+
+			"so the mediation function receives duplicated sequence numbers under a live context "+
+			"— which is how it decides whether it has everything", got)
+	}
+
+	// And the ended session's context is gone: a new task under the same warrant and the
+	// same correlation value is a new context and starts at zero.
+	if got := nextSequenceNumber(t, ids, warrant, sessionA.corr); got != 0 {
+		t.Errorf("the released context resumed at %d, want 0", got)
+	}
+}
+
+// TestARelabelReleasesTheSupersededLabelsContextOnly is the modification side of the
+// same granularity question, and it has both halves because each is a way of getting it
+// wrong.
+//
+// A relabel moves the delivery XID, which is what the numbering is keyed by — so the
+// context under the superseded label is stranded, and released. But the triggering
+// function relabels a warrant's triggers one at a time, so while one is being modified
+// its sibling sessions are still delivering under the old label: releasing by XID would
+// take their numbering with it. And a modification that does not touch the labelling must
+// release nothing at all, because those contexts are the ones this task's own copies are
+// still using.
+func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
+	if err != nil {
+		t.Fatalf("load tf material: %v", err)
+	}
+
+	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+		t.Fatalf("startTriggerListener: %v", err)
+	}
+	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+
+	const did = "33333333-3333-4333-8333-333333333333"
+	if err := req.CreateDestination(x1.Destination{
+		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+	}); err != nil {
+		t.Fatalf("CreateDestination: %v", err)
+	}
+
+	const (
+		oldLabel = types.XID("aaaaaaaa-1111-4111-8111-111111111111")
+		newLabel = types.XID("cccccccc-3333-4333-8333-333333333333")
+		triggerA = types.XID("11111111-1111-4111-8111-111111111111")
+		triggerB = types.XID("22222222-2222-4222-8222-222222222222")
+	)
+	const corrA, corrB = uint64(0x2632898145f4d191), uint64(0x7ab3120945f4d192)
+
+	for _, tr := range []x1.Trigger{
+		{XID: triggerA, ProductID: oldLabel, CorrelationID: corrA, SEID: 4242, DIDs: []string{did}},
+		{XID: triggerB, ProductID: oldLabel, CorrelationID: corrB, SEID: 4243, DIDs: []string{did}},
+	} {
+		if err := req.ActivateTask(tr); err != nil {
+			t.Fatalf("ActivateTask: %v", err)
+		}
+	}
+
+	// Both sessions deliver, so both contexts exist under the old label.
+	for range 3 {
+		nextSequenceNumber(t, ids, oldLabel, corrA)
+		nextSequenceNumber(t, ids, oldLabel, corrB)
+	}
+
+	// A modification that changes nothing the numbering depends on: same label. Nothing
+	// may be released, or this task's own next copy repeats a number.
+	if err := req.ModifyTask(x1.Trigger{
+		XID: triggerA, ProductID: oldLabel, CorrelationID: corrA, SEID: 4242, DIDs: []string{did},
+	}); err != nil {
+		t.Fatalf("ModifyTask (no relabel): %v", err)
+	}
+	if got := nextSequenceNumber(t, ids, oldLabel, corrA); got != 3 {
+		t.Fatalf("a modification that did not move the label renumbered the context to %d, want 3: "+
+			"the next copy repeats a sequence number the mediation function has already seen, which "+
+			"is how it detects loss", got)
+	}
+
+	// Now the relabel of session A alone, which is how the triggering function
+	// propagates one: session B is still delivering under the old label.
+	if err := req.ModifyTask(x1.Trigger{
+		XID: triggerA, ProductID: newLabel, CorrelationID: corrA, SEID: 4242, DIDs: []string{did},
+	}); err != nil {
+		t.Fatalf("ModifyTask (relabel): %v", err)
+	}
+
+	if got := nextSequenceNumber(t, ids, oldLabel, corrB); got != 3 {
+		t.Errorf("a sibling session still delivering under the old label was renumbered to %d, "+
+			"want 3: relabelling one of a warrant's triggers released the numbering of the ones "+
+			"the ADMF has not relabelled yet", got)
+	}
+	// The superseded context is gone rather than held for the life of the process.
+	if got := nextSequenceNumber(t, ids, oldLabel, corrA); got != 0 {
+		t.Errorf("the superseded label's context resumed at %d, want 0 — it was left behind, and "+
+			"nothing will ever number under it again", got)
 	}
 }
 
