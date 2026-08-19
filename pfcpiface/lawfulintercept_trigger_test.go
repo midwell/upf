@@ -166,7 +166,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		X1Listen: freePort(t),
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	rec := &recordingReporter{}
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: busy.Addr().String()}
 
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err == nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err == nil {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
@@ -493,7 +493,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		TriggerKeepalive: "1s",
 	}
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), orderingReporter{note: note},
-		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	// Nothing may be left listening when the window is rejected.
 	addr := freePort(t)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
-	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint)); err == nil {
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
 	var lc net.ListenConfig
@@ -815,7 +815,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	// purge would be this element mislabelling a withdrawal it was asked for.
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 
@@ -1021,7 +1021,7 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
@@ -1120,7 +1120,7 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 
 	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
 	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids); err != nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
@@ -1218,5 +1218,102 @@ func TestTriggerKeepaliveHasAFloor(t *testing.T) {
 		if got := tooShortTriggerKeepalive(d); got != tc.reject {
 			t.Errorf("tooShortTriggerKeepalive(%q) = %v, want %v", tc.window, got, tc.reject)
 		}
+	}
+}
+
+// TestASenderNoTriggerReferencesIsClosed is the reclamation half of the delivery pool.
+//
+// `senders` was append-only: a delivery client is created on first use and was never
+// removed, so destination churn — a warrant relabelled to a new MDF3, an agency's endpoint
+// moved, a triggering function re-provisioning after its own restart — accumulated a
+// delivery worker, a TLS connection and a keepalive timer per address for the life of the
+// process. Worse than a leak: this element keepalives each of them, and a keepalive is
+// indistinguishable at the far end from an element that is still delivering, so it holds off
+// the fail-safe of a mediation function it has nothing left to send.
+func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
+	dir := t.TempDir()
+	caPath, caCert, caKey := liCA(t, dir)
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
+	if err != nil {
+		t.Fatalf("load upf material: %v", err)
+	}
+
+	tasks := store.New()
+	s := &liShipper{
+		tasks:     tasks,
+		tlsConfig: upfMat.ClientTLS(),
+		senders:   make(map[string]x2x3.Sender),
+		ids:       x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		keepalive: x2x3.KeepaliveConfig{Disabled: true},
+	}
+
+	const (
+		oldAddr = "192.0.2.1:42069"
+		newAddr = "192.0.2.9:42069"
+	)
+	warrant := types.InterceptTask{
+		XID:      "11111111-1111-4111-8111-111111111111",
+		Products: []types.ProductType{types.ProductCC},
+		DIDs:     []string{"33333333-3333-4333-8333-333333333333"},
+		Deliveries: []types.DeliveryEndpoint{
+			{DID: "33333333-3333-4333-8333-333333333333", Type: types.DeliveryX3, Address: oldAddr},
+		},
+	}
+	if !tasks.Activate(warrant) {
+		t.Fatal("Activate failed")
+	}
+
+	// Content goes to the destination the trigger names, which is what creates the sender.
+	if _, err := s.senderFor(oldAddr); err != nil {
+		t.Fatalf("senderFor: %v", err)
+	}
+	if n := len(s.senders); n != 1 {
+		t.Fatalf("holding %d senders, want 1", n)
+	}
+
+	// The warrant is relabelled to a different endpoint — an ordinary ModifyTask, and the
+	// event that makes the old address unreferenced.
+	relabelled := warrant
+	relabelled.Deliveries = []types.DeliveryEndpoint{
+		{DID: "33333333-3333-4333-8333-333333333333", Type: types.DeliveryX3, Address: newAddr},
+	}
+	if !tasks.Activate(relabelled) {
+		t.Fatal("re-activating the relabelled task failed")
+	}
+	if _, err := s.senderFor(newAddr); err != nil {
+		t.Fatalf("senderFor: %v", err)
+	}
+
+	s.reclaimUnreferencedSenders()
+
+	s.mu.Lock()
+	_, oldHeld := s.senders[oldAddr]
+	_, newHeld := s.senders[newAddr]
+	held := len(s.senders)
+	s.mu.Unlock()
+
+	if oldHeld {
+		t.Error("the delivery client for an endpoint no trigger names is still held: its worker " +
+			"runs and its keepalives keep reaching a mediation function this element has nothing " +
+			"left to send, which holds off that peer's own fail-safe")
+	}
+	if !newHeld {
+		t.Error("the delivery client for the endpoint the trigger now names was reclaimed")
+	}
+	if held != 1 {
+		t.Errorf("holding %d senders after reclamation, want 1", held)
+	}
+
+	// And the teardown takes the rest, which there was no path for at all.
+	s.close()
+
+	s.mu.Lock()
+	remaining := len(s.senders)
+	s.mu.Unlock()
+
+	if remaining != 0 {
+		t.Errorf("holding %d senders after teardown, want 0: a reconfiguration or a shutdown left "+
+			"workers running and connections open with nothing left to send them", remaining)
 	}
 }

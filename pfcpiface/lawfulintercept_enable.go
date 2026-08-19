@@ -89,6 +89,16 @@ type ccEnabler struct {
 	// G would see its own G on entries written during it and discard them anyway,
 	// so conflating the two silently defeats the carry-over below.
 	writes uint64
+	// forgotten records, per session, the write stamp at which this element learned the
+	// session was gone. It is what lets a pass planned from an older view be told that the
+	// session it planned for no longer exists: the pass's own map still holds the entries
+	// it built, and without this the carry-over could not see the deletion — so
+	// `e.programmed = fresh` put them back and the pass's push could re-add the FAR to the
+	// datapath after the delete.
+	//
+	// Entries are dropped by the pass that acts on them, so this is bounded by the
+	// deletions a single pass can miss rather than by uptime.
+	forgotten map[uint64]uint64
 	// push writes changed rules to the datapath and answers with the datapath's
 	// cause. Separate field so a test can observe what would be programmed without a
 	// datapath.
@@ -161,6 +171,7 @@ func newCCEnabler(
 		push:       push,
 		report:     report,
 		programmed: make(map[farRef]programmedFAR),
+		forgotten:  make(map[uint64]uint64),
 		covered:    make(map[uint64]coveredEntry),
 	}
 	e.reparse()
@@ -548,6 +559,15 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
 // The entries are only a record of what the datapath was last told. Dropping them
 // for a session that no longer exists cannot lose an instruction, because there
 // is nothing left to instruct.
+//
+// **It moves the write counter, and that is what makes the deletion visible to a pass
+// already running.** A pass takes `mark` from `writes` at its start, rebuilds `fresh` from
+// the sessions it walked, and at the end carries over any entry stamped past the mark. A
+// deletion that did not move the counter was therefore invisible to the carry-over: the
+// pass's own `fresh` map still held the entries it had planned from the session before it
+// went, `e.programmed = fresh` put them back, and the push could re-add the FAR to the
+// datapath *after* the delete — duplication reinstated on a session that has been torn
+// down, recorded as programmed, with nothing left to turn it off.
 func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
 	if e == nil || s == nil {
 		return
@@ -557,6 +577,12 @@ func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// The same stamp sessionProgrammed takes, for the same reason: a pass holding an older
+	// view must lose to a writer that has seen the session's real state — and a deletion is
+	// the most authoritative statement about a session there is.
+	e.writes++
+	e.forgotten[s.localSEID] = e.writes
 
 	for i := range s.fars {
 		delete(e.programmed, farRef{seid: s.localSEID, farID: s.fars[i].farID})
@@ -705,6 +731,29 @@ func (e *ccEnabler) transact() {
 				}
 
 				e.mu.Lock()
+				// **The session itself, before any of its FARs.** This extends the
+				// per-FAR test below to the one thing that test cannot express: a session
+				// *deleted* mid-pass has no FARs left to compare stamps against, so
+				// nothing in the per-FAR loop would notice, and the push would re-add a
+				// FAR to the datapath after the delete — duplication reinstated on a
+				// session that has been torn down, with nothing left to turn it off.
+				//
+				// sessionForgotten stamps the deletion into the same counter the writes
+				// use, so "the session went after this pass started" is the same
+				// comparison as "this FAR was written after this pass started".
+				if gone, deleted := e.forgotten[sess.localSEID]; deleted && gone > mark {
+					e.mu.Unlock()
+
+					// Its entries must not be carried into the conclusion either: the
+					// deletion already removed them from e.programmed, and fresh is this
+					// pass's own map.
+					for i := range sess.fars {
+						delete(fresh, farRef{seid: sess.localSEID, farID: sess.fars[i].farID})
+					}
+
+					continue
+				}
+
 				kept := make([]far, 0, len(changed))
 				keptPrior := make([]priorEntry, 0, len(prior))
 				for i := range changed {
@@ -759,6 +808,20 @@ func (e *ccEnabler) transact() {
 		}
 	}
 	e.programmed = fresh
+
+	// The deletions that predate this pass: it read the world after them, so no pass will
+	// ever need to be told about them again. The ones stamped *during* this pass were acted
+	// on above and are dropped by the next pass, whose mark is past them — the worker is
+	// serial, so no pass with an older mark can still be running.
+	//
+	// Reclaimed at all because a map that grows with every released session and is never
+	// emptied is precisely the leak sessionForgotten exists to prevent, reintroduced by its
+	// own bookkeeping.
+	for seid, gone := range e.forgotten {
+		if gone <= mark {
+			delete(e.forgotten, seid)
+		}
+	}
 	e.mu.Unlock()
 }
 
