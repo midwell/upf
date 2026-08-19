@@ -45,8 +45,30 @@ type PacketForwardingRules struct {
 // worker through sessionFor. Neither file mentions this one, which is why the property
 // is written down at both ends.
 func (p PacketForwardingRules) privateCopy() PacketForwardingRules {
+	pdrs := cloneRules(p.pdrs)
+	// **One level deeper, because one rule field is itself a slice.** Copying the three
+	// rule slices copies each rule struct, and a struct copy of a pdr copies its
+	// qerIDList's *header*: the backing array stays the one every reader is reading.
+	//
+	// MarkSessionQer mutates that array in place on every session modification
+	// (session_qer.go) — it removes the session QER's id and appends it at the end, which
+	// is a shift inside the array — while resolveCovering evaluates a TargetQERID or
+	// TargetPDR criterion against it from a framing worker and transact reads it on the
+	// enabler's worker. Neither of those files mentions this one, and neither mentions
+	// session_qer.go: the invisibility is what made a copy that stops one level short
+	// look complete. Nothing else nested needs this — far and applicationFilter are
+	// all-scalar, and qerIDList is the only slice-typed field in pdr.
+	for i := range pdrs {
+		// Only where there is one, so a rule that carried no QER list keeps carrying
+		// none: nil and empty are the same to every reader here, but this copy has no
+		// business changing which one a rule holds.
+		if pdrs[i].qerIDList != nil {
+			pdrs[i].qerIDList = cloneRules(pdrs[i].qerIDList)
+		}
+	}
+
 	return PacketForwardingRules{
-		pdrs: cloneRules(p.pdrs),
+		pdrs: pdrs,
 		fars: cloneRules(p.fars),
 		qers: cloneRules(p.qers),
 	}
