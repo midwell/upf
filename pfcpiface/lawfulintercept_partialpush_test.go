@@ -124,3 +124,85 @@ func TestARuleLeftUnpushedIsStillProgrammedOffWhenTheDatapathRecovers(t *testing
 			"left in this element can turn it off")
 	}
 }
+
+// TestADivergentRecordDoesNotMakeOverCollectionPermanent is the assertion that bounds the harm
+// when the record is wrong in the one direction it must never be wrong in.
+//
+// The record is the element's only memory of what the datapath holds, and the re-derivation
+// skips any FAR whose recorded value already equals what the tasking implies. So a record that
+// says "not duplicating" while the datapath *is* used to be unrecoverable: the element computed
+// "nothing should duplicate", saw its record agreeing, and did nothing — while a subscriber's
+// traffic went on being copied under no authority. Invisible from both ends, because the
+// element's own account said duplication was off and the copies were dropped as unattributable
+// rather than delivered.
+//
+// **This state was reached on a live deployment and the path that produced it is not known.** It
+// did not reproduce in seven consecutive runs of the section that exposed it against a freshly
+// started pod. So this test does not reproduce a cause: it corrupts the record directly, which
+// is the state whatever the cause, and asserts the element recovers on the next pass.
+func TestADivergentRecordDoesNotMakeOverCollectionPermanent(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.settle(t)
+
+	if !f.duplicates(t, 100, 1) {
+		t.Fatal("the tasked session is not duplicated, so there is no divergence to create")
+	}
+
+	// The divergence: the datapath is duplicating and the element's record says it is not.
+	// Written directly rather than provoked, because the provoking path is unknown — and a test
+	// that waited for it would assert nothing.
+	f.e.mu.Lock()
+	f.e.programmed[farRef{seid: 100, farID: 1}] = programmedFAR{duplicating: false, written: f.e.writes}
+	f.e.mu.Unlock()
+
+	if value, held := f.recorded(100, 1); !held || value {
+		t.Fatalf("the record was not corrupted as intended (held=%v value=%v)", held, value)
+	}
+
+	// The warrant is withdrawn. Every copy from here on is over-collection, and the record the
+	// element would normally trust says there is nothing to turn off.
+	f.deactivate(t, "W1")
+	f.settle(t)
+
+	if f.duplicates(t, 100, 1) {
+		t.Error("the datapath is still duplicating after the warrant was withdrawn, because the " +
+			"element's record claimed it was already off. A subscriber's traffic is being copied " +
+			"under no authority, the element's own account says otherwise, and no later " +
+			"re-derivation will look at this rule again")
+	}
+}
+
+// TestAFARNeverTurnedOnIsNotPushedRepeatedly keeps the remedy from costing what it saves.
+//
+// Refusing to trust the record in the "off" direction is only affordable because it applies to
+// FARs this element has *ever* turned on, which is a small and shrinking set. Applied to every
+// FAR it would mean a full datapath rewrite on every pass, for sessions no warrant has ever
+// touched.
+func TestAFARNeverTurnedOnIsNotPushedRepeatedly(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	// A second session no criterion will ever select.
+	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.settle(t)
+
+	before := f.pushCount()
+	// Several passes, with no tasking change that concerns the untouched session.
+	for range 3 {
+		f.e.retaskAndWait()
+	}
+	f.settle(t)
+
+	// The untouched session's FARs were never duplicating, so nothing about them should reach
+	// the datapath however many passes run.
+	if f.duplicates(t, 200, 1) || f.duplicates(t, 200, 2) {
+		t.Error("a session no warrant covers is being duplicated")
+	}
+	if after := f.pushCount(); after > before+3 {
+		t.Errorf("%d pushes for %d passes over a session nothing selects; the remedy must apply "+
+			"to FARs this element has turned on, not to every FAR it can see",
+			after-before, 3)
+	}
+}

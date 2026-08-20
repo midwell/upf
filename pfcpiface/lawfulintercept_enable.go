@@ -99,6 +99,31 @@ type ccEnabler struct {
 	// Entries are dropped by the pass that acts on them, so this is bounded by the
 	// deletions a single pass can miss rather than by uptime.
 	forgotten map[uint64]uint64
+	// everDuplicated is every FAR this element has ever told the datapath to duplicate, and it
+	// is never cleared while the process lives.
+	//
+	// **It exists because `programmed` is the only memory of what the datapath holds, and a
+	// record that is wrong in the "not duplicating" direction is unrecoverable.** The
+	// re-derivation skips any FAR whose recorded value already equals what the tasking implies,
+	// so once the record says "off" while the datapath is duplicating, no later pass mentions
+	// that FAR again: the element computes "nothing should duplicate", sees its record agreeing,
+	// and does nothing while a subscriber's traffic goes on being copied. Nothing on either side
+	// can see it — the element's own account says duplication is off, and the copies are dropped
+	// as unattributable rather than delivered, so no agency sees them either.
+	//
+	// That state was reached on a live deployment. What produced it is *not* established: it did
+	// not reproduce in seven consecutive runs of the section that exposed it against a freshly
+	// started pod, and this set is deliberately not a fix for any particular path. It is a fix
+	// for the *permanence*, which is the part that makes the harm unbounded — with it, the
+	// element tells the datapath "off" for every FAR it has ever turned on, whatever it believes,
+	// so a divergence lasts until the next re-derivation instead of until the pod restarts.
+	//
+	// **Monotone on purpose.** The bug class is an entry being wrongly overwritten to false, and
+	// a set that only grows has no such path. It is not pruned when a session goes away either,
+	// because a later session can be allocated the same SEID and inherit a stale datapath rule —
+	// which is the most plausible route to the state observed. It costs one map entry per FAR
+	// ever intercepted, which for lawful interception is a handful.
+	everDuplicated map[farRef]bool
 	// forgottenFARs is the same record one level down: the write stamp at which a session
 	// *modification* removed one FAR while the session itself carried on.
 	//
@@ -189,13 +214,14 @@ func newCCEnabler(
 	report func(issueType, description string),
 ) *ccEnabler {
 	e := &ccEnabler{
-		tasks:         tasks,
-		push:          push,
-		report:        report,
-		programmed:    make(map[farRef]programmedFAR),
-		forgotten:     make(map[uint64]uint64),
-		forgottenFARs: make(map[farRef]uint64),
-		covered:       make(map[uint64]coveredEntry),
+		tasks:          tasks,
+		everDuplicated: make(map[farRef]bool),
+		push:           push,
+		report:         report,
+		programmed:     make(map[farRef]programmedFAR),
+		forgotten:      make(map[uint64]uint64),
+		forgottenFARs:  make(map[farRef]uint64),
+		covered:        make(map[uint64]coveredEntry),
 	}
 	e.reparse()
 	e.pending = sync.NewCond(&e.mu)
@@ -564,6 +590,9 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
 	for i := range pushed {
 		ref := farRef{seid: s.localSEID, farID: pushed[i].farID}
 		e.programmed[ref] = programmedFAR{duplicating: pushed[i].liDuplicate, written: stamp}
+		if pushed[i].liDuplicate {
+			e.everDuplicated[ref] = true
+		}
 	}
 	// Duplicating, because a copy running under tasking that may since have been
 	// withdrawn is the thing that must be re-derived. Changed, because a
@@ -730,9 +759,13 @@ func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
 	stamp := e.writes
 
 	for i := range fars {
-		e.programmed[farRef{seid: seid, farID: fars[i].farID}] = programmedFAR{
+		ref := farRef{seid: seid, farID: fars[i].farID}
+		e.programmed[ref] = programmedFAR{
 			duplicating: fars[i].liDuplicate,
 			written:     stamp,
+		}
+		if fars[i].liDuplicate {
+			e.everDuplicated[ref] = true
 		}
 	}
 }
@@ -842,7 +875,23 @@ func (e *ccEnabler) transact() {
 					continue
 				}
 				fresh[ref] = programmedFAR{duplicating: want[ref.farID], written: mark}
-				if e.programmed[ref].duplicating == want[ref.farID] {
+				if want[ref.farID] {
+					// Told to duplicate, so it joins the set that is never trusted-to-be-off
+					// again. Recorded before the push: a push that is refused leaves the
+					// datapath as it was, and a FAR wrongly *in* this set costs one redundant
+					// write per pass, while one wrongly out of it costs unbounded
+					// over-collection.
+					e.everDuplicated[ref] = true
+				}
+				// A record that agrees is normally enough to skip — that is what the record is
+				// for. **Except when the answer is "off" and this element has ever turned this
+				// FAR on**, in which case the record is exactly what cannot be trusted: if it
+				// wrongly says "off" the datapath keeps duplicating and no later pass will ever
+				// look again. See everDuplicated. The cost is one redundant write per pass per
+				// FAR that has been turned off, which is a small and shrinking set; the harm it
+				// removes is a subscriber's traffic being copied under no authority at all.
+				if e.programmed[ref].duplicating == want[ref.farID] &&
+					!(!want[ref.farID] && e.everDuplicated[ref]) {
 					continue
 				}
 				f := sess.fars[i]
