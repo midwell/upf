@@ -601,10 +601,21 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
 	//
 	// Over the session rather than over pushed, per the note above: a FAR nobody pushed can
 	// still be one whose answer this modification changed.
+	// **And a FAR this element has ever turned on is notable whatever the record says**, for the
+	// same reason the pass no longer trusts the record in the "off" direction: in the diverged
+	// state both the record and the session's own flag read false, so neither of the two tests
+	// above fires, no pass is requested, and the remedy in transact never gets the chance to
+	// run. Distrusting the record when deciding what to *do* and trusting it when deciding
+	// whether to *look* would leave the fix half-wired — it would work only when some other
+	// event happened to ask for a pass.
+	//
+	// Bounded by the same small set: one pass request per session event touching a FAR that has
+	// ever been intercepted, which is what a re-derivation is cheap enough for.
 	notable := false
 	for i := range s.fars {
 		ref := farRef{seid: s.localSEID, farID: s.fars[i].farID}
-		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate {
+		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate ||
+			e.everDuplicated[ref] {
 			notable = true
 
 			break
