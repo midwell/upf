@@ -1243,11 +1243,11 @@ func (e *ccEnabler) taskFaults(xid types.XID) []x1.X1Error {
 
 	switch {
 	case selecting == 0:
-		return []x1.X1Error{x1.TaskFault(
-			"no session this element holds carries traffic this task selects, so this " +
+		return []x1.X1Error{x1.TaskFault(x1.TaskIssueNoTrafficSelected,
+			"no session this element holds carries traffic this task selects, so this "+
 				"interception is producing nothing")}
 	case undup > 0:
-		return []x1.X1Error{x1.TaskFault(fmt.Sprintf(
+		return []x1.X1Error{x1.TaskFault(x1.TaskIssueDuplicationNotProgrammed, fmt.Sprintf(
 			"the datapath is not duplicating %d forwarding rule(s) this task requires, across "+
 				"%d session(s) it selects", undup, selecting))}
 	}
