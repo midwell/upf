@@ -91,6 +91,11 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// where that matters most, since a dropped copy leaves no record anywhere else for
 		// the discrepancy to show up in.
 		x1.WithDestinationReachability(unreachable),
+		// And at task scope, which is the one a triggering function can act on. The two above
+		// tell it that something at this point of interception is wrong; this tells it which of
+		// the warrants it installed is affected, which is what `triggerFaulty` needs and could
+		// not be raised without.
+		x1.WithTaskFaults(enabler.taskFaults),
 		// One hook for the whole lifecycle: an activation, a modification and a
 		// removal all change what this datapath must duplicate, and all of them are
 		// answered the same way — by re-deriving duplication from the tasking that
