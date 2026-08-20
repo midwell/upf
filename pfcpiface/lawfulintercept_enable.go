@@ -1116,3 +1116,103 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 
 	return out
 }
+
+// taskFaults answers what is wrong with one task's interception, now, for the triggering
+// function that asks — see x1.WithTaskFaults.
+//
+// **Computed, never stored, and the two conditions it reports are the ones a CC-POI can
+// re-observe.** A refusal from the datapath is an event; whether this element is duplicating
+// what a task requires is a state, and it is the state that matters — it is equally true after a
+// refusal, after a push that was lost, and after a FAR that was never programmed at all. So the
+// question asked here is not "did something fail" but "does the record of what the datapath was
+// told match what this task's criteria select":
+//
+//   - Traffic this task selects that the datapath is not duplicating. The record is only an
+//     account of what the datapath was last told, which is exactly the right authority for this
+//     question: an entry saying `duplicating: false`, or no entry at all, means no copy is being
+//     made whatever the tasking says should happen.
+//   - No session at all that this task's criteria select. A CC-POI's task is installed by a
+//     triggering function against traffic that exists, so a task selecting nothing is an
+//     interception producing nothing — and the answer says what was observed rather than
+//     accusing anybody, because a session torn down and one never established look the same from
+//     here.
+//
+// **Reported against the task and nowhere else.** Both conditions are already reported at
+// element scope, which is what a triggering function has had to work with: it learns that
+// something at this point of interception is wrong and cannot tell which of the warrants it
+// installed is affected. That attribution is the whole difference, and it is why `triggerFaulty`
+// could not be raised for one warrant.
+//
+// It reads the parsed snapshot rather than re-parsing, so the criteria are the same ones the
+// shipping path resolves copies against — an answer computed from a second parse could differ
+// from the interception it describes.
+//
+// A task the snapshot does not carry answers nothing: either it requires no content, in which
+// case this element has nothing to say about it, or its criteria do not parse, which activation
+// already refuses.
+func (e *ccEnabler) taskFaults(xid types.XID) []x1.X1Error {
+	if e == nil {
+		return nil
+	}
+	snapshot := e.parsed.Load()
+	if snapshot == nil {
+		return nil
+	}
+
+	var criteria []criterion
+	for i := range *snapshot {
+		if (*snapshot)[i].task.XID == xid {
+			criteria = (*snapshot)[i].criteria
+
+			break
+		}
+	}
+	if len(criteria) == 0 {
+		return nil
+	}
+
+	e.mu.Lock()
+	sources := append([]SessionsStore(nil), e.sources...)
+	e.mu.Unlock()
+
+	selecting, undup := 0, 0
+	for _, src := range sources {
+		if src == nil {
+			continue
+		}
+		for _, sess := range src.GetAllSessions() {
+			one := []PFCPSession{sess}
+			want := map[uint32]bool{}
+			for _, c := range criteria {
+				for _, ref := range c.resolve(one) {
+					want[ref.farID] = true
+				}
+			}
+			if len(want) == 0 {
+				continue
+			}
+			selecting++
+
+			e.mu.Lock()
+			for farID := range want {
+				if p, held := e.programmed[farRef{seid: sess.localSEID, farID: farID}]; !held || !p.duplicating {
+					undup++
+				}
+			}
+			e.mu.Unlock()
+		}
+	}
+
+	switch {
+	case selecting == 0:
+		return []x1.X1Error{x1.TaskFault(
+			"no session this element holds carries traffic this task selects, so this " +
+				"interception is producing nothing")}
+	case undup > 0:
+		return []x1.X1Error{x1.TaskFault(fmt.Sprintf(
+			"the datapath is not duplicating %d forwarding rule(s) this task requires, across "+
+				"%d session(s) it selects", undup, selecting))}
+	}
+
+	return nil
+}
