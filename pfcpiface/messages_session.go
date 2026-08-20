@@ -198,7 +198,11 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	// session's traffic is being duplicated while GetAllSessions still did not
 	// return the session — and a re-derivation running in that interval publishes a
 	// conclusion drawn without it, leaving duplication nothing will turn off.
-	upf.ccEnabler.sessionProgrammed(&session)
+	//
+	// All of the session's FARs, because for a new session that is what was pushed: the
+	// SendMsgToUPF above carries session.PacketForwardingRules, and a session being
+	// established has no rules older than this message.
+	upf.ccEnabler.sessionProgrammed(&session, session.fars)
 
 	var localFSEID *ie.IE
 
@@ -493,7 +497,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// a criterion hands a re-derivation still holding the pre-modification copy a
 	// newer value to compare against — and that pass then pushes the FAR off, ending
 	// an interception the tasking still requires.
-	upf.ccEnabler.sessionProgrammed(&session)
+	//
+	// Only the updated FARs, because only those were pushed. The session's other rules are
+	// whatever the datapath was told about them earlier, which is what the record already
+	// says; restating them from this element's intent would replace an account of the
+	// datapath with a copy of our own wishes for every rule this message did not touch.
+	upf.ccEnabler.sessionProgrammed(&session, updated.fars)
 
 	// Build response message
 	smres := message.NewSessionModificationResponse(0, /* MO?? <-- what's this */
