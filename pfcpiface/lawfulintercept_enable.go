@@ -890,8 +890,8 @@ func (e *ccEnabler) transact() {
 				// look again. See everDuplicated. The cost is one redundant write per pass per
 				// FAR that has been turned off, which is a small and shrinking set; the harm it
 				// removes is a subscriber's traffic being copied under no authority at all.
-				if e.programmed[ref].duplicating == want[ref.farID] &&
-					!(!want[ref.farID] && e.everDuplicated[ref]) {
+				recordIsEnough := want[ref.farID] || !e.everDuplicated[ref]
+				if e.programmed[ref].duplicating == want[ref.farID] && recordIsEnough {
 					continue
 				}
 				f := sess.fars[i]
