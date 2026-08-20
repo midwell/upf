@@ -529,7 +529,31 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // because here is the only place ordered after PutSession. It is gated so that an
 // element holding no tasking never asks for one: every FAR reads false, nothing
 // changed, and the walk of every session that a request implies does not happen.
-func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
+//
+// **pushed is the rules the caller actually sent to the datapath, and it is an argument
+// because the caller is the only party that knows.** This used to walk the session's whole FAR
+// list, which is right for an establishment — everything the session has was just pushed — and
+// wrong for a modification, which pushes only the rules the SMF restated. For every other FAR
+// in that session the record was then rewritten from what this element *intends*, not from what
+// the datapath was last told, and the two are only the same when nothing has gone wrong.
+//
+// The direction of the error is what makes it worth a signature change. A FAR the datapath
+// refused, or one whose push was lost, is duplicating what it was duplicating before — and the
+// record would now claim the tasking's intended value for it. Where the intent is "not
+// duplicating", the next pass compares the record against the tasking, finds them equal, and
+// concludes there is nothing to do: copies keep being made for a session no warrant covers,
+// nothing in the element can turn them off, and the element's own account says duplication is
+// off. That is over-collection recorded as compliance. farsPushed exists for a neighbouring
+// case and already documents this as the one direction the record must never be wrong in; it is
+// now the same rule here, made unstateable rather than remembered.
+//
+// **The request for a pass still considers the whole session**, and that is not an oversight in
+// the other direction. What the record answers is "what does the datapath hold"; what the
+// request answers is "might the right answer have changed here". A modification that restates
+// one FAR can change what a criterion matches for the session's others — a UE address moves, a
+// PDR is replaced — so a pass is wanted whenever the session's FARs and the record disagree,
+// including for FARs this call did not push.
+func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
 	if e == nil || s == nil {
 		return
 	}
@@ -537,17 +561,25 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession) {
 	e.mu.Lock()
 	e.writes++
 	stamp := e.writes
+	for i := range pushed {
+		ref := farRef{seid: s.localSEID, farID: pushed[i].farID}
+		e.programmed[ref] = programmedFAR{duplicating: pushed[i].liDuplicate, written: stamp}
+	}
 	// Duplicating, because a copy running under tasking that may since have been
 	// withdrawn is the thing that must be re-derived. Changed, because a
 	// modification that took a session *out* of scope has to survive a pass holding
 	// the older view just as much.
+	//
+	// Over the session rather than over pushed, per the note above: a FAR nobody pushed can
+	// still be one whose answer this modification changed.
 	notable := false
 	for i := range s.fars {
 		ref := farRef{seid: s.localSEID, farID: s.fars[i].farID}
 		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate {
 			notable = true
+
+			break
 		}
-		e.programmed[ref] = programmedFAR{duplicating: s.fars[i].liDuplicate, written: stamp}
 	}
 	e.mu.Unlock()
 
@@ -673,6 +705,12 @@ func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
 // claim the datapath holds what this element *wants* for FARs it never sent — and a claim of
 // "not duplicating" against a FAR that is duplicating is the one direction the record must
 // never be wrong in.
+//
+// That rule is general, and all three recorders now have the shape that enforces it rather than
+// stating it: this one and farsRemoved take the rules they concern, and sessionProgrammed takes
+// the pushed rules as an argument for the same reason. It used to walk the session, which was
+// right for an establishment and wrong for every modification — so the argument this function
+// has always had is what the other one was missing.
 //
 // It does not ask for a pass, deliberately. The handler that calls this has just failed to
 // store the session, so the store still holds the pre-modification rules; a pass reading

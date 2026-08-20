@@ -158,7 +158,19 @@ func (f *enablerFixture) commit(t *testing.T, s PFCPSession) {
 	if err := f.store.PutSession(s); err != nil {
 		t.Fatalf("PutSession: %v", err)
 	}
-	f.e.sessionProgrammed(&s)
+	// All of the session's FARs, which is what an establishment pushes.
+	f.e.sessionProgrammed(&s, s.fars)
+}
+
+// commitModification is commit for a session the SMF has modified: the handler pushes the rules
+// this message restated and records those, leaving the record for the session's other rules
+// describing what the datapath was last told about them.
+func (f *enablerFixture) commitModification(t *testing.T, s PFCPSession, pushed []far) {
+	t.Helper()
+	if err := f.store.PutSession(s); err != nil {
+		t.Fatalf("PutSession: %v", err)
+	}
+	f.e.sessionProgrammed(&s, pushed)
 }
 
 // recorded is what the element believes it last told the datapath about a FAR,
