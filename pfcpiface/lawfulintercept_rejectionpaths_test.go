@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/omec-project/li/store"
+	"github.com/omec-project/li/types"
 	"github.com/omec-project/li/x1"
 	"github.com/omec-project/upf-epc/pfcpiface/metrics"
 	"github.com/wmnsk/go-pfcp/ie"
@@ -419,5 +420,231 @@ func TestEverDuplicatedIsReclaimedWithItsSessions(t *testing.T) {
 			"of what was programmed and is bounded by the same requirement; every one of those "+
 			"entries is unreachable, because transact consults the set only while walking the "+
 			"FARs of a live session", everDuplicated)
+	}
+}
+
+// TestAFARRecreatedUnderTheSameIDKeepsItsRecord pins the deletion sweep against the entry's own
+// stamp rather than the pass's mark.
+//
+// Comparing to the mark answers "was this forgotten after the pass began", which also discards an
+// entry written *after* the forgetting — and a FAR re-created under the same identifier is exactly
+// that. A path switch does it routinely: the modification removes FAR n, stamping it forgotten,
+// then re-creates FAR n and records it duplicating. Both stamps are past the mark, so the sweep
+// dropped a record describing a live, duplicating rule.
+//
+// A missing entry reads as "not duplicating", so until the next pass this element answers
+// TaskIssueDuplicationNotProgrammed for a warrant it is in fact serving — a wrong answer rather
+// than lost interception, and the answer the triggering function acts on.
+func TestAFARRecreatedUnderTheSameIDKeepsItsRecord(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	const seid = 600
+
+	sess := unmarkedSession(seid, "10.250.0.9")
+	f.putSession(t, sess)
+	w := f.windowed(t)
+
+	task := ccTask("W1", ueAddr("10.250.0.9"))
+	if err := f.e.canApply(task); err != nil {
+		t.Fatalf("canApply: %v", err)
+	}
+
+	if !f.tasks.Activate(task) {
+		t.Fatal("Activate failed")
+	}
+
+	// A pass begins and reads the sessions.
+	w.hold <- struct{}{}
+	gen := f.e.request()
+	<-w.read
+
+	// Inside the interval the SMF removes FAR 1 and immediately re-creates it — one path
+	// switch, as far as this element is concerned.
+	f.e.farsRemoved(seid, []far{{farID: 1, fseID: seid}})
+	f.e.farsPushed(seid, []far{{farID: 1, fseID: seid, liDuplicate: true}})
+
+	// The pass concludes on its older view.
+	w.release <- struct{}{}
+	f.e.await(gen)
+	f.settle(t)
+
+	value, held := f.recorded(seid, 1)
+	if !held {
+		t.Fatal("the record for a FAR re-created after it was forgotten was swept away. It is " +
+			"live and duplicating; a missing entry reads as 'not duplicating', so this element " +
+			"now reports the interception as not programmed for a warrant it is serving")
+	}
+
+	if !value {
+		t.Error("the record says the re-created FAR is not duplicating, while the element pushed " +
+			"it duplicating")
+	}
+}
+
+// TestConcurrentMissesShareOneFragmentMemo pins the memoisation against the one thing that makes
+// two equivalent answers *not* interchangeable.
+//
+// Resolution runs unlocked — it walks every session, so it must — and the framing workers are four.
+// Two of them missing on the same session at the same time both compute an answer, and the answers
+// agree about which tasks cover the session. What they do not share is the fragment memo, which
+// resolveCovering allocates: it remembers what the initial fragment of a datagram was classified
+// as, so the later fragments, which carry no transport header, are delivered or dropped with it.
+//
+// Last-writer-wins left the losing worker holding a filter whose memo nothing else shares. A
+// datagram whose initial fragment was classified into one memo and whose later fragments were
+// looked up in the other loses its tail — dropped, and reported as X3 delivery loss, for content
+// the criterion did select. A manufactured loss report is worse than a silent one: it tells the
+// agency product went missing that never did.
+func TestConcurrentMissesShareOneFragmentMemo(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	const seid = 700
+
+	// A transport-port criterion on rules that constrain no port: the only shape whose filter
+	// has to read the packet, and therefore the only one that carries a fragment memo at all.
+	// A UE-address criterion yields a match-all filter with no memo, so it cannot exercise this.
+	f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+	f.activate(t, "W1", types.TargetIdentifier{Type: types.TargetTCPPort, Value: "443"})
+
+	// Force every worker to miss: a tasking change invalidates the memo by epoch.
+	f.e.epoch.Add(1)
+
+	const workers = 8
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		answers [][]coveredTask
+	)
+
+	start := make(chan struct{})
+
+	for range workers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			<-start
+
+			got := f.e.tasksCovering(seid)
+
+			mu.Lock()
+			answers = append(answers, got)
+			mu.Unlock()
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	var memo *fragmentMemo
+
+	for i, got := range answers {
+		if len(got) == 0 {
+			t.Fatalf("worker %d resolved no covering task; the fixture is not exercising a miss", i)
+		}
+
+		if got[0].filter.frags == nil {
+			t.Fatalf("worker %d resolved a filter with no fragment memo, so this test compares "+
+				"nil against nil and would pass against the defect", i)
+		}
+
+		if memo == nil {
+			memo = got[0].filter.frags
+
+			continue
+		}
+
+		if got[0].filter.frags != memo {
+			t.Fatalf("worker %d holds a different fragment memo from the others. A datagram whose "+
+				"initial fragment is classified into one memo and whose later fragments are looked "+
+				"up in another loses its tail — dropped, and reported as delivery loss, for "+
+				"content the criterion selected", i)
+		}
+	}
+}
+
+// countingStore reports how many times the sessions were walked, which is the cost taskFaults used
+// to pay on the X1 request goroutine.
+type countingStore struct {
+	SessionsStore
+
+	mu    sync.Mutex
+	walks int
+}
+
+func (c *countingStore) GetAllSessions() []PFCPSession {
+	c.mu.Lock()
+	c.walks++
+	c.mu.Unlock()
+
+	return c.SessionsStore.GetAllSessions()
+}
+
+func (c *countingStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.walks
+}
+
+// TestTaskFaultsDoesNotWalkEverySessionPerRequest pins the cost off the X1 request goroutine.
+//
+// li/x1 asks this once per task on *every* response that carries tasks — an activation, a
+// modification, a deactivation, a status query alike. Answering it resolved every criterion
+// against every session this element holds, so an element with twenty thousand sessions and ten
+// tasks resolved two hundred thousand criterion sets to answer one provisioning message, on the
+// goroutine answering it.
+//
+// That is exactly the cost the enabler's worker exists to keep off the request path — its own
+// doc-comment says "an X1 request's latency would become a function of session count on the
+// element holding the most sessions". The remedy for one path had reintroduced it on another.
+//
+// The answer is still determined when asked rather than pushed: the memo is stamped with the
+// tasking epoch and the record's write counter, and every event that could change the answer moves
+// one of them. What is avoided is recomputing an answer nothing has invalidated.
+func TestTaskFaultsDoesNotWalkEverySessionPerRequest(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	counting := &countingStore{SessionsStore: f.store}
+	f.e.mu.Lock()
+	f.e.sources = []SessionsStore{counting}
+	f.e.mu.Unlock()
+
+	for seid := uint64(800); seid < 810; seid++ {
+		f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+	}
+
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.settle(t)
+
+	// The first ask resolves.
+	_ = f.e.taskFaults("W1")
+
+	after := counting.count()
+
+	// Nine more, with nothing changed in between: an ADMF interrogating, or simply several
+	// X1 responses each carrying the task.
+	for range 9 {
+		_ = f.e.taskFaults("W1")
+	}
+
+	if grew := counting.count() - after; grew != 0 {
+		t.Errorf("nine further X1 answers walked the sessions %d more times with nothing changed "+
+			"between them. An X1 request's latency is then a function of session count, which is "+
+			"the cost the enabler's worker exists to keep off this goroutine", grew)
+	}
+
+	// And a tasking change invalidates it, so the answer is still the current one rather than
+	// a cached history.
+	before := counting.count()
+
+	f.deactivate(t, "W1")
+	_ = f.e.taskFaults("W1")
+
+	if counting.count() == before {
+		t.Error("a tasking change did not invalidate the answer; a status reply that survives the " +
+			"tasking it describes is a history, not a state")
 	}
 }
