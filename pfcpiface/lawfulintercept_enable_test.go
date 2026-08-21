@@ -93,6 +93,15 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 	return f
 }
 
+// recordSizes is how many entries each record of what was programmed holds. Both are bound by the
+// same requirement, and the second was exempt from it until it was not.
+func (f *enablerFixture) recordSizes() (programmed, everDuplicated int) {
+	f.e.mu.Lock()
+	defer f.e.mu.Unlock()
+
+	return len(f.e.programmed), len(f.e.everDuplicated)
+}
+
 // coveredEntries is how many sessions the attribution memo holds. It exists so that
 // "this state is bounded by live sessions" is assertable, which is the only way a leak
 // of this kind is noticed before it matters.
