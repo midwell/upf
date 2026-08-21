@@ -136,6 +136,12 @@ type ccEnabler struct {
 	// while the task was held. The element keeps intercepting correctly the whole time, which is
 	// what makes it invisible until the process dies and takes every warrant with it.
 	everDuplicated map[farRef]bool
+	// faultsMemo answers taskFaults without re-walking every session, stamped with the two
+	// things the answer depends on: the tasking epoch, and the record's write counter — which
+	// moves on every establishment, modification and teardown, because all three record what
+	// they programmed. Guarded by faultsMu rather than mu, which is held across walks.
+	faultsMu   sync.Mutex
+	faultsMemo map[types.XID]faultEntry
 	// forgottenFARs is the same record one level down: the write stamp at which a session
 	// *modification* removed one FAR while the session itself carried on.
 	//
@@ -228,6 +234,7 @@ func newCCEnabler(
 	e := &ccEnabler{
 		tasks:          tasks,
 		everDuplicated: make(map[farRef]bool),
+		faultsMemo:     make(map[types.XID]faultEntry),
 		push:           push,
 		report:         report,
 		programmed:     make(map[farRef]programmedFAR),
@@ -1092,13 +1099,25 @@ func (e *ccEnabler) transact() {
 	// pass that concluded nothing was to be changed still planned an entry for every FAR it
 	// walked. That is the ordinary case for an element whose tasking is stable, which is
 	// also the case sessionForgotten exists to reclaim.
-	for ref := range fresh {
-		if gone, deleted := e.forgotten[ref.seid]; deleted && gone > mark {
+	// **Against the entry's own stamp, not the pass's mark.** Comparing to `mark` answers "was
+	// this forgotten after the pass began", which discards an entry written *after* the
+	// forgetting too — and a FAR re-created under the same identifier is exactly that. A path
+	// switch does it routinely: the modification removes FAR n and stamps it forgotten, then
+	// re-creates FAR n and records it duplicating. Both stamps are past `mark`, so the sweep
+	// dropped a record describing a live, duplicating rule.
+	//
+	// A missing entry reads as "not duplicating", so until the next pass this element reports
+	// TaskIssueDuplicationNotProgrammed for a warrant it is in fact serving. The "off" direction
+	// is covered by everDuplicated and the next pass re-pushes redundantly, which is why this is
+	// a wrong answer rather than lost interception — but the answer is wrong, and it is the
+	// answer the triggering function acts on.
+	for ref, cur := range fresh {
+		if gone, deleted := e.forgotten[ref.seid]; deleted && gone > cur.written {
 			delete(fresh, ref)
 
 			continue
 		}
-		if gone, removed := e.forgottenFARs[ref]; removed && gone > mark {
+		if gone, removed := e.forgottenFARs[ref]; removed && gone > cur.written {
 			delete(fresh, ref)
 		}
 	}
@@ -1237,6 +1256,20 @@ func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	out := e.resolveCovering(seid)
 
 	e.coveredMu.Lock()
+	defer e.coveredMu.Unlock()
+
+	// **Whoever got there first wins, and the loser discards its own answer.** Resolution runs
+	// unlocked — it has to, since it walks every session — so two framing workers missing on the
+	// same session at the same time both compute one. The answers are equivalent, but they are
+	// not interchangeable: resolveCovering allocates the *fragment memo* the filter carries, so
+	// two answers are two memos. Last-writer-wins left the other worker holding a filter whose
+	// memo nothing else shares, and a datagram whose initial fragment was classified into one
+	// memo and whose later fragments were looked up in the other loses its tail — dropped, and
+	// reported as X3 delivery loss, for content the criterion did select.
+	if held, ok := e.covered[seid]; ok && held.epoch == epoch {
+		return held.tasks
+	}
+
 	// Only where the session still exists. A session that has gone away is dropped by
 	// forgetCovered, and storing an answer for it here would put back the entry that
 	// just removed — an entry nothing would ever remove again, since the events that
@@ -1244,7 +1277,6 @@ func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	if out != nil {
 		e.covered[seid] = coveredEntry{epoch: epoch, tasks: out}
 	}
-	e.coveredMu.Unlock()
 
 	return out
 }
@@ -1324,10 +1356,67 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 // A task the snapshot does not carry answers nothing: either it requires no content, in which
 // case this element has nothing to say about it, or its criteria do not parse, which activation
 // already refuses.
+// faultEntry is one memoised answer to "what is wrong with this task", with the two stamps that
+// decide whether it is still true.
+type faultEntry struct {
+	epoch  uint64
+	writes uint64
+	faults []x1.X1Error
+}
+
+// taskFaults answers what is currently wrong with one task's content interception.
+//
+// **Memoised, because the X1 request goroutine is not where a walk of every session belongs.**
+// li/x1 calls this once per task on *every* response that carries tasks — an activation, a
+// modification, a deactivation, a status query alike — and the computation resolves every
+// criterion against every session this element holds. An element with twenty thousand sessions and
+// ten tasks resolved two hundred thousand criterion sets to answer one provisioning message, on
+// the goroutine answering it.
+//
+// That is precisely the cost `run()`'s own doc-comment says the worker exists to keep off the
+// request path: "an X1 request's latency would become a function of session count on the element
+// holding the most sessions". The remedy for one path reintroduced it on another.
+//
+// The answer is still *determined when asked* rather than pushed or accumulated: the stamps are
+// the tasking epoch and the record's write counter, and every event that could change the answer
+// moves one of them. What is avoided is recomputing an answer nothing has invalidated.
 func (e *ccEnabler) taskFaults(xid types.XID) []x1.X1Error {
 	if e == nil {
 		return nil
 	}
+
+	epoch := e.epoch.Load()
+
+	e.mu.Lock()
+	writes := e.writes
+	e.mu.Unlock()
+
+	e.faultsMu.Lock()
+	if held, ok := e.faultsMemo[xid]; ok && held.epoch == epoch && held.writes == writes {
+		e.faultsMu.Unlock()
+
+		return held.faults
+	}
+	e.faultsMu.Unlock()
+
+	faults := e.resolveTaskFaults(xid)
+
+	e.faultsMu.Lock()
+	// Entries from a superseded epoch can never be returned again, so they are dropped rather
+	// than left to accumulate one per task this element has ever held.
+	for held := range e.faultsMemo {
+		if e.faultsMemo[held].epoch != epoch {
+			delete(e.faultsMemo, held)
+		}
+	}
+
+	e.faultsMemo[xid] = faultEntry{epoch: epoch, writes: writes, faults: faults}
+	e.faultsMu.Unlock()
+
+	return faults
+}
+
+func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 	snapshot := e.parsed.Load()
 	if snapshot == nil {
 		return nil
