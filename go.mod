@@ -27,4 +27,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 )
 
-replace github.com/omec-project/li => github.com/midwell/li v0.9.6
+replace github.com/omec-project/li => github.com/midwell/li v0.9.7
