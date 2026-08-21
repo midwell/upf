@@ -766,6 +766,38 @@ func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
 // transact's own contract says it must not do. The record is what matters here — the next
 // tasking change or the SMF's retry of the modification reconciles the datapath, and both
 // now have something correct to reconcile against.
+// abandonedDuplication reports that this element gave up on a session while the datapath may
+// still be duplicating its traffic.
+//
+// It exists for the paths where recording is not a remedy. A record is only ever read by a
+// re-derivation walking the sessions this element holds, so a record written for a session that
+// is being abandoned — an establishment the datapath refused, an association tearing down — can
+// never be read again. On those paths the only real remedies are to remove the rules from the
+// datapath, which the caller attempts, and to say so when that fails, which is this.
+//
+// Reported as a refused duplication change because that is what it is: the element instructed the
+// datapath to stop duplicating and the datapath did not accept it. Only when a rule that was
+// actually duplicating is involved — an ordinary failed delete of a session no warrant covered is
+// the datapath's business, not the ADMF's.
+func (e *ccEnabler) abandonedDuplication(fars []far, why string) {
+	if e == nil || e.report == nil {
+		return
+	}
+
+	for i := range fars {
+		if !fars[i].liDuplicate {
+			continue
+		}
+
+		e.report(x1.NEIssueDuplicationRefused,
+			"the datapath did not accept the removal of a duplication rule for a session this "+
+				"element is no longer tracking, so content may still be copied with nothing "+
+				"able to stop it: "+why)
+
+		return
+	}
+}
+
 func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
 	if e == nil || len(fars) == 0 {
 		return

@@ -183,7 +183,24 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 
 	cause := upf.SendMsgToUPF(upfMsgTypeAdd, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
+		// **A refusal does not mean the datapath is untouched.** SendMsgToUPF programs each rule
+		// independently and reports the first failure, so by the time it answers "rejected" an
+		// unknown subset of the rest is already in place — and applyTasking above may have put
+		// duplication on some of it.
+		//
+		// Recording that is not a remedy on this path, and this is the one place where it is
+		// not: NewPFCPSession does not store the session, and this branch abandons it before
+		// PutSession, so no re-derivation will ever walk it and no record written here could be
+		// read again. Removing the rules is the only thing that helps, so the delete is pushed;
+		// where the datapath will not take that either, the ADMF is told, because a subscriber's
+		// traffic may then be copied with nothing in this element able to stop it.
+		if del := upf.SendMsgToUPF(upfMsgTypeDel, session.PacketForwardingRules,
+			PacketForwardingRules{}); del == ie.CauseRequestRejected {
+			upf.ccEnabler.abandonedDuplication(session.fars, "a refused session establishment")
+		}
+
 		pConn.RemoveSession(session)
+
 		return errProcessReply(ErrWriteToDatapath,
 			ie.CauseRequestRejected)
 	}
@@ -407,6 +424,17 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 	cause := upf.SendMsgToUPF(upfMsgTypeMod, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
+		// **A refusal does not mean the datapath is untouched**, so the rules this element was
+		// told to push are recorded whatever the answer was. The same reasoning the deletion
+		// stage below already carries, on the branch that reaches the datapath first: this
+		// return is before PutSession, so sessionProgrammed — the only other thing that records
+		// a push — never runs, and without this the datapath duplicates with nothing in this
+		// element able to say so.
+		//
+		// Unlike the establishment branch, recording is the right remedy here: the session is in
+		// the store, so the next re-derivation walks it and finds the entry. See farsPushed.
+		upf.ccEnabler.farsPushed(localSEID, updated.fars)
+
 		return sendError(ErrWriteToDatapath)
 	}
 
@@ -658,14 +686,18 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 
 		logger.PfcpLog.Warnln("context not found, deleting session locally")
 
-		pConn.RemoveSession(sessItem)
-
+		// The datapath first, and the record only once it answered. Dropping the record before
+		// the delete is confirmed leaves the rules in place with nothing describing them: the
+		// entries go with the session, so a refused delete would strand duplication that no
+		// later re-derivation can find, because it walks the sessions this element holds.
 		cause := upf.SendMsgToUPF(
 			upfMsgTypeDel, sessItem.PacketForwardingRules, PacketForwardingRules{})
 		if cause == ie.CauseRequestRejected {
 			return errProcess(
 				ErrOperationFailedWithParam("delete session from datapath", "seid", seid))
 		}
+
+		pConn.RemoveSession(sessItem)
 
 		return nil
 	}
