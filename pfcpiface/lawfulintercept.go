@@ -186,6 +186,20 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// there took the user plane down and named the offending LI field in the general
 	// operator log. Here it stops interception, tells the ADMF, and leaves the datapath
 	// forwarding — the same policy the AMF and SMF apply to their own LI block.
+	// The refused `li` object, first, because it is the reason the rest cannot be trusted: the
+	// keys that did decode are not a trustworthy set, and one of the ones that did not may be
+	// the fail-safe window or the fault endpoint.
+	if cfg.blockErr != nil {
+		if issueReporter != nil {
+			issueReporter.Notify(x1.NEIssueInvalidConfig,
+				"this element's interception configuration carries a setting it does not "+
+					"recognise, so the values it would fall back on cannot be trusted; "+
+					"interception has not been started")
+		}
+
+		return cfg.blockErr
+	}
+
 	if err := validateLiConfig(cfg); err != nil {
 		if issueReporter != nil {
 			issueReporter.Notify(x1.NEIssueInvalidConfig,
