@@ -187,7 +187,13 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		// may be programmed. Take them out before forgetting the session: nothing else
 		// will, because the session is never stored on this path and the SMF has no
 		// F-SEID to release. Best effort -- a datapath that just refused a write may
-		// refuse this one too, and there is nothing further to report it to.
+		// refuse this one too.
+		//
+		// Recording the abandonment is not a remedy here, and this is the one place it is
+		// not: the session is never stored, so no re-derivation will ever walk it and no
+		// record written here could be read again. Where the datapath will not take the
+		// delete either, the ADMF is told instead, because a subscriber's traffic may then
+		// be copied with nothing in this element able to stop it.
 		if delCause := upf.SendMsgToUPF(
 			upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{},
 		); delCause == ie.CauseRequestRejected {
@@ -208,6 +214,8 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			// hold the allocation back here.
 			logger.PfcpLog.Warnln("the rollback of a rejected session reported a failure; " +
 				"no rule the datapath holds is known to be stranded")
+
+			upf.ccEnabler.abandonedDuplication(session.fars, "a refused session establishment")
 		}
 
 		// Parsing allocated the UE address (parse_pdr.go), and only the deletion path
@@ -440,6 +448,17 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 	cause := upf.SendMsgToUPF(upfMsgTypeMod, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
+		// **A refusal does not mean the datapath is untouched**, so the rules this element was
+		// told to push are recorded whatever the answer was. The same reasoning the deletion
+		// stage below already carries, on the branch that reaches the datapath first: this
+		// return is before PutSession, so sessionProgrammed — the only other thing that records
+		// a push — never runs, and without this the datapath duplicates with nothing in this
+		// element able to say so.
+		//
+		// Unlike the establishment branch, recording is the right remedy here: the session is in
+		// the store, so the next re-derivation walks it and finds the entry. See farsPushed.
+		upf.ccEnabler.farsPushed(localSEID, updated.fars)
+
 		return sendError(ErrWriteToDatapath)
 	}
 
@@ -727,21 +746,25 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 
 		logger.PfcpLog.Warnln("context not found, deleting session locally")
 
-		// The address goes back to the pool before the session is forgotten, because
-		// nothing can return it afterwards. This site already forgets the session before
-		// deleting its rules, so unlike the deletion path the release precedes the
-		// delete; the free queue is FIFO, so the address is not handed out again while
-		// the delete runs unless every other free address is already taken.
-		upf.ippool.Release(seid)
-
-		pConn.RemoveSession(sessItem)
-
+		// The datapath first, and the record only once it answered. Dropping the record before
+		// the delete is confirmed leaves the rules in place with nothing describing them: the
+		// entries go with the session, so a refused delete would strand duplication that no
+		// later re-derivation can find, because it walks the sessions this element holds.
 		cause := upf.SendMsgToUPF(
 			upfMsgTypeDel, sessItem.PacketForwardingRules, PacketForwardingRules{})
 		if cause == ie.CauseRequestRejected {
 			return errProcess(
 				ErrOperationFailedWithParam("delete session from datapath", "seid", seid))
 		}
+
+		// The address goes back only once the datapath has confirmed the delete, so it
+		// cannot be reissued while a PDR still matches it. It preceded the delete while
+		// this site forgot the session first; now that the record is dropped after the
+		// confirmation, the release belongs after it too -- the same order the deletion
+		// path uses.
+		upf.ippool.Release(seid)
+
+		pConn.RemoveSession(sessItem)
 
 		return nil
 	}

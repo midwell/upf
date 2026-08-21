@@ -297,7 +297,19 @@ func (pConn *PFCPConn) executeShutdown() {
 
 	// Cleanup all sessions in this conn
 	for _, sess := range pConn.store.GetAllSessions() {
-		pConn.upf.SendMsgToUPF(upfMsgTypeDel, sess.PacketForwardingRules, PacketForwardingRules{})
+		// The datapath's answer, consulted rather than discarded. This path deletes every
+		// session of an association at once, so it storms the datapath with one batch per
+		// session — which makes it the likeliest of all the delete paths to be refused, and a
+		// refused delete leaves the rules in place. Where those rules were duplicating, the
+		// copies continue with no session, no record and no tasking to account for them:
+		// removeSource below drops this store, so no re-derivation can ever walk them again.
+		//
+		// Nothing here can retry usefully — the association is going away — so the remedy is to
+		// say so.
+		if cause := pConn.upf.SendMsgToUPF(upfMsgTypeDel, sess.PacketForwardingRules,
+			PacketForwardingRules{}); cause == ie.CauseRequestRejected {
+			pConn.upf.ccEnabler.abandonedDuplication(sess.fars, "an association teardown")
+		}
 
 		// The pool is built in NewUPF and belongs to the upf, which every connection
 		// shares, so an address not returned here is lost for the life of the process:

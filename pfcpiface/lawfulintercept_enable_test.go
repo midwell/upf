@@ -42,6 +42,15 @@ type enablerFixture struct {
 	// cause is what the datapath answers with. Zero means accepted, so every test
 	// written before the enabler read this answer is unaffected.
 	cause uint8
+	// partial makes a refused push program its rules anyway, which is what the real
+	// datapath client does: SendMsgToUPF issues one gRPC call per rule and GRPCJoin
+	// returns on the first failure with the rest of the batch still in flight, so a
+	// "rejected" answer means *an unknown subset was applied*, not *nothing was*.
+	//
+	// Off by default so every test written against the all-or-nothing model is
+	// unaffected, but the model itself is wrong, and the state the live incident
+	// produced is only reachable with this on.
+	partial bool
 	// reported is the LI-plane faults the enabler raised, in order.
 	reported []string
 }
@@ -60,10 +69,13 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 		if cause == 0 {
 			cause = ie.CauseRequestAccepted
 		}
-		// A refused write programs nothing, so the fixture's model of the datapath
-		// must not record it either — otherwise the test asserts against a datapath
-		// that accepted what it refused.
-		if cause == ie.CauseRequestAccepted {
+		// An accepted write programs everything. A refused one programs nothing only if
+		// the datapath is all-or-nothing, and this one is not — see partial.
+		f.mu.Lock()
+		partial := f.partial
+		f.mu.Unlock()
+
+		if cause == ie.CauseRequestAccepted || partial {
 			f.record(updated)
 		}
 
