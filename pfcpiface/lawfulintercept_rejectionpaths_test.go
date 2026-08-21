@@ -369,3 +369,55 @@ func TestAPartiallyProgrammedRefusalIsStillWithdrawn(t *testing.T) {
 			"copied under no authority, invisibly from both ends")
 	}
 }
+
+// TestEverDuplicatedIsReclaimedWithItsSessions pins the second record against the same requirement
+// as the first.
+//
+// `A point of interception's record of what it programmed stays bounded` binds every record of
+// what was programmed, and this set is one. It was written as monotone-for-ever, justified by a
+// SEID-reuse hazard that does not exist in this element — NewPFCPSession allocates from a 64-bit
+// random source — so every entry whose session had ended was unreachable garbage: transact
+// consults the set only inside its walk of live sessions' FARs.
+//
+// "A handful" was the other half of that justification, and it holds only for narrow criteria. A
+// task keyed by network instance or tunnel direction selects every session on the element, so
+// under ordinary subscriber churn the set grows with every session that has ever existed while the
+// task was held. Interception stays correct the whole time, which is what makes it invisible —
+// until the process dies and takes every warrant with it.
+//
+// sessionForgotten is called directly here because the churn is what is under test; its production
+// call site is RemoveSession, which the rejection-path tests in this file drive.
+func TestEverDuplicatedIsReclaimedWithItsSessions(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.activate(t, "W1", ueAddr("10.250.0.9"))
+
+	const rounds = 200
+
+	for seid := uint64(1); seid <= rounds; seid++ {
+		s := unmarkedSession(seid, "10.250.0.9")
+		f.putSession(t, s)
+
+		// ...and the subscriber goes away again, as RemoveSession does in production.
+		if err := f.store.DeleteSession(seid); err != nil {
+			t.Fatalf("DeleteSession: %v", err)
+		}
+
+		f.e.sessionForgotten(&s)
+	}
+
+	f.e.retaskAndWait()
+	f.settle(t)
+
+	programmed, everDuplicated := f.recordSizes()
+
+	if programmed != 0 {
+		t.Errorf("the primary record holds %d entries with no sessions left", programmed)
+	}
+
+	if everDuplicated != 0 {
+		t.Errorf("the ever-duplicated set holds %d entries with no sessions left. It is a record "+
+			"of what was programmed and is bounded by the same requirement; every one of those "+
+			"entries is unreachable, because transact consults the set only while walking the "+
+			"FARs of a live session", everDuplicated)
+	}
+}

@@ -99,8 +99,8 @@ type ccEnabler struct {
 	// Entries are dropped by the pass that acts on them, so this is bounded by the
 	// deletions a single pass can miss rather than by uptime.
 	forgotten map[uint64]uint64
-	// everDuplicated is every FAR this element has ever told the datapath to duplicate, and it
-	// is never cleared while the process lives.
+	// everDuplicated is every FAR of a live session this element has ever told the datapath to
+	// duplicate.
 	//
 	// **It exists because `programmed` is the only memory of what the datapath holds, and a
 	// record that is wrong in the "not duplicating" direction is unrecoverable.** The
@@ -118,11 +118,23 @@ type ccEnabler struct {
 	// element tells the datapath "off" for every FAR it has ever turned on, whatever it believes,
 	// so a divergence lasts until the next re-derivation instead of until the pod restarts.
 	//
-	// **Monotone on purpose.** The bug class is an entry being wrongly overwritten to false, and
-	// a set that only grows has no such path. It is not pruned when a session goes away either,
-	// because a later session can be allocated the same SEID and inherit a stale datapath rule —
-	// which is the most plausible route to the state observed. It costs one map entry per FAR
-	// ever intercepted, which for lawful interception is a handful.
+	// **Monotone within a session's life, on purpose.** The bug class is an entry being wrongly
+	// overwritten to false, and a set that only grows has no such path. Nothing removes an entry
+	// while the FAR it names still exists.
+	//
+	// **It is reclaimed with that FAR, though**, in sessionForgotten and farsRemoved, and the
+	// reason is that it cannot be read afterwards: transact consults this set only inside its
+	// walk of live sessions' FARs, so an entry whose session or FAR is gone is unreachable and
+	// retaining it buys nothing. An earlier version of this comment justified never pruning by
+	// saying a later session could be allocated the same SEID and inherit a stale rule — that
+	// route does not exist here, because NewPFCPSession allocates from a 64-bit random source.
+	//
+	// Retaining them was not free, either. `A point of interception's record of what it
+	// programmed stays bounded` binds every record of what was programmed, and this is one: a
+	// task keyed by network instance or tunnel direction selects *every* session, so under
+	// ordinary subscriber churn an unpruned set grows with every session that has ever existed
+	// while the task was held. The element keeps intercepting correctly the whole time, which is
+	// what makes it invisible until the process dies and takes every warrant with it.
 	everDuplicated map[farRef]bool
 	// forgottenFARs is the same record one level down: the write stamp at which a session
 	// *modification* removed one FAR while the session itself carried on.
@@ -688,7 +700,13 @@ func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
 	e.forgotten[s.localSEID] = e.writes
 
 	for i := range s.fars {
-		delete(e.programmed, farRef{seid: s.localSEID, farID: s.fars[i].farID})
+		ref := farRef{seid: s.localSEID, farID: s.fars[i].farID}
+		delete(e.programmed, ref)
+		// And the ever-duplicated set, which is a record of what was programmed and is bound by
+		// the same requirement. It is only ever consulted while walking the FARs of a live
+		// session, so an entry whose session is gone can never be read again — see
+		// everDuplicated.
+		delete(e.everDuplicated, ref)
 	}
 }
 
@@ -733,6 +751,7 @@ func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
 	for i := range removed {
 		ref := farRef{seid: seid, farID: removed[i].farID}
 		delete(e.programmed, ref)
+		delete(e.everDuplicated, ref)
 		e.forgottenFARs[ref] = e.writes
 	}
 }
@@ -1084,6 +1103,23 @@ func (e *ccEnabler) transact() {
 		}
 	}
 	e.programmed = fresh
+
+	// And the ever-duplicated set, bounded against the record that was just rebuilt.
+	//
+	// sessionForgotten and farsRemoved reclaim an entry the moment its FAR goes, which is the
+	// common case, but they cannot be the whole answer: this pass writes the set directly rather
+	// than through `fresh`, so a pass that planned from a snapshot taken before a deletion
+	// re-adds entries for FARs that have since gone — after the reclamation ran. Sweeping here
+	// closes that, because `fresh` was just rebuilt from the sessions that actually exist, so an
+	// entry it does not name is one no walk of live sessions can ever reach.
+	//
+	// Not a substitute for the reclamation either: the sweep only runs when a pass does, and a
+	// steadily-tasked element is not guaranteed to run one.
+	for ref := range e.everDuplicated {
+		if _, live := fresh[ref]; !live {
+			delete(e.everDuplicated, ref)
+		}
+	}
 
 	// The deletions that predate this pass: it read the world after them, so no pass will
 	// ever need to be told about them again. The ones stamped *during* this pass were acted
