@@ -384,6 +384,9 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 			t.Errorf("the strict pass disturbed the decode: keepalive %q, admf %q",
 				conf.Li.TriggerKeepalive, conf.Li.AdmfURL)
 		}
+		if conf.Li.blockErr != nil {
+			t.Errorf("a conformant li block left a refusal recorded: %v", conf.Li.blockErr)
+		}
 	})
 
 	for _, typo := range []string{"trigger_keepalve", "admf_uri"} {
@@ -392,7 +395,23 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 			mustWriteStringToDisk(li(`,
 				"`+typo+`": "5m"`), path)
 
-			_, err := LoadConfigFile(path)
+			// **Both halves, and the second is the one a previous round lost.** The key must be
+			// refused, *and* the user plane must still come up: a configuration load that fails
+			// reaches cmd/pfcpiface's Fatalln, so a typo in an optional subsystem crash-loops
+			// the element carrying every subscriber's traffic — and a user plane that will not
+			// start is the loudest way there is to disclose that this element is LI-provisioned.
+			// startLIShipper's own comment records this lesson for validateConf; the strict
+			// decode repeated it one layer up. Asserting only the refusal is what let it through.
+			conf, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatalf("a misspelled LI key stopped the whole configuration load, which "+
+					"crash-loops the user plane: %v", err)
+			}
+			if conf.Li == nil {
+				t.Fatalf("the li object went missing; the refusal must be carried on it")
+			}
+
+			err = conf.Li.blockErr
 			if err == nil {
 				t.Fatalf("%q was accepted, so the setting the operator wrote never reached the "+
 					"element and its unsafe default stands with nothing saying so", typo)

@@ -53,6 +53,18 @@ type Conf struct {
 // behaves exactly as before. The X3 socket is the userspace UnixSocketPort the
 // BESS pipeline tees duplicated packets to (see conf).
 type LiConfig struct {
+	// blockErr, when non-nil, is why this `li` object was refused by the strict decode — an
+	// unrecognised key, most likely a misspelling of one this element does model.
+	//
+	// Unexported so no configuration file can set it, and carried rather than returned from
+	// LoadConfigFile because refusing a configuration is not the same as refusing to run. This
+	// element forwards subscriber traffic; stopping it over an optional subsystem is an outage
+	// of the user plane, and a user plane that will not start is the loudest way there is to
+	// disclose that this element is LI-provisioned. Interception does not start on it; the
+	// datapath does. Read in startLIShipper, beside validateLiConfig, which exists for exactly
+	// this reason.
+	blockErr error
+
 	X3SockAddr string `json:"x3_sockaddr"` // unixpacket socket the datapath tees LI copies to
 	Cert       string `json:"cert"`        // X0 LI PKI: this NE's certificate
 	Key        string `json:"key"`         // its private key
@@ -324,8 +336,18 @@ func LoadConfigFile(filepath string) (Conf, error) {
 	// upstream adds a key it does not model. The LI object is held to a stricter standard, on
 	// its own, because a key dropped there lands on a default that fails unsafely and says
 	// nothing: see strictLiBlock.
-	if err = strictLiBlock([]byte(jsonData)); err != nil {
-		return Conf{}, err
+	//
+	// **Recorded, not returned.** Returning it failed the whole configuration load, and
+	// cmd/pfcpiface's only caller answers that with Fatalln — so a single mistyped LI key
+	// crash-looped the user plane, carrying every subscriber's traffic with it, and echoed the
+	// offending LI field into the general operator log four lines above the comment forbidding
+	// exactly that. startLIShipper's own comment records this lesson, learned once for
+	// validateConf and repeated here one layer up.
+	//
+	// The refusal is carried on the LI object instead and acted on by the LI subsystem, which
+	// declines to intercept and tells the ADMF, at a point where the reporting channel exists.
+	if liErr := strictLiBlock([]byte(jsonData)); liErr != nil && conf.Li != nil {
+		conf.Li.blockErr = liErr
 	}
 
 	// Set defaults, when missing.
