@@ -620,29 +620,35 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
 	//
 	// Over the session rather than over pushed, per the note above: a FAR nobody pushed can
 	// still be one whose answer this modification changed.
-	// **This deliberately does *not* consider everDuplicated, and the omission is a known gap.**
+	// **And a FAR this element has ever turned on is notable whatever the record says.**
 	//
-	// The remedy in transact distrusts the record when deciding what to do; the honest completion
-	// would distrust it here too, when deciding whether to *look* — in the diverged state neither
-	// test below fires, so no pass is requested and the remedy never runs. That completion was
-	// written, and then withdrawn: it asks for a re-derivation on every session event touching a
-	// FAR that has ever been intercepted, and after it went in, section 11's "re-provisioning
-	// restores content interception" failed once in six runs where the build without it passed
-	// five for five.
+	// Same reason the pass no longer trusts the record in the "off" direction: in the diverged
+	// state both the record and the session's own flag read false, so neither of the two tests
+	// below fires, no pass is requested, and the remedy in transact never gets the chance to run.
+	// Distrusting the record when deciding what to *do* while trusting it when deciding whether
+	// to *look* leaves the fix half-wired — it works only when some other event happens to ask
+	// for a pass.
 	//
-	// That is not proof it was the cause — at a one-in-six rate, five clean runs happen four
-	// times in ten by chance, and no mechanism was found by reading. It is enough not to ship it:
-	// the condition it guards against is unexplained and its harm is bounded, while what it
-	// risked was an intermittent *loss* of interception, which is the worse failure. Losing
-	// product is worse than copying too much of it.
+	// **Withdrawn once, on 2026-08-21, and reinstated the next day on better evidence.** It was
+	// withdrawn because section 11's "re-provisioning restores content interception" failed once
+	// in six runs with it and passed five for five without — at a one-in-six rate that is four
+	// chances in ten of being coincidence, and no mechanism was found by reading. The asymmetry
+	// decided it: an unexplained risk of *losing* interception outweighed a bounded risk of
+	// copying too much.
 	//
-	// What is left still covers the case that matters, because the event that creates the risk —
-	// a warrant being withdrawn — asks for a re-derivation by itself. What is uncovered is a
-	// divergence that arises and is then followed by no tasking change at all.
+	// Both halves of that reasoning have since changed. The condition this guards is no longer
+	// unexplained — it reproduces on demand by freezing the datapath so a withdrawal's push times
+	// out (see find-li-cc-record-datapath-divergence), and the state it leaves is a subscriber
+	// copied under no authority until some unrelated event happens along. And the evidence
+	// against it was one failure in six; section 11 now runs green repeatedly with this in.
+	//
+	// Bounded by the same small set: one pass request per session event touching a FAR that has
+	// ever been intercepted, which is what a re-derivation is cheap enough for.
 	notable := false
 	for i := range s.fars {
 		ref := farRef{seid: s.localSEID, farID: s.fars[i].farID}
-		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate {
+		if s.fars[i].liDuplicate || e.programmed[ref].duplicating != s.fars[i].liDuplicate ||
+			e.everDuplicated[ref] {
 			notable = true
 
 			break
