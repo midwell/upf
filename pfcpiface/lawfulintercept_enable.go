@@ -830,7 +830,42 @@ func (e *ccEnabler) abandonedDuplication(fars []far, why string) {
 	}
 }
 
+// farsPushed records rules the datapath **accepted**, on a path where nothing else will
+// record them — the deletion stage of a modification, which returns before PutSession so
+// sessionProgrammed never runs. The push itself succeeded, so the record states what the
+// datapath holds.
 func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
+	e.recordFARs(seid, fars, true)
+}
+
+// farsAttempted records rules whose outcome this element could **not** determine — the
+// refused-modification branch, where a refusal does not mean the datapath is untouched.
+//
+// It records them as not duplicating, and that is the point of the function. transact
+// skips a FAR whose record already agrees with the tasking unless the answer is "off"
+// (see recordIsEnough), so recording the *intended* value for a write that may never have
+// landed makes every later pass skip it — for the life of the session. The warrant then
+// produces nothing, permanently, while this element answers that it is healthy: the mirror
+// of the over-collection defect everDuplicated exists to prevent, reached the same way, by
+// trusting a record that was never earned.
+//
+// Recording "off" costs one redundant write per pass where the rules did land — the trade
+// everDuplicated already makes — and buys two things: the record disagrees with the
+// tasking, so the next re-derivation re-pushes; and taskFaults counts the rule as not
+// duplicating, so an interrogation answers duplicationNotProgrammed rather than claiming
+// the task is faultless.
+//
+// everDuplicated is still set from what was *intended*, so the over-collection direction is
+// untouched: a rule this element tried to turn on is never trusted-to-be-off again, which
+// is exactly the case where the datapath may have applied the write after all.
+func (e *ccEnabler) farsAttempted(seid uint64, fars []far) {
+	e.recordFARs(seid, fars, false)
+}
+
+// recordFARs is the body of both. confirmed says whether the datapath's acceptance is
+// known; when it is not, the record must not claim the rule is duplicating, whatever this
+// element meant to write.
+func (e *ccEnabler) recordFARs(seid uint64, fars []far, confirmed bool) {
 	if e == nil || len(fars) == 0 {
 		return
 	}
@@ -844,7 +879,7 @@ func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
 	for i := range fars {
 		ref := farRef{seid: seid, farID: fars[i].farID}
 		e.programmed[ref] = programmedFAR{
-			duplicating: fars[i].liDuplicate,
+			duplicating: confirmed && fars[i].liDuplicate,
 			written:     stamp,
 		}
 		if fars[i].liDuplicate {
