@@ -432,8 +432,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// element able to say so.
 		//
 		// Unlike the establishment branch, recording is the right remedy here: the session is in
-		// the store, so the next re-derivation walks it and finds the entry. See farsPushed.
-		upf.ccEnabler.farsPushed(localSEID, updated.fars)
+		// the store, so the next re-derivation walks it and finds the entry.
+		//
+		// Recorded as *attempted*, not pushed. The outcome is unknown on this branch, and a
+		// record claiming the rules are duplicating would agree with the tasking — which is
+		// what makes a later pass skip them, permanently, leaving an accepted warrant
+		// producing nothing. See farsAttempted.
+		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
 
 		return sendError(ErrWriteToDatapath)
 	}
