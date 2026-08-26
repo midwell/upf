@@ -7,6 +7,10 @@ import (
 	"testing"
 
 	"github.com/omec-project/li/x1"
+	"github.com/omec-project/upf-epc/logger"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A modification whose push the datapath refuses leaves this element unable to say whether
@@ -188,5 +192,43 @@ func TestAnUnconfirmedWriteWithoutDuplicationIsNotReported(t *testing.T) {
 		t.Errorf("reports %d -> %d: an unconfirmed write carrying no duplication was reported "+
 			"to the ADMF, which has nothing to act on and is told so less credibly next time",
 			before, len(f.reported))
+	}
+}
+
+// The over-collection protection this change must not have weakened. Recording an
+// unconfirmed write as "off" is only safe because everDuplicated still carries what was
+// *intended* — that set is what makes transact distrust a record claiming "off" for a rule
+// this element once turned on, and it is the reason the datapath cannot be left duplicating
+// with nothing able to stop it.
+func TestAnUnconfirmedWriteStillJoinsTheEverDuplicatedSet(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	_, everBefore := f.recordSizes()
+	f.e.farsAttempted(105, []far{{farID: 1, fseID: 105, liDuplicate: true}})
+	_, everAfter := f.recordSizes()
+
+	if everAfter != everBefore+1 {
+		t.Fatalf("everDuplicated %d -> %d: a rule this element tried to turn on was not "+
+			"recorded as ever-duplicated, so a later pass would trust a record saying \"off\" "+
+			"and leave the datapath copying a subscriber under no authority",
+			everBefore, everAfter)
+	}
+}
+
+// Undetectability. The report goes to the provisioning function over X1; the general
+// operator log must stay silent, or an operator can tell a tasked subscriber's session from
+// any other by the fact that it produced a message at all.
+func TestAnUnconfirmedDuplicationWriteIsSilentOnTheOperatorLog(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	orig := logger.PfcpLog
+	logger.PfcpLog = zap.New(core).Sugar()
+	t.Cleanup(func() { logger.PfcpLog = orig })
+
+	f := newEnablerFixture(t)
+	f.e.farsAttempted(106, []far{{farID: 1, fseID: 106, liDuplicate: true}})
+
+	if n := logs.Len(); n != 0 {
+		t.Errorf("an unconfirmed duplication write emitted %d operator-log entries, want 0 "+
+			"(undetectability): %v", n, logs.All())
 	}
 }
