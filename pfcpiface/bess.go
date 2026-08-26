@@ -204,7 +204,12 @@ func (b *bess) SendMsgToUPF(
 		}
 	}
 
+	writeStart := time.Now()
 	rc := b.GRPCJoin(calls, Timeout, done)
+	// Observed whatever the outcome: a batch that succeeded just inside the deadline is
+	// the interesting measurement, not only one that missed it.
+	datapathWriteDuration.WithLabelValues(method.String()).Observe(time.Since(writeStart).Seconds())
+
 	if !rc {
 		logger.BessLog.Errorln(errGRPCCallFailed)
 		// **The cause has to say what happened.** This function used to initialise
