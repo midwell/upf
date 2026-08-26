@@ -72,5 +72,4 @@ func TestDatapathWriteDurationDisclosesNoSubject(t *testing.T) {
 	if len(got) != 1 || got[0] != "method" {
 		t.Errorf("label set = %v, want exactly [method]", got)
 	}
-
 }
