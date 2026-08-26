@@ -4,6 +4,7 @@
 package pfcpiface
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/omec-project/li/x1"
@@ -230,5 +231,54 @@ func TestAnUnconfirmedDuplicationWriteIsSilentOnTheOperatorLog(t *testing.T) {
 	if n := logs.Len(); n != 0 {
 		t.Errorf("an unconfirmed duplication write emitted %d operator-log entries, want 0 "+
 			"(undetectability): %v", n, logs.All())
+	}
+}
+
+// The interrogation half, and the reason it is asserted rather than reasoned about: this
+// element's conformance disposition states that a task interrogation answers
+// duplicationNotProgrammed after an unconfirmed write instead of claiming the task is
+// faultless. That claim was derived by reading taskFaults, and a claim published in a
+// conformance document needs a test behind it.
+func TestAnUnconfirmedWriteIsVisibleToAnInterrogation(t *testing.T) {
+	f := newEnablerFixture(t)
+	sess := unmarkedSession(107, "10.250.0.14")
+	f.putSession(t, sess)
+
+	// activate, not tasks.Activate: the fixture's helper also drives the re-derivation that
+	// builds the enabler's tasking snapshot, and resolveTaskFaults answers nil without one.
+	f.activate(t, "W1", ueAddr("10.250.0.14"))
+	f.settle(t)
+
+	// The refused branch: recorded as attempted, so the record no longer claims the rules
+	// are duplicating.
+	f.e.farsAttempted(107, []far{{farID: 1, fseID: 107, liDuplicate: true}})
+
+	faults := f.e.taskFaults("W1")
+	if len(faults) == 0 {
+		t.Fatal("the element answered that the task is faultless after a write it could not " +
+			"confirm — which is the false-health answer the whole change exists to remove")
+	}
+	if got := faults[0].ErrorDescription; !strings.HasPrefix(got, x1.TaskIssueDuplicationNotProgrammed+":") {
+		t.Errorf("fault = %q, want one scoped %q", got, x1.TaskIssueDuplicationNotProgrammed)
+	}
+}
+
+// The boundary the other direction. messages_session.go's deletion-stage branch keeps using
+// farsPushed because there the push succeeded and only the later stage failed — the element
+// knows the datapath is duplicating. Nothing about that is an LI condition, and reporting it
+// would spend the credibility of the element's most serious report on a non-event.
+func TestAConfirmedWriteRaisesNoReport(t *testing.T) {
+	f := newEnablerFixture(t)
+
+	before := len(f.reported)
+	f.e.farsPushed(108, []far{{farID: 1, fseID: 108, liDuplicate: true}})
+
+	if len(f.reported) != before {
+		t.Errorf("reports %d -> %d: a write the datapath accepted was reported as a fault",
+			before, len(f.reported))
+	}
+	if value, held := f.recorded(108, 1); !held || !value {
+		t.Errorf("recorded as (duplicating=%v, held=%v); a confirmed push must record what the "+
+			"datapath actually holds", value, held)
 	}
 }
