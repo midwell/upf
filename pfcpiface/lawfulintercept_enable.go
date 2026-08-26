@@ -860,6 +860,43 @@ func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
 // is exactly the case where the datapath may have applied the write after all.
 func (e *ccEnabler) farsAttempted(seid uint64, fars []far) {
 	e.recordFARs(seid, fars, false)
+	e.reportUnconfirmedDuplication(fars)
+}
+
+// reportUnconfirmedDuplication tells the provisioning function that rules for a task this
+// element accepted may not have been applied.
+//
+// Correcting is not enough on its own. The record above makes the next pass rewrite the
+// rules, which restores the interception — but it says nothing about the interval before
+// that pass runs, in which an accepted warrant produced no product. An agency receiving
+// nothing cannot tell that from a subject who is not communicating, and this element is the
+// only party that knows the write was unconfirmed. If it does not say so, the interval has
+// no representation anywhere.
+//
+// Raised here rather than in the handler so that a path added later inherits it by calling
+// farsAttempted, instead of having to remember to report as well as record. That is the
+// sibling-paths lesson: a remedy placed on one path is a remedy whose presence depends on
+// which path runs.
+//
+// Only where duplication is involved. An ordinary rule this element could not confirm is
+// the datapath's business; it becomes the ADMF's only when a warrant depends on it.
+func (e *ccEnabler) reportUnconfirmedDuplication(fars []far) {
+	if e == nil || e.report == nil {
+		return
+	}
+
+	for i := range fars {
+		if !fars[i].liDuplicate {
+			continue
+		}
+
+		e.report(x1.NEIssueDuplicationRefused,
+			"the datapath did not confirm a duplication rule for an accepted interception "+
+				"task, so this element cannot say whether the interception is running and it "+
+				"may be producing nothing until the next re-derivation rewrites it")
+
+		return
+	}
 }
 
 // recordFARs is the body of both. confirmed says whether the datapath's acceptance is

@@ -3,7 +3,11 @@
 
 package pfcpiface
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/omec-project/li/x1"
+)
 
 // A modification whose push the datapath refuses leaves this element unable to say whether
 // the rules were applied. What it records about that write decides whether it ever tries
@@ -128,5 +132,61 @@ func TestAnEverDuplicatedFARIsStillTurnedOffWhateverTheRecordSays(t *testing.T) 
 	if f.duplicates(t, 102, 1) {
 		t.Fatal("the withdrawal did not reach the datapath: a record saying \"off\" was trusted " +
 			"for a FAR this element had turned on, so the subscriber is still being copied")
+	}
+}
+
+// Correcting the condition restores the interception at the next pass; it says nothing
+// about the interval before that, in which an accepted warrant produced no product. An
+// agency receiving nothing cannot tell that from a subject who is not communicating, and
+// this element is the only party that knows the write was unconfirmed.
+func TestARefusedModificationIsReported(t *testing.T) {
+	f := newEnablerFixture(t)
+	sess := unmarkedSession(103, "10.250.0.12")
+	f.putSession(t, sess)
+
+	task := ccTask("W1", ueAddr("10.250.0.12"))
+	if err := f.e.canApply(task); err != nil {
+		t.Fatalf("canApply: %v", err)
+	}
+	if !f.tasks.Activate(task) {
+		t.Fatal("Activate failed")
+	}
+
+	modified := sess
+	modified.fars = append([]far(nil), sess.fars...)
+	updated := PacketForwardingRules{fars: append([]far(nil), modified.fars...)}
+	f.e.applyTasking(&modified, &updated)
+
+	before := len(f.reported)
+	f.e.farsAttempted(103, updated.fars)
+
+	if len(f.reported) != before+1 {
+		t.Fatalf("reports %d -> %d: an unconfirmed write for an accepted task was recorded "+
+			"and not reported, so the interval where the warrant produced nothing has no "+
+			"representation anywhere", before, len(f.reported))
+	}
+	if got := f.reported[len(f.reported)-1]; got != x1.NEIssueDuplicationRefused {
+		t.Errorf("issue type = %q, want %q", got, x1.NEIssueDuplicationRefused)
+	}
+}
+
+// The report belongs to the warrant, not to the datapath. A rule this element could not
+// confirm, carrying no duplication, is an ordinary datapath failure and none of the ADMF's
+// business — reporting it would spend the credibility of the element's most serious report.
+func TestAnUnconfirmedWriteWithoutDuplicationIsNotReported(t *testing.T) {
+	f := newEnablerFixture(t)
+	sess := unmarkedSession(104, "10.250.0.13")
+	f.putSession(t, sess)
+
+	// No tasking activated, so nothing this session carries duplicates.
+	plain := PacketForwardingRules{fars: append([]far(nil), sess.fars...)}
+
+	before := len(f.reported)
+	f.e.farsAttempted(104, plain.fars)
+
+	if len(f.reported) != before {
+		t.Errorf("reports %d -> %d: an unconfirmed write carrying no duplication was reported "+
+			"to the ADMF, which has nothing to act on and is told so less credibly next time",
+			before, len(f.reported))
 	}
 }
