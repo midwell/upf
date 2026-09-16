@@ -181,7 +181,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	// a missed one is an interception silently producing nothing.
 	upf.ccEnabler.applyTasking(&session, &updated)
 
-	cause := upf.SendMsgToUPF(upfMsgTypeAdd, session.PacketForwardingRules, updated)
+	cause, confirmed := upf.sendDuplicationWrite(upfMsgTypeAdd, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
 		// The batch reported a failure, which means it completed and some of its rules
 		// may be programmed. Take them out before forgetting the session: nothing else
@@ -243,7 +243,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	// All of the session's FARs, because for a new session that is what was pushed: the
 	// SendMsgToUPF above carries session.PacketForwardingRules, and a session being
 	// established has no rules older than this message.
-	upf.ccEnabler.sessionProgrammed(&session, session.fars)
+	upf.ccEnabler.sessionProgrammed(&session, session.fars, confirmed)
 
 	var localFSEID *ie.IE
 
@@ -446,7 +446,7 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// with the triggering function still believing it is running.
 	upf.ccEnabler.applyTasking(&session, &updated)
 
-	cause := upf.SendMsgToUPF(upfMsgTypeMod, session.PacketForwardingRules, updated)
+	cause, confirmed := upf.sendDuplicationWrite(upfMsgTypeMod, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
 		// **A refusal does not mean the datapath is untouched**, so the rules this element was
 		// told to push are recorded whatever the answer was. The same reasoning the deletion
@@ -532,8 +532,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// datapath before this stage ran, and this return is before PutSession — so
 		// sessionProgrammed, the only thing that records a push, never happens. Record it
 		// here or the datapath duplicates with nothing in this element able to say so, and
-		// nothing able to turn it off. See farsPushed.
-		upf.ccEnabler.farsPushed(localSEID, updated.fars)
+		// nothing able to turn it off. See farsPushed -- or farsAttempted, where the push
+		// itself was never acknowledged and the record must not claim it was.
+		if confirmed {
+			upf.ccEnabler.farsPushed(localSEID, updated.fars)
+		} else {
+			upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+		}
 
 		return sendError(ErrWriteToDatapath)
 	}
@@ -559,7 +564,7 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// whatever the datapath was told about them earlier, which is what the record already
 	// says; restating them from this element's intent would replace an account of the
 	// datapath with a copy of our own wishes for every rule this message did not touch.
-	upf.ccEnabler.sessionProgrammed(&session, updated.fars)
+	upf.ccEnabler.sessionProgrammed(&session, updated.fars, confirmed)
 
 	// Build response message
 	smres := message.NewSessionModificationResponse(0, /* MO?? <-- what's this */

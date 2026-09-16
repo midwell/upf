@@ -67,7 +67,7 @@ func TestARemovedFARLeavesNoRecordBehind(t *testing.T) {
 	f.e.farsRemoved(100, []far{{farID: 1, fseID: 100}})
 	// A pure removal pushes no created or updated rules, so the handler records none — which
 	// is the point: the FARs that remain keep the record they already had.
-	f.e.sessionProgrammed(&remaining, nil)
+	f.e.sessionProgrammed(&remaining, nil, true)
 	f.settle(t)
 
 	if f.pushCount() != before {

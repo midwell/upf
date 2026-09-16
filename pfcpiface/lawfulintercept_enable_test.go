@@ -61,7 +61,7 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 		tasks: store.New(), store: NewInMemoryStore(),
 		datapath: make(map[farRef]bool),
 	}
-	f.e = newCCEnabler(f.tasks, func(_, updated PacketForwardingRules) uint8 {
+	f.e = newCCEnabler(f.tasks, confirmedPush(func(_, updated PacketForwardingRules) uint8 {
 		f.mu.Lock()
 		f.pushed = append(f.pushed, updated)
 		cause := f.cause
@@ -80,7 +80,7 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 		}
 
 		return cause
-	}, func(issueType, description string) {
+	}), func(issueType, description string) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.reported = append(f.reported, issueType)
@@ -180,7 +180,7 @@ func (f *enablerFixture) commit(t *testing.T, s PFCPSession) {
 		t.Fatalf("PutSession: %v", err)
 	}
 	// All of the session's FARs, which is what an establishment pushes.
-	f.e.sessionProgrammed(&s, s.fars)
+	f.e.sessionProgrammed(&s, s.fars, true)
 }
 
 // commitModification is commit for a session the SMF has modified: the handler pushes the rules
@@ -191,7 +191,7 @@ func (f *enablerFixture) commitModification(t *testing.T, s PFCPSession, pushed 
 	if err := f.store.PutSession(s); err != nil {
 		t.Fatalf("PutSession: %v", err)
 	}
-	f.e.sessionProgrammed(&s, pushed)
+	f.e.sessionProgrammed(&s, pushed, true)
 }
 
 // recorded is what the element believes it last told the datapath about a FAR,
@@ -1063,7 +1063,7 @@ func TestConcurrentRequestsAreCoalesced(t *testing.T) {
 		entered:       make(chan struct{}),
 		release:       make(chan struct{}),
 	}
-	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }, nil)
+	e := newCCEnabler(store.New(), confirmedPush(func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }), nil)
 	t.Cleanup(e.stop)
 	e.addSource(held)
 
@@ -1122,7 +1122,7 @@ func TestStopLetsATransactionInFlightFinish(t *testing.T) {
 		entered:       make(chan struct{}),
 		release:       make(chan struct{}),
 	}
-	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }, nil)
+	e := newCCEnabler(store.New(), confirmedPush(func(_, _ PacketForwardingRules) uint8 { return ie.CauseRequestAccepted }), nil)
 	e.addSource(held)
 
 	e.retask()

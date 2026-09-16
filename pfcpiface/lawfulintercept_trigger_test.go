@@ -619,7 +619,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		t.Fatalf("PutSession: %v", err)
 	}
 
-	enabler := newCCEnabler(nil, func(_, updated PacketForwardingRules) uint8 {
+	enabler := newCCEnabler(nil, confirmedPush(func(_, updated PacketForwardingRules) uint8 {
 		for i := range updated.fars {
 			if updated.fars[i].Duplicates() {
 				note("program:on")
@@ -629,7 +629,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		}
 
 		return ie.CauseRequestAccepted
-	}, nil)
+	}), nil)
 	t.Cleanup(enabler.stop)
 	enabler.addSource(sessions)
 

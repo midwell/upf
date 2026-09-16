@@ -175,7 +175,14 @@ type ccEnabler struct {
 	// every subsequent difference, so nothing ever retries it. Duplication for that
 	// traffic never happens, this element's own account says it is happening, and the
 	// only event that could correct the record is a change in tasking.
-	push func(all, updated PacketForwardingRules) uint8
+	//
+	// The second answer is whether the datapath acknowledged the write at all. An
+	// accepted cause is not that: a batch whose RPC did not complete is answered
+	// accepted on purpose, so that an uncertain result does not have the session torn
+	// down. This record must take the other side of that -- an unconfirmed write is
+	// not a programmed one -- or the rule drops out of every later difference exactly
+	// as a refused one would. See lawfulintercept_confirmation.go.
+	push func(all, updated PacketForwardingRules) (cause uint8, confirmed bool)
 	// report surfaces an LI-plane fault to the ADMF. nil when no ADMF is configured.
 	report func(issueType, description string)
 
@@ -228,7 +235,7 @@ type programmedFAR struct {
 
 func newCCEnabler(
 	tasks *store.Store,
-	push func(all, updated PacketForwardingRules) uint8,
+	push func(all, updated PacketForwardingRules) (uint8, bool),
 	report func(issueType, description string),
 ) *ccEnabler {
 	e := &ccEnabler{
@@ -598,7 +605,12 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // one FAR can change what a criterion matches for the session's others — a UE address moves, a
 // PDR is replaced — so a pass is wanted whenever the session's FARs and the record disagree,
 // including for FARs this call did not push.
-func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
+// confirmed says whether the datapath acknowledged the writes. When it did not, the rules
+// are recorded as *not* duplicating whatever this element meant to write -- the same rule
+// farsAttempted follows, and for the same reason: a record that agrees with the tasking is
+// one every later pass skips, so an unearned record is what turns an uncertain write into
+// an interception that never runs.
+func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far, confirmed bool) {
 	if e == nil || s == nil {
 		return
 	}
@@ -608,7 +620,10 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far) {
 	stamp := e.writes
 	for i := range pushed {
 		ref := farRef{seid: s.localSEID, farID: pushed[i].farID}
-		e.programmed[ref] = programmedFAR{duplicating: pushed[i].liDuplicate, written: stamp}
+		e.programmed[ref] = programmedFAR{
+			duplicating: confirmed && pushed[i].liDuplicate,
+			written:     stamp,
+		}
 		if pushed[i].liDuplicate {
 			e.everDuplicated[ref] = true
 		}
@@ -1133,8 +1148,9 @@ func (e *ccEnabler) transact() {
 			if len(changed) > 0 && e.push != nil {
 				// Only the changed FARs: the datapath's modify path programs what it is
 				// given, and restating the rest would rewrite rules it already has.
-				cause := e.push(PacketForwardingRules{}, PacketForwardingRules{fars: changed})
-				if cause != ie.CauseRequestAccepted {
+				cause, confirmed := e.push(PacketForwardingRules{}, PacketForwardingRules{fars: changed})
+				switch {
+				case cause != ie.CauseRequestAccepted:
 					// The datapath answered, and the answer was that none of this was
 					// programmed. It is one cause for the whole write, so the whole
 					// write is what is refused. fresh is this pass's own map and no
@@ -1151,6 +1167,35 @@ func (e *ccEnabler) transact() {
 					if e.report != nil {
 						e.report(x1.NEIssueDuplicationRefused,
 							"the datapath refused a duplication rule for an accepted interception task")
+					}
+				case !confirmed:
+					// The datapath did not answer for at least one of these writes. Not
+					// a refusal, so the previous values are not restored -- they are no
+					// more true than what was written. The record is set to *not
+					// duplicating* instead, which is the only claim that is safe in both
+					// directions: the next pass finds it disagreeing with the tasking and
+					// rewrites the rule, and taskFaults counts it as not duplicating so
+					// an interrogation answers with a fault rather than claiming the
+					// warrant is being served. everDuplicated is untouched, so the
+					// over-collection direction keeps the same protection it had.
+					//
+					// The same trade farsAttempted documents: one redundant write per
+					// pass where the rules did land, against an accepted warrant silently
+					// producing nothing.
+					for _, p := range prior {
+						cur, held := fresh[p.ref]
+						if !held {
+							continue
+						}
+
+						cur.duplicating = false
+						fresh[p.ref] = cur
+					}
+					if e.report != nil {
+						e.report(x1.NEIssueDuplicationRefused,
+							"the datapath did not confirm a duplication rule for an accepted "+
+								"interception task, so this element cannot say whether the "+
+								"interception is running until a later re-derivation rewrites it")
 					}
 				}
 			}

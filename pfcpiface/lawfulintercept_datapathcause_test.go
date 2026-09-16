@@ -55,25 +55,38 @@ func bessWithNoDatapath(t *testing.T) *bess {
 	return &bess{conn: conn, client: pb.NewBESSControlClient(conn)}
 }
 
-// TestARefusedDatapathWriteIsReportedAsRefused is 1.1 and 1.3 together: the cause
-// SendMsgToUPF returns has to describe what the datapath did.
+// TestAnUnconfirmedDatapathWriteIsNotCountedAsProgrammed is the property the datapath
+// owes an interception, now that the two answers are separate.
 //
-// Before this, a failed batch was logged and reported as CauseRequestAccepted. That
-// made three rejection branches unreachable — the session establishment handler's,
-// the modification handler's, and the interception enabler's record of what was
-// programmed — and the last one is the one that cannot be recovered from: a refused
-// FAR recorded as programmed drops out of every subsequent difference, so no
-// re-derivation ever retries it and the interception silently never starts.
-func TestARefusedDatapathWriteIsReportedAsRefused(t *testing.T) {
+// A write whose RPC never completed says nothing about what the datapath did, and
+// SendMsgToUPF answers it as **accepted** on purpose: rejecting an uncertain result would
+// have the caller tear down a session whose rules may still be installed, and the context
+// these calls carry expires before GRPCJoin's own timer, so a merely slow datapath reaches
+// this branch routinely.
+//
+// The interception record cannot take that answer. ETSI TS 103 221-1 clause 5.3 makes an
+// issue that loses traffic a fault rather than a warning, and clause 6.5.2.2 names the
+// state exactly -- "currently unable to collect traffic but not terminating". So the cause
+// stays accepted and the confirmation is false, and it is the confirmation the enabler
+// records against.
+func TestAnUnconfirmedDatapathWriteIsNotCountedAsProgrammed(t *testing.T) {
 	b := bessWithNoDatapath(t)
 
 	rules := PacketForwardingRules{fars: []far{{farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward}}}
 
-	if cause := b.SendMsgToUPF(upfMsgTypeMod, PacketForwardingRules{}, rules); cause != ie.CauseRequestRejected {
-		t.Errorf("SendMsgToUPF returned cause %d for a write to a datapath that is not there, "+
-			"want %d (rejected): every caller that tests for a refusal has an unreachable branch "+
-			"while this is accepted, and an interception refused by the datapath is recorded as "+
-			"running", cause, ie.CauseRequestRejected)
+	cause, confirmed := b.sendMsgToUPFConfirmed(upfMsgTypeMod, PacketForwardingRules{}, rules)
+
+	if cause != ie.CauseRequestAccepted {
+		t.Errorf("SendMsgToUPF returned cause %d for a write whose RPC did not complete, want %d "+
+			"(accepted): an uncertain result must not have the caller forget a session the "+
+			"datapath may still be forwarding for", cause, ie.CauseRequestAccepted)
+	}
+
+	if confirmed {
+		t.Error("the batch reported itself confirmed for a write to a datapath that is not " +
+			"there: a duplication FAR recorded as programmed drops out of every later " +
+			"difference, so no re-derivation retries it and an accepted warrant produces " +
+			"nothing while this element reports itself healthy")
 	}
 }
 
@@ -95,16 +108,18 @@ func TestAnAcceptedDatapathWriteStaysAccepted(t *testing.T) {
 	}
 }
 
-// TestARefusedDuplicationFARIsRetriedAndReported is the whole of group 1's first
-// claim, driven end to end: the enabler's push is bess.SendMsgToUPF against a
-// datapath that is not there.
+// TestAnUnconfirmedDuplicationFARIsRetriedAndReported is the whole of it driven end to
+// end: the enabler's push is the real datapath call against a datapath that is not there,
+// so the batch comes back accepted-but-unconfirmed — the case the PFCP cause alone cannot
+// express.
 //
-// Two properties, and the second is the one the stubbed test could not establish.
-// The refusal is reported to the ADMF as duplicationRefused — an interception the
-// element has acknowledged is producing nothing, which is invisible from outside.
-// And the FAR stays in the difference, so the next re-derivation pushes it again:
-// an interception refused once must not be recorded as running.
-func TestARefusedDuplicationFARIsRetriedAndReported(t *testing.T) {
+// Three properties. The ADMF is told, because an interception this element has
+// acknowledged and cannot confirm is invisible from outside; ETSI TS 103 221-1 clause 5.3
+// requires the element to raise that rather than hold it. The FAR stays in the difference,
+// so the next re-derivation pushes it again — an unconfirmed write recorded as programmed
+// drops out of every later pass, and nothing would ever retry it. And an interrogation of
+// the task answers with a fault rather than claiming the warrant is served.
+func TestAnUnconfirmedDuplicationFARIsRetriedAndReported(t *testing.T) {
 	b := bessWithNoDatapath(t)
 
 	tasks := store.New()
@@ -112,10 +127,12 @@ func TestARefusedDuplicationFARIsRetriedAndReported(t *testing.T) {
 
 	var reported []string
 	reportedAt := make(chan string, 8)
-	// Wrapped exactly as production wraps it (see startLIShipper): the enabler pushes
-	// a modification, and what it gets back is the datapath's own cause.
-	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) uint8 {
-		return b.SendMsgToUPF(upfMsgTypeMod, all, updated)
+	// Wired exactly as production wires it (see the enabler's push in lawfulintercept.go):
+	// the enabler pushes a modification and gets back both the datapath's cause and whether
+	// the write was acknowledged. Not confirmedPush, which is for tests whose subject is the
+	// cause: here the cause is accepted and the confirmation is the whole point.
+	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) (uint8, bool) {
+		return b.sendMsgToUPFConfirmed(upfMsgTypeMod, all, updated)
 	}, func(issueType, _ string) {
 		reportedAt <- issueType
 	})
@@ -149,12 +166,31 @@ func TestARefusedDuplicationFARIsRetriedAndReported(t *testing.T) {
 	case issue := <-reportedAt:
 		reported = append(reported, issue)
 		if issue != x1.NEIssueDuplicationRefused {
-			t.Errorf("the refusal was reported as %q, want %q", issue, x1.NEIssueDuplicationRefused)
+			t.Errorf("the unconfirmed write was reported as %q, want %q", issue, x1.NEIssueDuplicationRefused)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the datapath refused a duplication rule for an accepted interception task and " +
-			"nothing was reported: the element holds a warrant it has acknowledged, produces " +
-			"nothing for it, and no channel says so")
+		t.Fatal("the datapath did not confirm a duplication rule for an accepted interception " +
+			"task and nothing was reported: the element holds a warrant it has acknowledged, " +
+			"cannot say whether it is being served, and no channel says so")
+	}
+
+	// And the task itself answers with a fault. TS 103 221-1 clause 6.5.2.2's category for
+	// this is "currently unable to collect traffic but not terminating", which x1.TaskFault
+	// carries as issue code 9020.
+	faults := e.taskFaults(task.XID)
+	if len(faults) == 0 {
+		t.Fatal("a task whose duplication the datapath did not confirm reports no fault, so an " +
+			"interrogation is told it is provisioned and faultless while it may be producing " +
+			"nothing")
+	}
+	if !strings.Contains(faults[0].ErrorDescription, "not duplicating") {
+		t.Errorf("the fault does not say what is wrong: %q", faults[0].ErrorDescription)
+	}
+	if faults[0].ErrorCode != 9020 {
+		t.Errorf("the fault carries issue code %d, want 9020 (generic non-terminating fault): "+
+			"an element that cannot currently collect for a task is in a non-terminating fault, "+
+			"not a warning (TS 103 221-1 clause 5.3) and not a terminating one",
+			faults[0].ErrorCode)
 	}
 
 	// The FAR must still be eligible. The record of what was programmed is what the
@@ -169,45 +205,45 @@ func TestARefusedDuplicationFARIsRetriedAndReported(t *testing.T) {
 			t.Errorf("the retry was reported as %q, want %q", issue, x1.NEIssueDuplicationRefused)
 		}
 		if len(reported) != 2 {
-			t.Errorf("the ADMF was told %d time(s), want twice: a refusal that is retried and "+
-				"refused again is still an interception that is not running", len(reported))
+			t.Errorf("the ADMF was told %d time(s), want twice: a write that is retried and "+
+				"still unconfirmed is still an interception that may not be running", len(reported))
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("the second re-derivation pushed nothing: the refused FAR was recorded as "+
+		t.Fatalf("the second re-derivation pushed nothing: the unconfirmed FAR was recorded as "+
 			"programmed and has dropped out of the difference, so this interception will never "+
 			"be retried. reported so far: %v", reported)
 	}
 }
 
-// TestARefusedFARProgramReachesGRPCJoin pins the link the two remedies above rest
-// on, at the level below them: addFAR must tell GRPCJoin what the datapath said.
+// TestAnUnconfirmedFARDoesNotChangeWhatTheJoinIsTold pins both halves of the split at the
+// level below, because they are separately revertible.
 //
-// It used to send `done <- true` unconditionally — processFAR logged the error and
-// returned nothing — so GRPCJoin could not fail on a refusal at all, and a cause
-// derived from it would still have been accepted. This is why 1.1 alone was not
-// enough, and it is worth its own assertion because the two are separately
-// revertible.
-func TestARefusedFARProgramReachesGRPCJoin(t *testing.T) {
+// addFAR must go on telling GRPCJoin the write succeeded -- that is upstream's contract and
+// the reason an uncertain batch is not rejected -- while the batch separately records that
+// it could not be confirmed. A change that made the worker report failure instead would
+// pass the second assertion and break the first, which is precisely the regression this
+// guards.
+func TestAnUnconfirmedFARDoesNotChangeWhatTheJoinIsTold(t *testing.T) {
 	b := bessWithNoDatapath(t)
 
+	ctx, batch := withBatchConfirmation(t.Context())
+
 	done := make(chan bool, 1)
-	b.addFAR(t.Context(), done, far{farID: 1, fseID: 1, applyAction: ActionForward})
+	b.addFAR(ctx, done, far{farID: 1, fseID: 1, applyAction: ActionForward})
 
 	select {
 	case ok := <-done:
-		if ok {
-			t.Error("addFAR signalled success for a FAR the datapath never received: " +
-				"GRPCJoin cannot fail, so no cause derived from it can report a refusal")
+		if !ok {
+			t.Error("addFAR reported a failure to the join for an RPC that did not complete: " +
+				"the batch is then rejected, and the establishment handler forgets a session " +
+				"whose rules the datapath may hold")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("addFAR signalled nothing")
 	}
 
-	// And the error names the interface it came from, so an operator reading the log
-	// is not left with a bare failure.
-	if err := b.processFAR(t.Context(), nil, upfMsgTypeAdd); err == nil {
-		t.Error("processFAR reported success against a datapath that is not there")
-	} else if strings.TrimSpace(err.Error()) == "" {
-		t.Error("processFAR returned an error with no message")
+	if !batch.unconfirmed.Load() {
+		t.Error("the write was not recorded as unconfirmed, so nothing downstream can tell it " +
+			"apart from one the datapath acknowledged")
 	}
 }

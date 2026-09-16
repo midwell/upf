@@ -165,6 +165,33 @@ func (b *bess) AddSliceInfo(sliceInfo *SliceInfo) error {
 func (b *bess) SendMsgToUPF(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) uint8 {
+	cause, _ := b.sendMsgToUPFConfirmed(method, rules, updated)
+
+	return cause
+}
+
+// sendMsgToUPFConfirmed is SendMsgToUPF, and additionally answers whether every write in
+// the batch was acknowledged by the datapath.
+//
+// **The two answers are not the same question, and lawful interception is why they cannot
+// be collapsed.** The cause is what the SMF is told, and an uncertain result must not
+// reject a session: the context these calls carry is created before GRPCJoin's timer, so
+// a slow datapath expires it first and every worker sees DeadlineExceeded while the join
+// itself never times out. Rejecting on that would have the caller tear down a session the
+// datapath may still be forwarding for.
+//
+// The interception record cannot inherit that leniency. A duplication FAR recorded as
+// programmed drops out of every later re-derivation, so nothing retries it and an accepted
+// warrant produces nothing while this element reports itself healthy. ETSI TS 103 221-1
+// clause 5.3 makes that a fault rather than a warning -- "any issue which loses traffic is
+// categorized as a fault" -- and clause 6.5.2.2 gives it the category it belongs in,
+// "currently unable to collect traffic but not terminating".
+//
+// So the confirmation travels beside the join rather than through it: GRPCJoin, the
+// workers' done contract and the cause logic are exactly as upstream wrote them.
+func (b *bess) sendMsgToUPFConfirmed(
+	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
+) (uint8, bool) {
 	// create context
 	cause := ie.CauseRequestAccepted
 
@@ -180,11 +207,14 @@ func (b *bess) SendMsgToUPF(
 
 	calls := len(pdrs) + len(fars) + len(qers)
 	if calls == 0 {
-		return cause
+		// Nothing was asked of the datapath, so there is nothing left unconfirmed.
+		return cause, true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
+
+	ctx, batch := withBatchConfirmation(ctx)
 
 	done := make(chan bool, calls)
 
@@ -245,7 +275,10 @@ func (b *bess) SendMsgToUPF(
 		cause = ie.CauseRequestRejected
 	}
 
-	return cause
+	// Confirmed means every write was acknowledged: the batch finished, nothing reported a
+	// refusal, and no worker had an RPC that did not complete. The last of those is the
+	// one the cause deliberately forgives.
+	return cause, completed && succeeded && !batch.unconfirmed.Load()
 }
 
 func (b *bess) Exit() {
@@ -1594,8 +1627,17 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		if refused(b.processFAR(ctx, arg, upfMsgTypeAdd)) {
-			return
+		// li: an RPC that did not complete is not a refusal, and upstream deliberately
+		// reports the rule as programmed so that an uncertain result cannot reject the
+		// batch. The interception record must not inherit that -- see
+		// lawfulintercept_confirmation.go -- so it is noted beside the join, leaving what
+		// this worker tells GRPCJoin exactly as it was.
+		if err = b.processFAR(ctx, arg, upfMsgTypeAdd); err != nil {
+			if refused(err) {
+				return
+			}
+
+			noteUnconfirmed(ctx)
 		}
 
 		if enableGtpuPathMonitoring {
@@ -1642,8 +1684,14 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		if refused(b.processFAR(ctx, arg, upfMsgTypeDel)) {
-			return
+		// li: as in addFAR. A delete this element cannot confirm must not be recorded as
+		// done either -- the duplication may still be running.
+		if err = b.processFAR(ctx, arg, upfMsgTypeDel); err != nil {
+			if refused(err) {
+				return
+			}
+
+			noteUnconfirmed(ctx)
 		}
 
 		if enableGtpuPathMonitoring {

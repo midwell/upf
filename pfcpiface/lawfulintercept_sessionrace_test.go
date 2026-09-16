@@ -138,9 +138,9 @@ func TestAStoredSessionsRulesAreStableForAConcurrentReader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := newCCEnabler(store.New(), func(_, _ PacketForwardingRules) uint8 {
+	e := newCCEnabler(store.New(), confirmedPush(func(_, _ PacketForwardingRules) uint8 {
 		return ie.CauseRequestAccepted
-	}, nil)
+	}), nil)
 	t.Cleanup(e.stop)
 	e.addSource(sessions)
 
@@ -188,9 +188,9 @@ func TestTheFramingPathReadsAStableSession(t *testing.T) {
 	}
 
 	tasks := store.New()
-	e := newCCEnabler(tasks, func(_, _ PacketForwardingRules) uint8 {
+	e := newCCEnabler(tasks, confirmedPush(func(_, _ PacketForwardingRules) uint8 {
 		return ie.CauseRequestAccepted
-	}, nil)
+	}), nil)
 	t.Cleanup(e.stop)
 	e.addSource(sessions)
 
@@ -321,9 +321,9 @@ func TestAStoredSessionsQERListIsStableForAConcurrentReader(t *testing.T) {
 	}
 
 	tasks := store.New()
-	e := newCCEnabler(tasks, func(_, _ PacketForwardingRules) uint8 {
+	e := newCCEnabler(tasks, confirmedPush(func(_, _ PacketForwardingRules) uint8 {
 		return ie.CauseRequestAccepted
-	}, nil)
+	}), nil)
 	t.Cleanup(e.stop)
 	e.addSource(sessions)
 
@@ -439,9 +439,9 @@ func TestATaskingPassDoesNotRestateAStaleForwardingBody(t *testing.T) {
 	dp := newRecordingDP()
 
 	tasks := store.New()
-	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) uint8 {
+	e := newCCEnabler(tasks, confirmedPush(func(all, updated PacketForwardingRules) uint8 {
 		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
-	}, nil)
+	}), nil)
 	t.Cleanup(e.stop)
 	e.addSource(sessions)
 
@@ -524,9 +524,9 @@ func TestASessionDeletedDuringAPassIsNotReAddedToTheDatapath(t *testing.T) {
 	dp := newRecordingDP()
 
 	tasks := store.New()
-	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) uint8 {
+	e := newCCEnabler(tasks, confirmedPush(func(all, updated PacketForwardingRules) uint8 {
 		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
-	}, nil)
+	}), nil)
 	t.Cleanup(e.stop)
 	e.addSource(sessions)
 

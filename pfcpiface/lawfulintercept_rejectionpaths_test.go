@@ -27,9 +27,14 @@ import (
 type refusingDP struct {
 	fakeDP
 
-	mu      sync.Mutex
-	refuse  bool
-	methods []upfMsgType
+	mu     sync.Mutex
+	refuse bool
+	// unconfirmed models the third answer: the datapath applied nothing it refused, but
+	// could not say whether it applied what it accepted. Every other fake here is
+	// all-or-nothing, which is why none of them can reach the state an RPC that did not
+	// complete produces.
+	unconfirmed bool
+	methods     []upfMsgType
 	// duplicating is what this datapath believes it is duplicating, keyed by FAR ID. It is
 	// written whatever the answer, because that is the point.
 	duplicating map[uint32]bool
@@ -76,6 +81,19 @@ func (d *refusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardi
 	return ie.CauseRequestAccepted
 }
 
+// sendMsgToUPFConfirmed makes this fake a confirmingDatapath, so a test can drive the
+// accepted-but-unconfirmed branch through the real handlers.
+func (d *refusingDP) sendMsgToUPFConfirmed(
+	method upfMsgType, all, updated PacketForwardingRules,
+) (uint8, bool) {
+	cause := d.SendMsgToUPF(method, all, updated)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return cause, cause == ie.CauseRequestAccepted && !d.unconfirmed
+}
+
 func (d *refusingDP) sawMethod(m upfMsgType) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -109,9 +127,9 @@ func rejectionConn(t *testing.T) (*PFCPConn, *refusingDP, *ccEnabler, *[]string)
 		reported []string
 	)
 
-	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) uint8 {
+	e := newCCEnabler(tasks, confirmedPush(func(all, updated PacketForwardingRules) uint8 {
 		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
-	}, func(issueType, _ string) {
+	}), func(issueType, _ string) {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -646,5 +664,63 @@ func TestTaskFaultsDoesNotWalkEverySessionPerRequest(t *testing.T) {
 	if counting.count() == before {
 		t.Error("a tasking change did not invalidate the answer; a status reply that survives the " +
 			"tasking it describes is a history, not a state")
+	}
+}
+
+// TestAnUnconfirmedModificationDoesNotRecordDuplicationAsProgrammed drives the real
+// handler, which is the only way to establish that the handler passes the datapath's
+// confirmation on rather than its cause.
+//
+// The datapath accepts the batch and cannot say whether it applied it -- an RPC that did
+// not complete, which SendMsgToUPF answers as accepted on purpose. If the handler recorded
+// that as programmed, the FAR would match the tasking on every later pass, drop out of the
+// difference, and never be pushed again: an accepted warrant producing nothing, with this
+// element's own record concealing it. ETSI TS 103 221-1 clause 5.3 puts the obligation the
+// other way -- an issue that loses traffic is a fault the element must hold and report.
+func TestAnUnconfirmedModificationDoesNotRecordDuplicationAsProgrammed(t *testing.T) {
+	pConn, dp, e, _ := rejectionConn(t)
+
+	const seid = 402
+
+	if err := pConn.store.PutSession(storedSession(seid, "10.250.0.14")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A warrant covering the session, so applyTasking marks its FARs and there is a
+	// duplication claim for the record to get right or wrong.
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      "22222222-2222-4222-8222-222222222222",
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr("10.250.0.14")},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+
+	dp.mu.Lock()
+	dp.unconfirmed = true
+	dp.mu.Unlock()
+
+	if _, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0,
+			ie.NewUpdateFAR(
+				ie.NewFARID(1),
+				ie.NewApplyAction(ActionForward),
+				ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+			),
+		)); err != nil {
+		t.Fatalf("the modification was refused: %v", err)
+	}
+
+	duplicating, held := programmedFor(e, seid, 1)
+	if !held {
+		t.Fatal("the modification left no record of the FAR it pushed")
+	}
+
+	if duplicating {
+		t.Error("a write the datapath never acknowledged was recorded as duplicating: the FAR " +
+			"now agrees with the tasking, so every later re-derivation skips it and nothing " +
+			"ever pushes it again, while an interrogation of the task reports no fault")
 	}
 }

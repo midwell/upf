@@ -252,7 +252,7 @@ func TestADivergenceIsNoticedWithoutATaskingChange(t *testing.T) {
 	}
 
 	// A session event, and nothing else. No tasking changes here.
-	f.e.sessionProgrammed(&sess, nil)
+	f.e.sessionProgrammed(&sess, nil, true)
 	f.settle(t)
 
 	if f.duplicates(t, 100, teed.farID) {

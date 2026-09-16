@@ -220,8 +220,8 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 			// attempts it again — and the refusal is reported, since an interception
 			// this element accepted and is not carrying out is a condition only the
 			// ADMF can act on.
-			func(all, updated PacketForwardingRules) uint8 {
-				return u.SendMsgToUPF(upfMsgTypeMod, all, updated)
+			func(all, updated PacketForwardingRules) (uint8, bool) {
+				return u.sendDuplicationWrite(upfMsgTypeMod, all, updated)
 			},
 			func(issueType, description string) {
 				if issueReporter != nil {
