@@ -45,26 +45,26 @@ func TestX2X3KeepaliveConfigDefaultsWhenUnusable(t *testing.T) {
 		wantP2     time.Duration
 	}{
 		{name: "nothing configured takes the specification's defaults"},
-		{name: "a usable pair", p1: "10s", p2: "30s", wantP1: 10 * time.Second, wantP2: 30 * time.Second},
-		{name: "only TIME_P1, with TIME_P2 defaulting above it", p1: "30s", wantP1: 30 * time.Second},
+		{name: "a usable pair", p1: "10s", p2: testKeepaliveP1, wantP1: 10 * time.Second, wantP2: 30 * time.Second},
+		{name: "only TIME_P1, with TIME_P2 defaulting above it", p1: testKeepaliveP1, wantP1: 30 * time.Second},
 		{name: "an unparseable TIME_P1", p1: "sixty", wantReport: true},
 		{name: "an unparseable TIME_P2", p2: "three minutes", wantReport: true},
-		{name: "TIME_P2 equal to TIME_P1", p1: "60s", p2: "60s", wantReport: true},
-		{name: "TIME_P2 below TIME_P1", p1: "60s", p2: "30s", wantReport: true},
+		{name: "TIME_P2 equal to TIME_P1", p1: testKeepaliveP2, p2: testKeepaliveP2, wantReport: true},
+		{name: "TIME_P2 below TIME_P1", p1: testKeepaliveP2, p2: testKeepaliveP1, wantReport: true},
 		// Only TIME_P2, set below the default TIME_P1 of 60s: the file reads as though
 		// one timer was tightened, and the mechanism becomes a disconnect loop.
-		{name: "only TIME_P2, below the default TIME_P1", p2: "30s", wantReport: true},
+		{name: "only TIME_P2, below the default TIME_P1", p2: testKeepaliveP1, wantReport: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			li := &LiConfig{
 				X3SockAddr: "/tmp/x3.sock", Cert: "c", Key: "k", CACert: "ca",
-				X1Listen: ":8443", TFID: "smf-1", NEID: "upf-1",
+				X1Listen: testX1ListenAddr, TFID: testTFID, NEID: testNEID,
 				X2X3KeepaliveTimeP1: tc.p1, X2X3KeepaliveTimeP2: tc.p2,
 			}
 
 			// Whatever the timers say, the configuration must not stop the process:
 			// validateConf no longer looks at the li block at all.
-			if err := validateConf(Conf{Mode: "sim", RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}); err != nil {
+			if err := validateConf(Conf{Mode: testModeSim, RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}); err != nil {
 				t.Errorf("validateConf() error = %v; an LI timer must not stop the user plane", err)
 			}
 
@@ -124,7 +124,7 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
 	mdfCert, mdfKey := liLeaf(t, dir, caCert, caKey, "MDF", "mdf3-1")
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
 
 	mdfMat, err := mtls.Load(mdfCert, mdfKey, caPath)
 	if err != nil {
@@ -148,21 +148,21 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 	)
 	go func() {
 		for {
-			conn, err := ln.Accept()
-			if err != nil {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
 				return
 			}
 			go func(c net.Conn) {
 				defer c.Close()
 				for {
 					var head [12]byte
-					if _, err := io.ReadFull(c, head[:]); err != nil {
+					if _, readErr := io.ReadFull(c, head[:]); readErr != nil {
 						return
 					}
 					headerLen := binary.BigEndian.Uint32(head[4:8])
 					payloadLen := binary.BigEndian.Uint32(head[8:12])
 					rest := make([]byte, int(headerLen)+int(payloadLen)-len(head))
-					if _, err := io.ReadFull(c, rest); err != nil {
+					if _, readErr := io.ReadFull(c, rest); readErr != nil {
 						return
 					}
 					if binary.BigEndian.Uint16(head[2:4]) == uint16(x2x3.PDUTypeKeepalive) {
@@ -240,7 +240,7 @@ func TestAnUnusableLIBlockDoesNotStopTheUserPlane(t *testing.T) {
 	complete := func() *LiConfig {
 		return &LiConfig{
 			X3SockAddr: "/pod-share/x3", Cert: "c", Key: "k", CACert: "ca",
-			X1Listen: ":8443", TFID: "smf-1", NEID: "upf-1",
+			X1Listen: testX1ListenAddr, TFID: testTFID, NEID: testNEID,
 		}
 	}
 
@@ -254,13 +254,13 @@ func TestAnUnusableLIBlockDoesNotStopTheUserPlane(t *testing.T) {
 		{"no x3_sockaddr", func(c *LiConfig) { c.X3SockAddr = "" }},
 		{"no credentials", func(c *LiConfig) { c.Cert = "" }},
 		{"an unparseable trigger_keepalive", func(c *LiConfig) { c.TriggerKeepalive = "5min" }},
-		{"a trigger_keepalive below the floor", func(c *LiConfig) { c.TriggerKeepalive = "30s" }},
+		{"a trigger_keepalive below the floor", func(c *LiConfig) { c.TriggerKeepalive = testKeepaliveP1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			li := complete()
 			tc.spoil(li)
 
-			conf := Conf{Mode: "sim", RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}
+			conf := Conf{Mode: testModeSim, RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}
 			if err := validateConf(conf); err != nil {
 				t.Errorf("validateConf refused the configuration (%v). That reaches Fatalln "+
 					"in main and stops the user plane over a Lawful Interception value.", err)
@@ -285,10 +285,10 @@ func TestAnUnusableLIBlockNamesNoFieldInTheGeneralLog(t *testing.T) {
 
 	li := &LiConfig{
 		X3SockAddr: "/pod-share/x3", Cert: "c", Key: "k", CACert: "ca",
-		X1Listen: ":8443", TFID: "smf-1", // ne_id missing
+		X1Listen: testX1ListenAddr, TFID: testTFID, // ne_id missing
 	}
 
-	if err := validateConf(Conf{Mode: "sim", RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}); err != nil {
+	if err := validateConf(Conf{Mode: testModeSim, RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}); err != nil {
 		t.Fatalf("validateConf refused the configuration: %v", err)
 	}
 	if err := validateLiConfig(li); err == nil {

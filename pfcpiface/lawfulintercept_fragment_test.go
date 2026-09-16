@@ -41,7 +41,7 @@ func fragmentedIPv4(src, dst string, proto uint8, ident uint16, offset uint16, m
 
 // uplinkFragment is a teed uplink copy carrying one fragment of the target's datagram.
 func uplinkFragment(ident, offset uint16, more bool, payload []byte) []byte {
-	return ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident, offset, more, payload))
+	return ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident, offset, more, payload))
 }
 
 // portFilter is the filter a transport-port criterion produces on rules that constrain no
@@ -178,23 +178,23 @@ func TestAnIdentificationCollisionDoesNotShareAClassification(t *testing.T) {
 	}{
 		{
 			name:    "a different source address",
-			asFirst: ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
+			asFirst: ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
 			later:   ethIPv4(fragmentedIPv4("10.250.0.10", "1.1.1.1", protoTCP, ident, 8, false, []byte{0x01})),
 		},
 		{
 			name:    "a different destination address",
-			asFirst: ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
-			later:   ethIPv4(fragmentedIPv4("10.250.0.9", "2.2.2.2", protoTCP, ident, 8, false, []byte{0x01})),
+			asFirst: ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
+			later:   ethIPv4(fragmentedIPv4(testUEIPv4, "2.2.2.2", protoTCP, ident, 8, false, []byte{0x01})),
 		},
 		{
 			name:    "a different protocol",
-			asFirst: ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
-			later:   ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoUDP, ident, 8, false, []byte{0x01})),
+			asFirst: ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
+			later:   ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoUDP, ident, 8, false, []byte{0x01})),
 		},
 		{
 			name:    "a different identification",
-			asFirst: ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
-			later:   ethIPv4(fragmentedIPv4("10.250.0.9", "1.1.1.1", protoTCP, ident+1, 8, false, []byte{0x01})),
+			asFirst: ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident, 0, true, tcpSegment(443, 80, 60))),
+			later:   ethIPv4(fragmentedIPv4(testUEIPv4, "1.1.1.1", protoTCP, ident+1, 8, false, []byte{0x01})),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -220,7 +220,7 @@ func TestAnIdentificationCollisionDoesNotShareAClassification(t *testing.T) {
 		}
 		// The same identity, downlink: a different datagram, and undecided.
 		down := ethIPv4(gtpuEncap(
-			fragmentedIPv4("1.1.1.1", "10.250.0.9", protoTCP, ident, 8, false, []byte{0x01}), 0, nil))
+			fragmentedIPv4("1.1.1.1", testUEIPv4, protoTCP, ident, 8, false, []byte{0x01}), 0, nil))
 		if f.matches(farForwardDAndDuplicate, down) {
 			t.Error("a downlink fragment was delivered on an uplink datagram's classification")
 		}

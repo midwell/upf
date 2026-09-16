@@ -158,6 +158,10 @@ func rejectionConn(t *testing.T) (*PFCPConn, *refusingDP, *ccEnabler, *[]string)
 }
 
 // programmedFor reports what the element's record says about a FAR, and whether it holds one.
+// caller happens to assert on FAR 1 today, and a helper that hard-coded it would stop
+// being able to ask the question these tests are about.
+//
+//nolint:unparam // farID is the key under test, not a constant of the helper: every
 func programmedFor(e *ccEnabler, seid uint64, farID uint32) (bool, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -408,12 +412,12 @@ func TestAPartiallyProgrammedRefusalIsStillWithdrawn(t *testing.T) {
 // call site is RemoveSession, which the rejection-path tests in this file drive.
 func TestEverDuplicatedIsReclaimedWithItsSessions(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	const rounds = 200
 
 	for seid := uint64(1); seid <= rounds; seid++ {
-		s := unmarkedSession(seid, "10.250.0.9")
+		s := unmarkedSession(seid, testUEIPv4)
 		f.putSession(t, s)
 
 		// ...and the subscriber goes away again, as RemoveSession does in production.
@@ -458,11 +462,11 @@ func TestAFARRecreatedUnderTheSameIDKeepsItsRecord(t *testing.T) {
 
 	const seid = 600
 
-	sess := unmarkedSession(seid, "10.250.0.9")
+	sess := unmarkedSession(seid, testUEIPv4)
 	f.putSession(t, sess)
 	w := f.windowed(t)
 
-	task := ccTask("W1", ueAddr("10.250.0.9"))
+	task := ccTask("W1", ueAddr(testUEIPv4))
 	if err := f.e.canApply(task); err != nil {
 		t.Fatalf("canApply: %v", err)
 	}
@@ -521,7 +525,7 @@ func TestConcurrentMissesShareOneFragmentMemo(t *testing.T) {
 	// A transport-port criterion on rules that constrain no port: the only shape whose filter
 	// has to read the packet, and therefore the only one that carries a fragment memo at all.
 	// A UE-address criterion yields a match-all filter with no memo, so it cannot exercise this.
-	f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(seid, testUEIPv4))
 	f.activate(t, "W1", types.TargetIdentifier{Type: types.TargetTCPPort, Value: "443"})
 
 	// Force every worker to miss: a tasking change invalidates the memo by epoch.
@@ -631,10 +635,10 @@ func TestTaskFaultsDoesNotWalkEverySessionPerRequest(t *testing.T) {
 	f.e.mu.Unlock()
 
 	for seid := uint64(800); seid < 810; seid++ {
-		f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+		f.putSession(t, unmarkedSession(seid, testUEIPv4))
 	}
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	// The first ask resolves.
@@ -689,7 +693,7 @@ func TestAnUnconfirmedModificationDoesNotRecordDuplicationAsProgrammed(t *testin
 	// A warrant covering the session, so applyTasking marks its FARs and there is a
 	// duplication claim for the record to get right or wrong.
 	if !e.tasks.Activate(types.InterceptTask{
-		XID:      "22222222-2222-4222-8222-222222222222",
+		XID:      testXIDSecondary,
 		Products: []types.ProductType{types.ProductCC},
 		Targets:  []types.TargetIdentifier{ueAddr("10.250.0.14")},
 	}) {

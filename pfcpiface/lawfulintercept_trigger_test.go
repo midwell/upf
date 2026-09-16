@@ -93,7 +93,7 @@ func liLeaf(t *testing.T, dir string, caCert *x509.Certificate, caKey *rsa.Priva
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     []string{identifier, "localhost"},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:  []net.IP{net.ParseIP(testLoopbackIP)},
 		URIs:         []*url.URL{binding},
 	}
 
@@ -152,8 +152,8 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	// Server credentials for the UPF, client credentials for the SMF's CC-TF. The
 	// CC-TF presents the "ADMF" role: on this interface it is the tasking party.
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -161,12 +161,12 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	}
 
 	cfg := &LiConfig{
-		NEID:     "upf-1",
-		TFID:     "smf-1",
+		NEID:     testNEID,
+		TFID:     testTFID,
 		X1Listen: freePort(t),
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -178,25 +178,25 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	const seid = 14426627323429955319
 
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
 	// The destination has to exist before a trigger may name it: this POI refuses a
 	// content trigger whose destinations it does not know, so that a triggering
 	// function whose provisioning has been lost finds out.
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 
 	trigger := x1.Trigger{
-		XID:           "11111111-1111-4111-8111-111111111111",
-		ProductID:     "22222222-2222-4222-8222-222222222222",
+		XID:           testXIDPrimary,
+		ProductID:     testXIDSecondary,
 		CorrelationID: 0x2632898145f4d191,
 		SEID:          seid,
-		SEIDAddress:   "127.0.0.1",
-		DIDs:          []string{"33333333-3333-4333-8333-333333333333"},
+		SEIDAddress:   testLoopbackIP,
+		DIDs:          []string{testXIDTertiary},
 	}
 
 	if err := req.ActivateTask(trigger); err != nil {
@@ -252,7 +252,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
 	// A valid LI-CA certificate, but bound to a different element's identity.
 	otherCert, otherKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-2")
 
@@ -261,9 +261,9 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -277,13 +277,13 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 
 	// Assert the authorised triggering function's identifier while holding a
 	// certificate bound to smf-2.
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", otherMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, otherMat.ClientTLS())
 	err = req.ActivateTask(x1.Trigger{
-		XID:           "11111111-1111-4111-8111-111111111111",
-		ProductID:     "22222222-2222-4222-8222-222222222222",
+		XID:           testXIDPrimary,
+		ProductID:     testXIDSecondary,
 		CorrelationID: 1,
 		SEID:          seid,
-		DIDs:          []string{"33333333-3333-4333-8333-333333333333"},
+		DIDs:          []string{testXIDTertiary},
 	})
 	if err == nil {
 		t.Fatal("a certificate bound to another element was allowed to task this UPF")
@@ -309,7 +309,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -325,9 +325,9 @@ func TestTriggerListenerBindFailureIsReported(t *testing.T) {
 	defer func() { _ = busy.Close() }()
 
 	rec := &recordingReporter{}
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: busy.Addr().String()}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: busy.Addr().String()}
 
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err == nil {
+	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); err == nil {
 		t.Fatal("startTriggerListener reported success on a port it could not bind")
 	}
 
@@ -357,7 +357,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			// A shipper never runs without one — startLIShipper refuses to start
 			// without an element identifier — and the framing now happens before the
 			// per-destination sender lookup, since one PDU is built and shared.
-			ids: x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+			ids: x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 		}
 	}
 
@@ -382,12 +382,12 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 		// A task whose only destination is for signalling: content must not be sent
 		// to an X2 endpoint.
 		s.tasks.Activate(types.InterceptTask{
-			XID:           "11111111-1111-4111-8111-111111111111",
-			ProductID:     "22222222-2222-4222-8222-222222222222",
+			XID:           testXIDPrimary,
+			ProductID:     testXIDSecondary,
 			CorrelationID: 7,
 			Targets:       []types.TargetIdentifier{{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
-			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX2, Address: "10.0.0.1:42069"}},
+			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX2, Address: testX3SockAddr}},
 		})
 
 		s.ship(tagged)
@@ -405,12 +405,12 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 		rec := &recordingReporter{}
 		s := newShipper(rec)
 		s.tasks.Activate(types.InterceptTask{
-			XID:           "11111111-1111-4111-8111-111111111111",
-			ProductID:     "22222222-2222-4222-8222-222222222222",
+			XID:           testXIDPrimary,
+			ProductID:     testXIDSecondary,
 			CorrelationID: 7,
 			Targets:       []types.TargetIdentifier{{Type: types.TargetFSEID, Value: "42"}},
 			Products:      []types.ProductType{types.ProductCC},
-			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
+			Deliveries:    []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: testX3SockAddr}},
 		})
 
 		s.ship(tagged)
@@ -478,8 +478,8 @@ func (r *recordingReporter) described() []string {
 func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -488,12 +488,12 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 
 	rec := &recordingReporter{}
 	cfg := &LiConfig{
-		NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t),
+		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
 		// Short enough to observe, long enough that the tasking below lands first.
 		TriggerKeepalive: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -504,18 +504,18 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	}
 
 	const seid = 4242
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 
 	if err := req.ActivateTask(x1.Trigger{
-		XID:           "11111111-1111-4111-8111-111111111111",
-		ProductID:     "22222222-2222-4222-8222-222222222222",
+		XID:           testXIDPrimary,
+		ProductID:     testXIDSecondary,
 		CorrelationID: 7,
 		SEID:          seid,
 		DIDs:          []string{did},
@@ -595,8 +595,8 @@ func (o orderingReporter) NotifyAsync(issueType, description string) {
 func TestTheStopReportFollowsTheStop(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -615,8 +615,8 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	// something and the ordering has two events to be an ordering between.
 	const seid = 4242
 	sessions := NewInMemoryStore()
-	if err := sessions.PutSession(unmarkedSession(seid, "10.250.0.9")); err != nil {
-		t.Fatalf("PutSession: %v", err)
+	if putErr := sessions.PutSession(unmarkedSession(seid, testUEIPv4)); putErr != nil {
+		t.Fatalf("PutSession: %v", putErr)
 	}
 
 	enabler := newCCEnabler(nil, confirmedPush(func(_, updated PacketForwardingRules) uint8 {
@@ -634,11 +634,11 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	enabler.addSource(sessions)
 
 	cfg := &LiConfig{
-		NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t),
+		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
 		TriggerKeepalive: "1s",
 	}
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), orderingReporter{note: note},
-		enabler, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+		enabler, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -647,17 +647,17 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tf material: %v", err)
 	}
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 	if err := req.ActivateTask(x1.Trigger{
-		XID:           "11111111-1111-4111-8111-111111111111",
-		ProductID:     "22222222-2222-4222-8222-222222222222",
+		XID:           testXIDPrimary,
+		ProductID:     testXIDSecondary,
 		CorrelationID: 7,
 		SEID:          seid,
 		DIDs:          []string{did},
@@ -724,7 +724,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 		tasks.Activate(types.InterceptTask{
 			XID: xid, ProductID: xid, CorrelationID: 7, Targets: []types.TargetIdentifier{target},
 			Products:   []types.ProductType{types.ProductCC},
-			Deliveries: []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: "10.0.0.1:42069"}},
+			Deliveries: []types.DeliveryEndpoint{{Type: types.DeliveryX3, Address: testX3SockAddr}},
 		})
 	}
 
@@ -753,7 +753,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 	s := &liShipper{
 		tasks: tasks, reporter: rec,
 		senders: make(map[string]x2x3.Sender),
-		ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		ids:     x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 	}
 	s.ship(tagged)
 
@@ -767,7 +767,7 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 // here left an element accepting and applying tasking into a store its caller had
 // abandoned — un-tasked to its operator, holding warrants in fact.
 func TestTriggerKeepaliveMustBeValid(t *testing.T) {
-	for _, v := range []string{"nonsense", "-5m", "0s"} {
+	for _, v := range []string{testUnparseable, "-5m", "0s"} {
 		if _, err := triggerKeepalive(v); err == nil {
 			t.Errorf("triggerKeepalive(%q) accepted an unusable window", v)
 		}
@@ -781,8 +781,8 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 
 	// Nothing may be left listening when the window is rejected.
 	addr := freePort(t)
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: addr, TriggerKeepalive: "nonsense"}
-	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err == nil {
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: addr, TriggerKeepalive: testUnparseable}
+	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
 	}
 	var lc net.ListenConfig
@@ -802,8 +802,8 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -813,9 +813,9 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	rec := &recordingReporter{}
 	// No fail-safe window: nothing here is meant to lapse, so anything reported as a
 	// purge would be this element mislabelling a withdrawal it was asked for.
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -825,18 +825,18 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	const seid, xid = 4242, types.XID("11111111-1111-4111-8111-111111111111")
-	const did = "33333333-3333-4333-8333-333333333333"
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	const seid, xid = 4242, types.XID(testXIDPrimary)
+	const did = testXIDTertiary
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 	if err := req.ActivateTask(x1.Trigger{
 		XID:           xid,
-		ProductID:     "22222222-2222-4222-8222-222222222222",
+		ProductID:     testXIDSecondary,
 		CorrelationID: 7,
 		SEID:          seid,
 		DIDs:          []string{did},
@@ -883,29 +883,29 @@ func correlationBytes(v uint64) [x2x3.CorrelationIDLength]byte {
 func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
-		t.Fatalf("startTriggerListener: %v", err)
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	if _, startErr := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); startErr != nil {
+		t.Fatalf("startTriggerListener: %v", startErr)
 	}
 
 	tfMat, err := mtls.Load(tfCert, tfKey, caPath)
 	if err != nil {
 		t.Fatalf("load tf material: %v", err)
 	}
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
@@ -918,8 +918,8 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 	// numbering by XID happens to be correct.
 	type tasking struct{ trigger, warrant types.XID }
 	const oneWarrant = types.XID("aaaaaaaa-1111-4111-8111-111111111111")
-	withdrawn := tasking{"11111111-1111-4111-8111-111111111111", oneWarrant}
-	bulked := tasking{"22222222-2222-4222-8222-222222222222", oneWarrant}
+	withdrawn := tasking{testXIDPrimary, oneWarrant}
+	bulked := tasking{testXIDSecondary, oneWarrant}
 
 	for i, task := range []tasking{withdrawn, bulked} {
 		if err := req.ActivateTask(x1.Trigger{
@@ -953,7 +953,7 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 			"numbering with it", n)
 	}
 
-	if body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", "smf-1", "upf-1")); strings.Contains(body, "errorCode") {
+	if body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", testTFID, testNEID)); strings.Contains(body, "errorCode") {
 		t.Fatalf("bulk deactivation refused: %s", body)
 	}
 	if n := ids.Contexts(); n != 0 {
@@ -1011,8 +1011,8 @@ func nextSequenceNumber(t *testing.T, ids *x2x3.Identity, xid types.XID, corr ui
 func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -1023,16 +1023,16 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
@@ -1045,12 +1045,12 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 		trigger types.XID
 		corr    uint64
 		seid    uint64
-	}{"11111111-1111-4111-8111-111111111111", 0x2632898145f4d191, 4242}
+	}{testXIDPrimary, 0x2632898145f4d191, 4242}
 	sessionB := struct {
 		trigger types.XID
 		corr    uint64
 		seid    uint64
-	}{"22222222-2222-4222-8222-222222222222", 0x7ab3120945f4d192, 4243}
+	}{testXIDSecondary, 0x7ab3120945f4d192, 4243}
 
 	for _, s := range []struct {
 		trigger types.XID
@@ -1110,8 +1110,8 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -1122,16 +1122,16 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
-	const did = "33333333-3333-4333-8333-333333333333"
+	const did = testXIDTertiary
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
@@ -1139,8 +1139,8 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 	const (
 		oldLabel = types.XID("aaaaaaaa-1111-4111-8111-111111111111")
 		newLabel = types.XID("cccccccc-3333-4333-8333-333333333333")
-		triggerA = types.XID("11111111-1111-4111-8111-111111111111")
-		triggerB = types.XID("22222222-2222-4222-8222-222222222222")
+		triggerA = types.XID(testXIDPrimary)
+		triggerB = types.XID(testXIDSecondary)
 	)
 	const corrA, corrB = uint64(0x2632898145f4d191), uint64(0x7ab3120945f4d192)
 
@@ -1212,7 +1212,7 @@ func TestTriggerKeepaliveHasAFloor(t *testing.T) {
 		{"5m", false},    // the documented example
 		{"2m30s", false}, // exactly the floor
 		{"1s", true},     // shorter than a single keepalive cadence
-		{"30s", true},
+		{testKeepaliveP1, true},
 		{"1m", true}, // one cadence: any jitter reads as absence
 	} {
 		d, err := triggerKeepalive(tc.window)
@@ -1237,7 +1237,7 @@ func TestTriggerKeepaliveHasAFloor(t *testing.T) {
 func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
 		t.Fatalf("load upf material: %v", err)
@@ -1248,7 +1248,7 @@ func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 		tasks:     tasks,
 		tlsConfig: upfMat.ClientTLS(),
 		senders:   make(map[string]x2x3.Sender),
-		ids:       x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		ids:       x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 		keepalive: x2x3.KeepaliveConfig{Disabled: true},
 	}
 
@@ -1257,11 +1257,11 @@ func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 		newAddr = "192.0.2.9:42069"
 	)
 	warrant := types.InterceptTask{
-		XID:      "11111111-1111-4111-8111-111111111111",
+		XID:      testXIDPrimary,
 		Products: []types.ProductType{types.ProductCC},
-		DIDs:     []string{"33333333-3333-4333-8333-333333333333"},
+		DIDs:     []string{testXIDTertiary},
 		Deliveries: []types.DeliveryEndpoint{
-			{DID: "33333333-3333-4333-8333-333333333333", Type: types.DeliveryX3, Address: oldAddr},
+			{DID: testXIDTertiary, Type: types.DeliveryX3, Address: oldAddr},
 		},
 	}
 	if !tasks.Activate(warrant) {
@@ -1280,7 +1280,7 @@ func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 	// event that makes the old address unreferenced.
 	relabelled := warrant
 	relabelled.Deliveries = []types.DeliveryEndpoint{
-		{DID: "33333333-3333-4333-8333-333333333333", Type: types.DeliveryX3, Address: newAddr},
+		{DID: testXIDTertiary, Type: types.DeliveryX3, Address: newAddr},
 	}
 	if !tasks.Activate(relabelled) {
 		t.Fatal("re-activating the relabelled task failed")

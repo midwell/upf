@@ -44,8 +44,8 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			caPath, caCert, caKey := liCA(t, dir)
-			upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-			tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+			upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+			tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 			upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 			if err != nil {
@@ -57,38 +57,38 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 			}
 
 			cfg := &LiConfig{
-				NEID:               "upf-1",
-				TFID:               "smf-1",
+				NEID:               testNEID,
+				TFID:               testTFID,
 				X1Listen:           freePort(t),
 				DeactivateAllTasks: c.configured,
 			}
 
-			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil)
+			tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 			if err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
 
 			// Tasking for the bulk request to act on, installed the way the CC-TF installs
 			// it. Without it "the store is empty afterwards" would hold either way.
-			req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
-			const did = "33333333-3333-4333-8333-333333333333"
+			req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
+			const did = testXIDTertiary
 			if err := req.CreateDestination(x1.Destination{
-				DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+				DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 			}); err != nil {
 				t.Fatalf("CreateDestination: %v", err)
 			}
 			if err := req.ActivateTask(x1.Trigger{
-				XID:           "11111111-1111-4111-8111-111111111111",
-				ProductID:     "22222222-2222-4222-8222-222222222222",
+				XID:           testXIDPrimary,
+				ProductID:     testXIDSecondary,
 				CorrelationID: 0x2632898145f4d191,
 				SEID:          14426627323429955319,
-				SEIDAddress:   "127.0.0.1",
+				SEIDAddress:   testLoopbackIP,
 				DIDs:          []string{did},
 			}); err != nil {
 				t.Fatalf("ActivateTask: %v", err)
 			}
 
-			body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", "smf-1", "upf-1"))
+			body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("DeactivateAllTasksRequest", testTFID, testNEID))
 
 			if !c.wantRefusal {
 				if strings.Contains(body, "errorCode") {
@@ -138,8 +138,8 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			caPath, caCert, caKey := liCA(t, dir)
-			upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-			tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+			upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+			tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 			upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 			if err != nil {
@@ -151,28 +151,28 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 			}
 
 			cfg := &LiConfig{
-				NEID:                  "upf-1",
-				TFID:                  "smf-1",
+				NEID:                  testNEID,
+				TFID:                  testTFID,
 				X1Listen:              freePort(t),
 				RemoveAllDestinations: c.configured,
 			}
 
-			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err != nil {
+			if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); err != nil {
 				t.Fatalf("startTriggerListener: %v", err)
 			}
 
 			// A destination for the request to remove, provisioned the way the CC-TF
 			// provisions one. The specification refuses the removal while a task still
 			// references a destination, so no task is installed here.
-			req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+			req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 			if err := req.CreateDestination(x1.Destination{
-				DID: "33333333-3333-4333-8333-333333333333", DeliveryType: "X3Only",
-				Address: "192.0.2.1", Port: 42069,
+				DID: testXIDTertiary, DeliveryType: testDeliveryX3Only,
+				Address: testDeliveryIP, Port: 42069,
 			}); err != nil {
 				t.Fatalf("CreateDestination: %v", err)
 			}
 
-			body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("RemoveAllDestinationsRequest", "smf-1", "upf-1"))
+			body := postX1(t, cfg.X1Listen, tfMat, bulkRequest("RemoveAllDestinationsRequest", testTFID, testNEID))
 
 			if !c.wantRefusal {
 				if strings.Contains(body, "errorCode") {

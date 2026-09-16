@@ -172,12 +172,12 @@ func (r *slowFormReporter) counts() (syncCalls, asyncCalls int) {
 func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
 
 	// A peer holding a certificate from the LI CA that binds it as a *network element*,
 	// not as the ADMF. It authenticates at TLS and fails clause 8.2.4, which is the
 	// condition OnAuthFailure exists for.
-	wrongRoleCert, wrongRoleKey := liLeaf(t, dir, caCert, caKey, "NE", "smf-1")
+	wrongRoleCert, wrongRoleKey := liLeaf(t, dir, caCert, caKey, "NE", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -188,26 +188,26 @@ func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 		t.Fatalf("load peer material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 
 	reporter := &slowFormReporter{block: 10 * time.Second}
-	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), reporter, nil,
-		x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil, nil); err != nil {
-		t.Fatalf("startTriggerListener: %v", err)
+	if _, startErr := startTriggerListener(cfg, upfMat.ServerTLS(), reporter, nil,
+		x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); startErr != nil {
+		t.Fatalf("startTriggerListener: %v", startErr)
 	}
 
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", peerMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, peerMat.ClientTLS())
 
 	start := time.Now()
 	err = req.ActivateTask(x1.Trigger{
-		XID:           types.XID("11111111-1111-4111-8111-111111111111"),
-		ProductID:     types.XID("22222222-2222-4222-8222-222222222222"),
+		XID:           types.XID(testXIDPrimary),
+		ProductID:     types.XID(testXIDSecondary),
 		CorrelationID: 7,
 		SEID:          0x2632898145f4d191,
 		// A destination, or the requester refuses this client-side and the request never
 		// reaches the element at all — which is how the first version of this test came
 		// to measure a validation error instead of a refusal.
-		DIDs: []string{"33333333-3333-4333-8333-333333333333"},
+		DIDs: []string{testXIDTertiary},
 	})
 	elapsed := time.Since(start)
 

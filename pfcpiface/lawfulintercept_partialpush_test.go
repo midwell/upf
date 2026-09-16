@@ -23,8 +23,8 @@ import (
 func divergeThenModify(t *testing.T, f *enablerFixture) {
 	t.Helper()
 
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
@@ -142,8 +142,8 @@ func TestARuleLeftUnpushedIsStillProgrammedOffWhenTheDatapathRecovers(t *testing
 // is the state whatever the cause, and asserts the element recovers on the next pass.
 func TestADivergentRecordDoesNotMakeOverCollectionPermanent(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	if !f.duplicates(t, 100, 1) {
@@ -182,10 +182,10 @@ func TestADivergentRecordDoesNotMakeOverCollectionPermanent(t *testing.T) {
 // touched.
 func TestAFARNeverTurnedOnIsNotPushedRepeatedly(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	// A second session no criterion will ever select.
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	before := f.pushCount()
@@ -223,8 +223,8 @@ func TestAFARNeverTurnedOnIsNotPushedRepeatedly(t *testing.T) {
 // unrelated event happens along.
 func TestADivergenceIsNoticedWithoutATaskingChange(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	if !f.duplicates(t, 100, 1) {

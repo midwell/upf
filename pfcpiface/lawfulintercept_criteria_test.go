@@ -34,7 +34,7 @@ const (
 func testNetInstance() string { return "internet" }
 
 func criteriaSessions() []PFCPSession {
-	ue := ip2int(net.ParseIP("10.250.0.9"))
+	ue := ip2int(net.ParseIP(testUEIPv4))
 	n3 := ip2int(net.ParseIP("10.76.0.2"))
 
 	return []PFCPSession{
@@ -152,7 +152,7 @@ func TestResolveCriteria(t *testing.T) {
 		},
 		{
 			name: "UE address selects both directions, and only that subscriber",
-			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: "10.250.0.9"},
+			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: testUEIPv4},
 			want: []sel{{targetSEID, 1, coverExact}, {targetSEID, 2, coverExact}},
 		},
 		{
@@ -232,7 +232,7 @@ func TestResolveCriteria(t *testing.T) {
 // sessions above cannot: a PDR whose SDF filter does constrain the port, and one
 // whose filter constrains it to something else.
 func TestResolvePortCriterionAgainstSDFFilter(t *testing.T) {
-	ue := ip2int(net.ParseIP("10.250.0.9"))
+	ue := ip2int(net.ParseIP(testUEIPv4))
 	withFilter := func(direction uint8, proto uint8, low, high uint16) pdr {
 		p := pdr{
 			pdrID: 1, fseID: targetSEID, farID: 1,
@@ -322,7 +322,7 @@ func TestParseCriterionRefusals(t *testing.T) {
 	}{
 		{
 			name: "UE IPv6, which this datapath has no state for",
-			id:   types.TargetIdentifier{Type: types.TargetUEIPv6, Value: "2001:db8::9"},
+			id:   types.TargetIdentifier{Type: types.TargetUEIPv6, Value: testUEIPv6},
 		},
 		{
 			name: "an encoded PDR, which needs comparison semantics we do not have",
@@ -361,7 +361,7 @@ func TestParseCriterionRefusals(t *testing.T) {
 		},
 		{
 			name: "an IPv6 literal in the IPv4 arm",
-			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: "2001:db8::9"},
+			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: testUEIPv6},
 		},
 		{
 			name: "a port of zero",
@@ -426,7 +426,7 @@ func pdrCriterionSessions(t *testing.T) []PFCPSession {
 	// criteriaSessions builds its uplink PDRs through the same helpers, but with a
 	// network instance and precedence that the encoded criterion does not carry, so
 	// the rule to compare against is built here from the same IEs instead.
-	rule, err := parsePDRCriterion(encodeCreatePDR(t, 0x1001, "10.250.0.9", false))
+	rule, err := parsePDRCriterion(encodeCreatePDR(t, 0x1001, testUEIPv4, false))
 	if err != nil {
 		t.Fatalf("building the fixture rule: %v", err)
 	}
@@ -451,19 +451,19 @@ func TestPDRCriterionMatchesTheRuleItNames(t *testing.T) {
 	}{
 		{
 			name:  "the rule the session holds",
-			value: encodeCreatePDR(t, 0x1001, "10.250.0.9", false),
+			value: encodeCreatePDR(t, 0x1001, testUEIPv4, false),
 			want:  []sel{{targetSEID, 1, coverExact}},
 		},
 		{
 			// Same rule, different bytes. This is the case the criterion exists to
 			// survive, and the reason the comparison is not octet-for-octet.
 			name:  "the same rule encoded with its PDI in another order",
-			value: encodeCreatePDR(t, 0x1001, "10.250.0.9", true),
+			value: encodeCreatePDR(t, 0x1001, testUEIPv4, true),
 			want:  []sel{{targetSEID, 1, coverExact}},
 		},
 		{
 			name:  "a rule for another tunnel selects nothing",
-			value: encodeCreatePDR(t, 0x9999, "10.250.0.9", false),
+			value: encodeCreatePDR(t, 0x9999, testUEIPv4, false),
 			want:  nil,
 		},
 		{
@@ -499,7 +499,7 @@ func TestPDRCriterionMatchesTheRuleItNames(t *testing.T) {
 // match nothing — an interception that reports success and collects nothing.
 func TestPDRCriterionIgnoresSessionAssignedFields(t *testing.T) {
 	cr, err := parseCriterion(types.TargetIdentifier{
-		Type: types.TargetPDR, Value: encodeCreatePDR(t, 0x1001, "10.250.0.9", false),
+		Type: types.TargetPDR, Value: encodeCreatePDR(t, 0x1001, testUEIPv4, false),
 	})
 	if err != nil {
 		t.Fatalf("parseCriterion: %v", err)
@@ -528,7 +528,7 @@ func TestPDRCriterionIgnoresSessionAssignedFields(t *testing.T) {
 // are indistinguishable afterwards, and the second is an acknowledged interception
 // that can never produce anything.
 func TestPDRCriterionRefusals(t *testing.T) {
-	valid := encodeCreatePDR(t, 0x1001, "10.250.0.9", false)
+	valid := encodeCreatePDR(t, 0x1001, testUEIPv4, false)
 
 	// A Create FAR, so a well-formed PFCP element that is not a rule.
 	far, err := ie.NewCreateFAR(ie.NewFARID(1), ie.NewApplyAction(0x02)).Marshal()
@@ -555,7 +555,7 @@ func TestPDRCriterionRefusals(t *testing.T) {
 		ie.NewPDRID(1), ie.NewPrecedence(200),
 		ie.NewPDI(ie.NewSourceInterface(ie.SrcInterfaceAccess),
 			ie.NewFTEID(0x01, 0x1001, net.ParseIP("10.76.0.2"), nil, 0),
-			ie.NewUEIPAddress(0x02, "10.250.0.9", "", 0, 0)),
+			ie.NewUEIPAddress(0x02, testUEIPv4, "", 0, 0)),
 		ie.NewFARID(1), ie.NewQERID(4),
 	).Marshal()
 	if err != nil {
@@ -565,7 +565,7 @@ func TestPDRCriterionRefusals(t *testing.T) {
 	cases := []struct{ name, value string }{
 		{
 			name:  "not hex at all",
-			value: "nonsense",
+			value: testUnparseable,
 		},
 		{
 			name:  "an Update PDR, which parses as a rule but is not the agreed form",

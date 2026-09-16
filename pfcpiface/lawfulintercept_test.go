@@ -164,8 +164,8 @@ func TestShipperPDU(t *testing.T) {
 	// from the packet: the XID is the warrant's, the correlation is the value the
 	// SMF also put on the session's xIRI.
 	task := types.InterceptTask{
-		XID:           "11111111-1111-4111-8111-111111111111",
-		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		XID:           testXIDPrimary,
+		ProductID:     testXIDSEIDShaped,
 		CorrelationID: 0x2632898145f4d191,
 	}
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
@@ -174,7 +174,7 @@ func TestShipperPDU(t *testing.T) {
 	}
 
 	// Uplink (action 6): decapsulated inner IP → IPv4 + FromTarget.
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
 	ul := shipperPDU(tag(farForwardUAndDuplicate), task, ids)
 	if ul.Type != x2x3.PDUTypeX3 {
 		t.Errorf("PDU type = %d, want X3", ul.Type)
@@ -276,9 +276,9 @@ func TestShipperPDUStripsLinkLayer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pdu := shipperPDU(tag(tt.action, tt.payload), types.InterceptTask{
-				ProductID:     "26328981-45f4-4191-8000-000000000000",
+				ProductID:     testXIDSEIDShaped,
 				CorrelationID: 1,
-			}, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+			}, x2x3.NewIdentity(testNEID, upfInterceptionPoint))
 			if pdu.PayloadFormat != tt.wantFormat {
 				t.Errorf("payload format = %d, want %d", pdu.PayloadFormat, tt.wantFormat)
 			}
@@ -479,8 +479,8 @@ func TestEgressProbeFollowsTheSocket(t *testing.T) {
 	if err != nil {
 		t.Skipf("unixpacket sockets unavailable here: %v", err)
 	}
-	if err := probeLn.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := probeLn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	// A connection to close, standing in for the one the read failed on. Nothing is
@@ -667,7 +667,7 @@ func (c *capturingSender) onTheWire() [][]byte {
 func multiDestinationTrigger(seid uint64, addrs ...string) types.InterceptTask {
 	task := types.InterceptTask{
 		XID:           "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
-		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		ProductID:     testXIDSEIDShaped,
 		CorrelationID: 0x2632898145f4d191,
 		Products:      []types.ProductType{types.ProductCC},
 		Targets: []types.TargetIdentifier{
@@ -703,7 +703,7 @@ func TestShipDeliversToEveryX3Destination(t *testing.T) {
 	s := &liShipper{
 		tasks:   store.New(),
 		senders: map[string]x2x3.Sender{first: a, second: b},
-		ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		ids:     x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 	}
 	s.tasks.Activate(multiDestinationTrigger(seid, first, second))
 
@@ -773,7 +773,7 @@ func TestSecondDestinationCostsOnlyItsDelivery(t *testing.T) {
 		s := &liShipper{
 			tasks:   store.New(),
 			senders: map[string]x2x3.Sender{first: nullSender{}, second: nullSender{}},
-			ids:     x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+			ids:     x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 		}
 		s.tasks.Activate(multiDestinationTrigger(seid, addrs...))
 
@@ -808,7 +808,7 @@ func TestShipDeliversDespiteOneUnreachableDestination(t *testing.T) {
 	s := &liShipper{
 		tasks:    store.New(),
 		senders:  map[string]x2x3.Sender{reachable: a},
-		ids:      x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		ids:      x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 		reporter: rec,
 	}
 	// The unreachable one is named first, so a fan-out that stopped at the first
@@ -848,14 +848,14 @@ func x3AttrsOf(pdu *x2x3.PDU) map[uint16][]byte {
 // interoperability testing because neither side sent one.
 func TestShipperPDUCarriesTheRequiredAttributes(t *testing.T) {
 	task := types.InterceptTask{
-		ProductID:     "26328981-45f4-4191-8000-000000000000",
+		ProductID:     testXIDSEIDShaped,
 		CorrelationID: 0x2632898145f4d191,
 	}
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
 	tagged := append(append([]byte{1, 2, 3, 4, 5, 6, 7, 8}, farForwardUAndDuplicate), inner...)
 
 	before := time.Now()
-	pdu := shipperPDU(tagged, task, x2x3.NewIdentity("upf-1", upfInterceptionPoint))
+	pdu := shipperPDU(tagged, task, x2x3.NewIdentity(testNEID, upfInterceptionPoint))
 	after := time.Now()
 
 	attrs := x3AttrsOf(pdu)
@@ -865,8 +865,8 @@ func TestShipperPDUCarriesTheRequiredAttributes(t *testing.T) {
 
 	// The NFID is the identifier this element asserts on X1, so a mediation function
 	// and the ADMF name the same element.
-	if got := string(attrs[x2x3.AttrNFID]); got != "upf-1" {
-		t.Errorf("NFID = %q, want the configured network element identifier %q", got, "upf-1")
+	if got := string(attrs[x2x3.AttrNFID]); got != testNEID {
+		t.Errorf("NFID = %q, want the configured network element identifier %q", got, testNEID)
 	}
 	if got := string(attrs[x2x3.AttrIPID]); got != upfInterceptionPoint {
 		t.Errorf("IPID = %q, want %q", got, upfInterceptionPoint)
@@ -908,12 +908,12 @@ func TestShipperPDUCarriesTheRequiredAttributes(t *testing.T) {
 // zero. A counter held per connection or per element would interleave them, and a
 // mediation function ordering one session's content would see gaps that are not loss.
 func TestShipperPDUNumbersEachContextIndependently(t *testing.T) {
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
 	tagged := append(append([]byte{1, 2, 3, 4, 5, 6, 7, 8}, farForwardUAndDuplicate), inner...)
 
-	sessionA := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 1}
-	sessionB := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 2}
+	sessionA := types.InterceptTask{ProductID: testXIDSEIDShaped, CorrelationID: 1}
+	sessionB := types.InterceptTask{ProductID: testXIDSEIDShaped, CorrelationID: 2}
 
 	seqOf := func(task types.InterceptTask) uint32 {
 		return binary.BigEndian.Uint32(x3AttrsOf(shipperPDU(tagged, task, ids))[x2x3.AttrSequenceNumber])
@@ -937,8 +937,8 @@ func TestShipperPDUNumbersEachContextIndependently(t *testing.T) {
 // be handed out exactly once — a repeat would make two packets indistinguishable to a
 // mediation function ordering them. Run under -race.
 func TestShipperPDUNumbersUnderConcurrentFraming(t *testing.T) {
-	ids := x2x3.NewIdentity("upf-1", upfInterceptionPoint)
-	task := types.InterceptTask{ProductID: "26328981-45f4-4191-8000-000000000000", CorrelationID: 7}
+	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
+	task := types.InterceptTask{ProductID: testXIDSEIDShaped, CorrelationID: 7}
 	inner := []byte{0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2}
 
 	const perWorker = 100
@@ -1069,8 +1069,8 @@ func TestShipperStartsBeforeTheDatapathDoes(t *testing.T) {
 	if err != nil {
 		t.Skipf("unixpacket sockets unavailable here: %v", err)
 	}
-	if err := probeLn.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := probeLn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	s := &liShipper{sockAddr: addr, senders: make(map[string]x2x3.Sender)}

@@ -312,13 +312,13 @@ func unmarkedSession(seid uint64, ue string) PFCPSession {
 // silently, so the CC-POI has to enable duplication itself.
 func TestEnableDuplicationForUnmarkedSession(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
 		t.Fatal("duplication on before any tasking")
 	}
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
 		t.Error("a task keyed by UE address did not enable duplication for that session")
@@ -334,10 +334,10 @@ func TestEnableDuplicationForUnmarkedSession(t *testing.T) {
 // performance problem.
 func TestEnablementDoesNotTouchOtherSubscribers(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	if !f.duplicates(t, 100, 1) {
 		t.Error("the tasked session is not duplicated")
@@ -354,8 +354,8 @@ func TestEnablementDoesNotTouchOtherSubscribers(t *testing.T) {
 // told.
 func TestDuplicationSurvivesSessionModification(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	// What a Session Modification does: the SMF sends its FAR again, with its own
 	// apply action and no notion of duplication.
@@ -395,9 +395,9 @@ func TestCriteriaApplyToLaterSessions(t *testing.T) {
 	f := newEnablerFixture(t)
 
 	// Tasked with no session at all: accepted, selecting nothing yet.
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
 		t.Error("a session established after tasking is not intercepted")
@@ -409,10 +409,10 @@ func TestCriteriaApplyToLaterSessions(t *testing.T) {
 // duplication the SMF asked for on its own account.
 func TestDeactivationRemovesOnlyItsOwnEnablement(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	// Two warrants over the same traffic, described two different ways.
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.activate(t, "W2", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
 
 	f.deactivate(t, "W1")
@@ -432,11 +432,11 @@ func TestDeactivationRemovesOnlyItsOwnEnablement(t *testing.T) {
 // is not party to.
 func TestDeactivationLeavesTheSMFsOwnDuplication(t *testing.T) {
 	f := newEnablerFixture(t)
-	s := unmarkedSession(100, "10.250.0.9")
+	s := unmarkedSession(100, testUEIPv4)
 	s.fars[0].applyAction = ActionForward | ActionDuplicate // the SMF marked the uplink FAR
 	f.putSession(t, s)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.deactivate(t, "W1")
 
 	if !f.duplicates(t, 100, 1) {
@@ -454,13 +454,13 @@ func TestDeactivationLeavesTheSMFsOwnDuplication(t *testing.T) {
 // the obvious way to get withdrawal wrong.
 func TestEnablementIsIdempotent(t *testing.T) {
 	f := newEnablerFixture(t)
-	s := unmarkedSession(100, "10.250.0.9")
+	s := unmarkedSession(100, testUEIPv4)
 	s.fars[0].applyAction = ActionForward | ActionDuplicate
 	f.putSession(t, s)
 
 	// One task, two criteria selecting the same traffic, plus the SMF's own DUPL.
 	f.activate(t, "W1",
-		ueAddr("10.250.0.9"),
+		ueAddr(testUEIPv4),
 		types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
 
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
@@ -496,11 +496,11 @@ func TestCanApplyRefusesUnresolvableCriteria(t *testing.T) {
 		{"no criteria at all", nil},
 		{
 			"a criterion this datapath cannot resolve",
-			[]types.TargetIdentifier{{Type: types.TargetUEIPv6, Value: "2001:db8::9"}},
+			[]types.TargetIdentifier{{Type: types.TargetUEIPv6, Value: testUEIPv6}},
 		},
 		{
 			"one good criterion and one bad",
-			[]types.TargetIdentifier{ueAddr("10.250.0.9"), {Type: types.TargetPDR, Value: "0a01"}},
+			[]types.TargetIdentifier{ueAddr(testUEIPv4), {Type: types.TargetPDR, Value: "0a01"}},
 		},
 	}
 
@@ -549,14 +549,14 @@ func iriOnlyTask(xid types.XID, ids ...types.TargetIdentifier) types.InterceptTa
 func TestCanApplyRefusesTaskingWithoutContent(t *testing.T) {
 	f := newEnablerFixture(t)
 
-	if err := f.e.canApply(iriOnlyTask("W1", ueAddr("10.250.0.9"))); err == nil {
+	if err := f.e.canApply(iriOnlyTask("W1", ueAddr(testUEIPv4))); err == nil {
 		t.Error("canApply accepted a task that does not require content of communication")
 	}
 
 	// The same criteria with content required is accepted, so the refusal is about
 	// the product and not about anything else in the task.
 	if err := f.e.canApply(types.InterceptTask{
-		XID: "W1", Targets: []types.TargetIdentifier{ueAddr("10.250.0.9")},
+		XID: "W1", Targets: []types.TargetIdentifier{ueAddr(testUEIPv4)},
 		Products: []types.ProductType{types.ProductIRI, types.ProductCC},
 	}); err != nil {
 		t.Errorf("canApply refused a task that does require content: %v", err)
@@ -569,9 +569,9 @@ func TestCanApplyRefusesTaskingWithoutContent(t *testing.T) {
 // such a leftover looks like.
 func TestNoDuplicationForTaskingWithoutContent(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
-	if !f.tasks.Activate(iriOnlyTask("W1", ueAddr("10.250.0.9"))) {
+	if !f.tasks.Activate(iriOnlyTask("W1", ueAddr(testUEIPv4))) {
 		t.Fatal("Activate failed")
 	}
 	f.e.retaskAndWait()
@@ -591,12 +591,12 @@ func TestNoDuplicationForTaskingWithoutContent(t *testing.T) {
 // that has one receiving nothing.
 func TestTaskingWithoutContentDoesNotStealAttribution(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
-	if !f.tasks.Activate(iriOnlyTask("W-a", ueAddr("10.250.0.9"))) {
+	if !f.tasks.Activate(iriOnlyTask("W-a", ueAddr(testUEIPv4))) {
 		t.Fatal("Activate failed")
 	}
-	f.activate(t, "W-b", ueAddr("10.250.0.9"))
+	f.activate(t, "W-b", ueAddr(testUEIPv4))
 
 	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
@@ -616,10 +616,10 @@ func TestTaskingWithoutContentDoesNotStealAttribution(t *testing.T) {
 // to refuse.
 func TestRetaskSkipsUnchangedSessions(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	after := f.pushCount()
 	if after != 1 {
 		t.Fatalf("pushed %d sessions, want just the tasked one", after)
@@ -654,9 +654,9 @@ func TestConcurrentTaskingChangesDoNotLoseAnUpdate(t *testing.T) {
 		f.e.removeSource(f.store)
 		f.e.addSource(paced)
 
-		f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+		f.putSession(t, unmarkedSession(100, testUEIPv4))
 		f.putSession(t, unmarkedSession(200, "10.250.0.10"))
-		f.activate(t, "W1", ueAddr("10.250.0.9"))
+		f.activate(t, "W1", ueAddr(testUEIPv4))
 
 		paced.delayOne <- struct{}{}
 
@@ -771,7 +771,7 @@ func TestRecordOfDuplicationSurvivesAPassThatCouldNotSeeIt(t *testing.T) {
 	f := newEnablerFixture(t)
 	w := f.windowed(t)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	// A pass begins and reads the sessions. There are none.
 	w.hold <- struct{}{}
@@ -780,7 +780,7 @@ func TestRecordOfDuplicationSurvivesAPassThatCouldNotSeeIt(t *testing.T) {
 
 	// The PFCP goroutine establishes a session the tasking covers: duplication
 	// derived, rules programmed, session not yet in the store.
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.derive(&sess)
 	f.commit(t, sess)
 
@@ -820,10 +820,10 @@ func TestDuplicationStopsForASessionEstablishedInsideTheWithdrawalsOwnPass(t *te
 	f := newEnablerFixture(t)
 	w := f.windowed(t)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	// The PFCP goroutine derives duplication for a new session and programs it.
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.derive(&sess)
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
 		t.Fatal("the establishment did not start the interception it was tasked with")
@@ -865,7 +865,7 @@ func TestDuplicationStopsForAStoredSessionBroughtWithinTheTasking(t *testing.T) 
 	f := newEnablerFixture(t)
 	w := f.windowed(t)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	// A session the tasking does not cover, and which the store already holds.
 	f.putSession(t, unmarkedSession(100, "10.250.0.99"))
 	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
@@ -878,7 +878,7 @@ func TestDuplicationStopsForAStoredSessionBroughtWithinTheTasking(t *testing.T) 
 	<-w.read
 
 	// The modification brings the session within the criterion.
-	modified := unmarkedSession(100, "10.250.0.9")
+	modified := unmarkedSession(100, testUEIPv4)
 	f.deriveModification(&modified)
 	f.commit(t, modified)
 	if !f.duplicates(t, 100, 1) || !f.duplicates(t, 100, 2) {
@@ -917,14 +917,14 @@ func TestAStalePassDoesNotEndAnInterceptionTheTaskingRequires(t *testing.T) {
 	f := newEnablerFixture(t)
 	w := f.windowed(t)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.putSession(t, unmarkedSession(100, "10.250.0.99"))
 
 	w.hold <- struct{}{}
 	gen := f.e.request()
 	<-w.read
 
-	modified := unmarkedSession(100, "10.250.0.9")
+	modified := unmarkedSession(100, testUEIPv4)
 	f.deriveModification(&modified)
 	f.commit(t, modified)
 
@@ -944,8 +944,8 @@ func TestAStalePassDoesNotEndAnInterceptionTheTaskingRequires(t *testing.T) {
 // comparison that replaces that guarantee gets the other direction right.
 func TestDepartedSessionsDropOutOfTheRecord(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	if _, held := f.recorded(100, 1); !held {
 		t.Fatal("the tasked session was never recorded, so this asserts nothing")
@@ -969,12 +969,12 @@ func TestDepartedSessionsDropOutOfTheRecord(t *testing.T) {
 // anything wrongly judged newer leaks until the process ends.
 func TestTheRecordDoesNotGrowUnderSessionChurn(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	for seid := uint64(1); seid <= 200; seid++ {
 		// Alternating between traffic the task covers and traffic it does not, so the
 		// churn exercises both the entries that are carried over and those that are not.
-		ue := "10.250.0.9"
+		ue := testUEIPv4
 		if seid%2 == 0 {
 			ue = "10.250.0.10"
 		}
@@ -1010,14 +1010,14 @@ func TestAnEstablishmentDuringARederivationTerminates(t *testing.T) {
 	f := newEnablerFixture(t)
 	w := f.windowed(t)
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	before := f.e.transactions()
 
 	w.hold <- struct{}{}
 	gen := f.e.request()
 	<-w.read
 
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.derive(&sess)
 	f.commit(t, sess)
 
@@ -1041,7 +1041,7 @@ func TestAnUntaskedElementNeverAsksForARederivation(t *testing.T) {
 	before := f.e.transactions()
 
 	for seid := uint64(1); seid <= 50; seid++ {
-		f.putSession(t, unmarkedSession(seid, "10.250.0.9"))
+		f.putSession(t, unmarkedSession(seid, testUEIPv4))
 		if err := f.store.DeleteSession(seid); err != nil {
 			t.Fatalf("DeleteSession: %v", err)
 		}
@@ -1091,8 +1091,8 @@ func TestConcurrentRequestsAreCoalesced(t *testing.T) {
 // one that will never happen.
 func TestEnablerStopEndsTheWorker(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	f.e.stop()
 	f.e.stop() // idempotent: the fixture's cleanup calls it again
@@ -1157,9 +1157,9 @@ func TestStopLetsATransactionInFlightFinish(t *testing.T) {
 // content, and delivering none of it.
 func TestLookupFindsTaskByNonSessionCriterion(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
@@ -1187,8 +1187,8 @@ func TestLookupFindsTaskByNonSessionCriterion(t *testing.T) {
 // occurred here before.
 func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W-b", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W-b", ueAddr(testUEIPv4))
 	f.activate(t, "W-a", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
 
 	first, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
@@ -1216,9 +1216,9 @@ func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 // everything.
 func TestLookupCountsOnlyCoveringWarrants(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.activate(t, "W2", ueAddr("10.250.0.10"))
 
 	if _, _, covering, _ := lookupTrigger(f.tasks, f.e, 100); covering != 1 {
@@ -1304,8 +1304,8 @@ func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
 // traffic under a warrant whose criteria no longer describe it.
 func TestModifyToACriterionSelectingNothingStopsContent(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	if !f.duplicates(t, 100, 1) {
 		t.Fatal("duplication was not enabled")
 	}
@@ -1469,10 +1469,10 @@ func TestForgettingASessionLeavesTheCarryOverIntact(t *testing.T) {
 // delivered under it, which is content leaving the element without authority.
 func TestAttributionFollowsATaskingChange(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	const xid = types.XID("aaaaaaaa-0000-4000-8000-000000000001")
-	f.activate(t, xid, ueAddr("10.250.0.9"))
+	f.activate(t, xid, ueAddr(testUEIPv4))
 
 	// Attributed once, which is what populates the memo.
 	if got := f.e.tasksCovering(100); len(got) != 1 {
@@ -1493,13 +1493,13 @@ func TestAttributionFollowsATaskingChange(t *testing.T) {
 // running and which produces nothing.
 func TestAttributionFollowsANewTask(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	if got := f.e.tasksCovering(100); len(got) != 0 {
 		t.Fatalf("tasksCovering = %d tasks before any warrant, want 0", len(got))
 	}
 
-	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr(testUEIPv4))
 
 	if got := f.e.tasksCovering(100); len(got) != 1 {
 		t.Errorf("tasksCovering = %d tasks after a warrant was activated; the interception "+
@@ -1514,8 +1514,8 @@ func TestAttributionFollowsANewTask(t *testing.T) {
 // move of the epoch.
 func TestAttributionFollowsAChangeInTheSessionsOwnRules(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr(testUEIPv4))
 
 	if got := f.e.tasksCovering(100); len(got) != 1 {
 		t.Fatalf("tasksCovering = %d tasks for the address the warrant names, want 1", len(got))
@@ -1540,9 +1540,9 @@ func TestAttributionFollowsAChangeInTheSessionsOwnRules(t *testing.T) {
 // second map.
 func TestAttributionIsDroppedWhenTheSessionGoes(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr(testUEIPv4))
 
-	s := unmarkedSession(100, "10.250.0.9")
+	s := unmarkedSession(100, testUEIPv4)
 	f.putSession(t, s)
 
 	if got := f.e.tasksCovering(100); len(got) != 1 {
@@ -1567,7 +1567,7 @@ func TestAttributionIsDroppedWhenTheSessionGoes(t *testing.T) {
 // prune the map have already happened for that session.
 func TestAttributionDoesNotMemoiseAVanishedSession(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr("10.250.0.9"))
+	f.activate(t, "aaaaaaaa-0000-4000-8000-000000000001", ueAddr(testUEIPv4))
 
 	if got := f.e.tasksCovering(999); got != nil {
 		t.Fatalf("tasksCovering for a session this element does not hold = %v, want nil", got)
@@ -1587,7 +1587,7 @@ func TestAttributionDoesNotMemoiseAVanishedSession(t *testing.T) {
 // nothing that scales with the tasking.
 func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	// Several warrants, so anything walking the task set per copy shows up.
 	for i, xid := range []types.XID{
@@ -1595,7 +1595,7 @@ func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
 		"aaaaaaaa-0000-4000-8000-000000000002",
 		"aaaaaaaa-0000-4000-8000-000000000003",
 	} {
-		addr := "10.250.0.9"
+		addr := testUEIPv4
 		if i > 0 {
 			addr = fmt.Sprintf("10.250.1.%d", i)
 		}
@@ -1642,13 +1642,13 @@ func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
 // thrown away.
 func TestARefusedProgramIsRetriedRatherThanRecordedAsDone(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	f.mu.Lock()
 	f.cause = ie.CauseRequestRejected
 	f.mu.Unlock()
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	// Not recorded as programmed: the record says what the datapath holds, and the

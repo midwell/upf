@@ -129,7 +129,7 @@ func raceConn(t *testing.T, sessions SessionsStore) *PFCPConn {
 func TestAStoredSessionsRulesAreStableForAConcurrentReader(t *testing.T) {
 	sessions := NewInMemoryStore()
 
-	sess := storedSession(100, "10.250.0.9")
+	sess := storedSession(100, testUEIPv4)
 	if cap(sess.fars) != MaxItems {
 		t.Fatalf("the fixture allocates fars at cap %d, not the store's %d; "+
 			"it no longer reproduces the sharing this test exists for", cap(sess.fars), MaxItems)

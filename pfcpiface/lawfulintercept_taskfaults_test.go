@@ -14,8 +14,8 @@ import (
 // everything satisfies every assertion below and is worthless.
 func TestAWorkingTaskReportsNoFault(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	if !f.duplicates(t, 100, 1) {
 		t.Fatal("the tasked session is not duplicated, so this test would pass for the wrong reason")
@@ -35,14 +35,14 @@ func TestAWorkingTaskReportsNoFault(t *testing.T) {
 // of them had stopped producing.
 func TestATaskTheDatapathIsNotDuplicatingReportsAFault(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 
 	// The datapath refuses everything from here on.
 	f.mu.Lock()
 	f.cause = 64 // CauseRequestRejected
 	f.mu.Unlock()
 
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	if f.duplicates(t, 100, 1) {
@@ -68,8 +68,8 @@ func TestATaskTheDatapathIsNotDuplicatingReportsAFault(t *testing.T) {
 // element-scoped report it already had.
 func TestATaskFaultIsAttributedToOneWarrant(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.settle(t)
 
 	if !f.duplicates(t, 100, 1) {
@@ -99,7 +99,7 @@ func TestATaskFaultIsAttributedToOneWarrant(t *testing.T) {
 // since a copy that is never made leaves no record anywhere.
 func TestATaskSelectingNoSessionSaysSo(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	faults := f.e.taskFaults("W1")
 	if len(faults) == 0 {
@@ -112,7 +112,7 @@ func TestATaskSelectingNoSessionSaysSo(t *testing.T) {
 
 	// And it clears by itself when the session appears: the answer is computed, so nothing has
 	// to remember to retract it. This is the half a stored fault gets wrong.
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.e.retaskAndWait()
 	f.settle(t)
 	if got := f.e.taskFaults("W1"); len(got) != 0 {
@@ -125,7 +125,7 @@ func TestATaskSelectingNoSessionSaysSo(t *testing.T) {
 // identifier — an address, a TEID, a SEID — so an implementation that quoted the criterion it
 // resolved would put the subject on the X1 interface.
 func TestATaskFaultNamesNoSubject(t *testing.T) {
-	const ueIP = "10.250.0.9"
+	const ueIP = testUEIPv4
 
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, ueIP))
@@ -153,8 +153,8 @@ func TestATaskFaultNamesNoSubject(t *testing.T) {
 // claim about a warrant this element was never given.
 func TestATaskTheElementDoesNotHoldReportsNothing(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
-	f.activate(t, "W1", ueAddr("10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4))
 
 	if got := f.e.taskFaults(types.XID("W-never-installed")); len(got) != 0 {
 		t.Errorf("the element answered %+v about a task it does not hold", got)

@@ -37,7 +37,7 @@ func withoutFAR(s PFCPSession, farID uint32) PFCPSession {
 // had removed, until the process dies and takes every warrant it holds with it.
 func TestARemovedFARLeavesNoRecordBehind(t *testing.T) {
 	f := newEnablerFixture(t)
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.putSession(t, sess)
 
 	// Tasked by F-TEID rather than UE address, so exactly one of the session's two FARs
@@ -97,13 +97,13 @@ func TestARemovedFARLeavesNoRecordBehind(t *testing.T) {
 // removed, which is the one thing a re-derivation's own contract says it must never do.
 func TestAPassDoesNotReAddAFARTheSMFRemoved(t *testing.T) {
 	f := newEnablerFixture(t)
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.putSession(t, sess)
 	w := f.windowed(t)
 
 	// Tasking installed without asking for a pass, so the pass this test drives is the one
 	// that would first program duplication for FAR 1.
-	task := ccTask("W1", ueAddr("10.250.0.9"))
+	task := ccTask("W1", ueAddr(testUEIPv4))
 	if err := f.e.canApply(task); err != nil {
 		t.Fatalf("canApply: %v", err)
 	}
@@ -167,12 +167,12 @@ func TestAPassDoesNotReAddAFARTheSMFRemoved(t *testing.T) {
 // correctly and left the traffic being copied would pass a test pinned to the record.
 func TestDuplicationPushedBeforeAFailedRemovalIsStillWithdrawable(t *testing.T) {
 	f := newEnablerFixture(t)
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.putSession(t, sess)
 
 	// Tasking installed without a pass, so it is the modification's own push that starts the
 	// interception — which is what leaves it unrecorded.
-	task := ccTask("W1", ueAddr("10.250.0.9"))
+	task := ccTask("W1", ueAddr(testUEIPv4))
 	if err := f.e.canApply(task); err != nil {
 		t.Fatalf("canApply: %v", err)
 	}

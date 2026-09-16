@@ -71,24 +71,24 @@ func gtpuEncap(inner []byte, flags byte, optional []byte) []byte {
 
 // uplinkCopy is a copy of a packet the target sent from the given port.
 func uplinkCopy(port uint16) []byte {
-	return ethIPv4(ipv4Packet("10.250.0.9", "1.1.1.1", protoTCP, tcpSegment(port, 80, 16)))
+	return ethIPv4(ipv4Packet(testUEIPv4, "1.1.1.1", protoTCP, tcpSegment(port, 80, 16)))
 }
 
 // downlinkCopy is a copy of a packet sent to the target's given port, as the
 // downlink tee sees it — inside the GTP-U tunnel.
 func downlinkCopy(port uint16) []byte {
-	return gtpuEncap(ipv4Packet("1.1.1.1", "10.250.0.9", protoTCP, tcpSegment(80, port, 16)), 0, nil)
+	return gtpuEncap(ipv4Packet("1.1.1.1", testUEIPv4, protoTCP, tcpSegment(80, port, 16)), 0, nil)
 }
 
 // wildcardSession is the ordinary case: one FAR per direction, and PDRs whose SDF
 // filters constrain nothing but the UE address. A port criterion against it can only
 // be settled by reading the packet.
-func wildcardSession() PFCPSession { return unmarkedSession(100, "10.250.0.9") }
+func wildcardSession() PFCPSession { return unmarkedSession(100, testUEIPv4) }
 
 // sharedFARSession has both directions forwarding through one FAR, so enabling
 // duplication for a criterion that selects one direction copies the other too.
 func sharedFARSession() PFCPSession {
-	ue := ip2int(net.ParseIP("10.250.0.9"))
+	ue := ip2int(net.ParseIP(testUEIPv4))
 
 	return PFCPSession{
 		localSEID: 100,
@@ -132,7 +132,7 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 		{
 			name:        "UE address covers the whole session",
 			session:     wildcardSession(),
-			ids:         []types.TargetIdentifier{ueAddr("10.250.0.9")},
+			ids:         []types.TargetIdentifier{ueAddr(testUEIPv4)},
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
 		},
 		{
@@ -199,7 +199,7 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 				// A one-direction criterion beside a session-wide one. It was a PDR ID
 				// before, which is refused now.
 				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
-				ueAddr("10.250.0.9"),
+				ueAddr(testUEIPv4),
 			},
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
 		},
@@ -257,13 +257,13 @@ func TestFilterOnTransportPort(t *testing.T) {
 			// collect the wrong traffic.
 			"the far end's port is the criterion's, uplink",
 			farForwardUAndDuplicate,
-			ethIPv4(ipv4Packet("10.250.0.9", "1.1.1.1", protoTCP, tcpSegment(8080, 443, 16))),
+			ethIPv4(ipv4Packet(testUEIPv4, "1.1.1.1", protoTCP, tcpSegment(8080, 443, 16))),
 			false,
 		},
 		{
 			"a UDP packet on the same port number does not match a TCP criterion",
 			farForwardUAndDuplicate,
-			ethIPv4(ipv4Packet("10.250.0.9", "1.1.1.1", protoUDP, tcpSegment(443, 80, 8))),
+			ethIPv4(ipv4Packet(testUEIPv4, "1.1.1.1", protoUDP, tcpSegment(443, 80, 8))),
 			false,
 		},
 	}
@@ -350,7 +350,7 @@ func overwrite(frame []byte, at int, b byte) []byte {
 func TestFilterWalksGTPUExtensionHeaders(t *testing.T) {
 	f := filterFor(taskWith(types.TargetIdentifier{Type: types.TargetUDPPort, Value: "5060"}),
 		wildcardSession())
-	inner := ipv4Packet("1.1.1.1", "10.250.0.9", protoUDP, tcpSegment(5060, 5060, 8))
+	inner := ipv4Packet("1.1.1.1", testUEIPv4, protoUDP, tcpSegment(5060, 5060, 8))
 
 	// A sequence number present, so the four optional octets are there with no
 	// extension header following.
@@ -418,7 +418,7 @@ func TestFilterAllocatesNothingPerCopy(t *testing.T) {
 // asserted: where coverage is exact the frame is never touched, so a filter that
 // claims to be trivial must decide a copy it could not possibly parse.
 func TestTrivialFilterReadsNoPacket(t *testing.T) {
-	f := filterFor(taskWith(ueAddr("10.250.0.9")), wildcardSession())
+	f := filterFor(taskWith(ueAddr(testUEIPv4)), wildcardSession())
 	if !f.trivial() {
 		t.Fatal("a criterion covering the whole session should need no filtering")
 	}
@@ -461,7 +461,7 @@ func shipperOver(f *enablerFixture, rec *recordingReporter) *liShipper {
 		enabler:  f.e,
 		reporter: rec,
 		senders:  make(map[string]x2x3.Sender),
-		ids:      x2x3.NewIdentity("upf-1", upfInterceptionPoint),
+		ids:      x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 	}
 }
 
@@ -499,7 +499,7 @@ func TestFilteredCopyIsNotAFault(t *testing.T) {
 // arrived — and only the ADMF can resolve it. Filtering must not have swallowed it.
 func TestUntaskedContentStillReports(t *testing.T) {
 	f := newEnablerFixture(t)
-	f.putSession(t, unmarkedSession(100, "10.250.0.9"))
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	// A warrant, but for another subscriber, so this session is covered by none.
 	f.activate(t, "W1", ueAddr("10.250.0.10"))
 

@@ -42,8 +42,8 @@ func bessWithNoDatapath(t *testing.T) *bess {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := ln.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -143,14 +143,14 @@ func TestAnUnconfirmedDuplicationFARIsRetriedAndReported(t *testing.T) {
 	// carrying their traffic, so a session of bare FARs would produce no difference at
 	// all and this test would assert nothing.
 	const seid = uint64(0x2632898145f4d191)
-	if err := sessions.PutSession(unmarkedSession(seid, "10.250.0.9")); err != nil {
+	if err := sessions.PutSession(unmarkedSession(seid, testUEIPv4)); err != nil {
 		t.Fatal(err)
 	}
 
 	// A warrant naming the session itself, which is what this deployment's own
 	// triggering function sends.
 	task := types.InterceptTask{
-		XID:      "11111111-1111-4111-8111-111111111111",
+		XID:      testXIDPrimary,
 		Products: []types.ProductType{types.ProductCC},
 		Targets: []types.TargetIdentifier{
 			{Type: types.TargetFSEID, Value: "2752413510594253201"}, // the SEID above, in decimal

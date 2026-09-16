@@ -24,10 +24,10 @@ import (
 // that it is healthy, which an agency cannot distinguish from a subject who has gone quiet.
 func TestARefusedModificationIsRewrittenByTheNextPass(t *testing.T) {
 	f := newEnablerFixture(t)
-	sess := unmarkedSession(100, "10.250.0.9")
+	sess := unmarkedSession(100, testUEIPv4)
 	f.putSession(t, sess)
 
-	task := ccTask("W1", ueAddr("10.250.0.9"))
+	task := ccTask("W1", ueAddr(testUEIPv4))
 	if err := f.e.canApply(task); err != nil {
 		t.Fatalf("canApply: %v", err)
 	}

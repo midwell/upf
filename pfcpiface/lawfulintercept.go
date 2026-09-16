@@ -200,13 +200,13 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		return cfg.blockErr
 	}
 
-	if err := validateLiConfig(cfg); err != nil {
+	if cfgErr := validateLiConfig(cfg); cfgErr != nil {
 		if issueReporter != nil {
 			issueReporter.Notify(x1.NEIssueInvalidConfig,
 				"the content-interception configuration is unusable, so interception has not been started")
 		}
 
-		return err
+		return cfgErr
 	}
 
 	// Duplication control before the listener, because the listener refuses tasking

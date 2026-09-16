@@ -24,14 +24,14 @@ import (
 // option actually being passed rather than the option existing.
 func TestTheTriggeringFunctionIsToldWhenX3DeliveryIsDown(t *testing.T) {
 	const (
-		did  = "33333333-3333-4333-8333-333333333333"
+		did  = testXIDTertiary
 		addr = "192.0.2.1:42069"
 	)
 
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
-	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", "upf-1")
-	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", "smf-1")
+	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
+	tfCert, tfKey := liLeaf(t, dir, caCert, caKey, "ADMF", testTFID)
 
 	upfMat, err := mtls.Load(upfCert, upfKey, caPath)
 	if err != nil {
@@ -42,19 +42,19 @@ func TestTheTriggeringFunctionIsToldWhenX3DeliveryIsDown(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: "upf-1", TFID: "smf-1", X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 
 	down := false
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil,
-		x2x3.NewIdentity("upf-1", upfInterceptionPoint), nil,
+		x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil,
 		func(a string) bool { return down && a == addr }); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
 
 	// The destination the CC-TF provisions, which is the only source a triggered POI has.
-	req := x1.NewRequester("https://"+cfg.X1Listen, "smf-1", "upf-1", tfMat.ClientTLS())
+	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 	if err := req.CreateDestination(x1.Destination{
-		DID: did, DeliveryType: "X3Only", Address: "192.0.2.1", Port: 42069,
+		DID: did, DeliveryType: testDeliveryX3Only, Address: testDeliveryIP, Port: 42069,
 	}); err != nil {
 		t.Fatalf("CreateDestination: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestTheTriggeringFunctionIsToldWhenX3DeliveryIsDown(t *testing.T) {
 		t.Helper()
 
 		return postX1(t, cfg.X1Listen, tfMat,
-			bulkRequest("GetAllDestinationDetailsRequest", "smf-1", "upf-1"))
+			bulkRequest("GetAllDestinationDetailsRequest", testTFID, testNEID))
 	}
 
 	if body := ask(t); !strings.Contains(body, "activeAndWorking") {
