@@ -14,7 +14,7 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 )
 
-// storedSession builds a session allocated the way the store allocates one.
+// liStoredSession builds a session allocated the way the store allocates one.
 //
 // **The allocation shape is the whole point.** NewPFCPSession makes each rule slice at
 // cap(MaxItems) and nothing ever grows past it, so append never reallocates and a
@@ -23,7 +23,7 @@ import (
 // the first append reallocates and the sharing quietly stops being total. That is
 // exactly why -race never saw this: the tests were not reproducing the memory layout
 // the store produces.
-func storedSession(seid uint64, ue string) PFCPSession {
+func liStoredSession(seid uint64, ue string) PFCPSession {
 	addr := ip2int(net.ParseIP(ue))
 	s := PFCPSession{
 		localSEID:  seid,
@@ -129,7 +129,7 @@ func raceConn(t *testing.T, sessions SessionsStore) *PFCPConn {
 func TestAStoredSessionsRulesAreStableForAConcurrentReader(t *testing.T) {
 	sessions := NewInMemoryStore()
 
-	sess := storedSession(100, testUEIPv4)
+	sess := liStoredSession(100, testUEIPv4)
 	if cap(sess.fars) != MaxItems {
 		t.Fatalf("the fixture allocates fars at cap %d, not the store's %d; "+
 			"it no longer reproduces the sharing this test exists for", cap(sess.fars), MaxItems)
@@ -182,7 +182,7 @@ func TestAStoredSessionsRulesAreStableForAConcurrentReader(t *testing.T) {
 func TestTheFramingPathReadsAStableSession(t *testing.T) {
 	sessions := NewInMemoryStore()
 
-	sess := storedSession(200, "10.250.0.10")
+	sess := liStoredSession(200, "10.250.0.10")
 	if err := sessions.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestTheFramingPathReadsAStableSession(t *testing.T) {
 	}
 }
 
-// qerSession is storedSession with the one thing the other two fixtures lack: two QERs,
+// qerSession is liStoredSession with the one thing the other two fixtures lack: two QERs,
 // and PDRs whose qerIDList names both of them.
 //
 // Without both, MarkSessionQer returns at its own guard — "need at least 1 QER in PDR or
@@ -252,7 +252,7 @@ func qerSession(seid uint64, ue string) PFCPSession {
 	down := downlinkPDR(seid, 2, addr)
 	// Both QERs in both lists, allocated at capacity so the in-place shift
 	// MarkSessionQer performs stays inside the array every reader holds — the same
-	// reason storedSession allocates the rule slices at cap(MaxItems).
+	// reason liStoredSession allocates the rule slices at cap(MaxItems).
 	for _, p := range []*pdr{&up, &down} {
 		list := make([]uint32, 0, 4)
 		p.qerIDList = append(list, 4, 5)
@@ -376,21 +376,21 @@ func TestAStoredSessionsQERListIsStableForAConcurrentReader(t *testing.T) {
 	}
 }
 
-// recordingDP is a datapath that remembers the last body programmed for each FAR, so a
+// liRecordingDP is a datapath that remembers the last body programmed for each FAR, so a
 // test can assert on what the user plane was actually left holding rather than on which
 // call happened.
-type recordingDP struct {
+type liRecordingDP struct {
 	fakeDP
 
 	mu   sync.Mutex
 	last map[uint32]far
 }
 
-func newRecordingDP() *recordingDP {
-	return &recordingDP{last: make(map[uint32]far)}
+func newRecordingDP() *liRecordingDP {
+	return &liRecordingDP{last: make(map[uint32]far)}
 }
 
-func (d *recordingDP) SendMsgToUPF(_ upfMsgType, _ PacketForwardingRules, updated PacketForwardingRules) uint8 {
+func (d *liRecordingDP) SendMsgToUPF(_ upfMsgType, _ PacketForwardingRules, updated PacketForwardingRules) uint8 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -401,7 +401,7 @@ func (d *recordingDP) SendMsgToUPF(_ upfMsgType, _ PacketForwardingRules, update
 	return ie.CauseRequestAccepted
 }
 
-func (d *recordingDP) lastFor(farID uint32) (far, bool) {
+func (d *liRecordingDP) lastFor(farID uint32) (far, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -431,7 +431,7 @@ func (d *recordingDP) lastFor(farID uint32) (far, bool) {
 // beforeTransactPush for the residual it does not close.
 func TestATaskingPassDoesNotRestateAStaleForwardingBody(t *testing.T) {
 	sessions := NewInMemoryStore()
-	sess := storedSession(400, "10.250.0.12")
+	sess := liStoredSession(400, "10.250.0.12")
 	if err := sessions.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +516,7 @@ func TestATaskingPassDoesNotRestateAStaleForwardingBody(t *testing.T) {
 // still pushing would pass a map-level test and leave a subscriber's traffic being copied.
 func TestASessionDeletedDuringAPassIsNotReAddedToTheDatapath(t *testing.T) {
 	sessions := NewInMemoryStore()
-	sess := storedSession(500, "10.250.0.14")
+	sess := liStoredSession(500, "10.250.0.14")
 	if err := sessions.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}

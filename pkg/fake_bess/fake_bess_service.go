@@ -101,7 +101,7 @@ type FakeFar struct {
 
 	dstIntf       uint8
 	sendEndMarker bool
-	applyAction   uint8
+	action        uint8
 	fwdAction     uint8
 	tunnelType    uint8
 	tunnelIP4Src  uint32
@@ -118,13 +118,23 @@ func (f FakeFar) String() string {
 		f.Drops(), f.Forwards(), f.Buffers())
 }
 
+// The action a FAR carries into the table is not the PFCP Apply Action: addFAR passes it
+// through setActionValue first, which turns it into the gate farLookup switches on. These
+// mirror the values there, and they are what UnmarshalFar reads back.
+const (
+	farForwardD uint8 = 0
+	farForwardU uint8 = 1
+	farDrop     uint8 = 2
+	farNotify   uint8 = 4
+)
+
 // ActionValue returns the datapath action the PFCP agent installed for this FAR:
 // the BESS-side value (farForwardD/farForwardU/farDrop/...), not the PFCP
 // apply-action bitmap. Note this is the value GtpuEncap also consumes as the
 // GTP-U PDU Session Container PDU Type, so it never carries a duplication
 // variant — see ForwardActionValue.
 func (f *FakeFar) ActionValue() uint8 {
-	return f.applyAction
+	return f.action
 }
 
 // ForwardActionValue returns the value the pipeline's executeFAR splits on, which
@@ -136,15 +146,15 @@ func (f *FakeFar) ForwardActionValue() uint8 {
 }
 
 func (f *FakeFar) Drops() bool {
-	return utils.Uint8Has1stBit(f.applyAction)
+	return f.action == farDrop
 }
 
 func (f *FakeFar) Forwards() bool {
-	return utils.Uint8Has2ndBit(f.applyAction)
+	return f.action == farForwardD || f.action == farForwardU
 }
 
 func (f *FakeFar) Buffers() bool {
-	return utils.Uint8Has3rdBit(f.applyAction)
+	return f.action == farNotify
 }
 
 type FakeQer struct {
@@ -181,10 +191,28 @@ func newFakeBESSService() *fakeBessService {
 	}
 }
 
-func (b *fakeBessService) GetOrAddModule(name string) module {
+// GetModuleState returns a snapshot of what a module has been programmed with, taken
+// under the lock the gRPC handlers write it under.
+//
+// The messages are cloned rather than handed out: handleAddEntry resets and overwrites a
+// stored message in place when an add matches an entry already there, so returning the
+// stored pointers would leave a reader parsing a message the next add is rewriting. A
+// reader is a test goroutine and a writer is a gRPC handler, and the PFCP round trip
+// between them is a socket, which is not a happens-before edge the race detector can see
+// -- so anything short of a copy taken under the lock is a reportable race waiting for a
+// test to arrange it.
+func (b *fakeBessService) GetModuleState(name string) []proto.Message {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
-	return b.unsafeGetOrAddModule(name)
+
+	msgs := b.unsafeGetOrAddModule(name).GetState()
+
+	snapshot := make([]proto.Message, 0, len(msgs))
+	for _, m := range msgs {
+		snapshot = append(snapshot, proto.Clone(m))
+	}
+
+	return snapshot
 }
 
 func (b *fakeBessService) unsafeGetOrAddModule(name string) module {
@@ -290,7 +318,7 @@ func UnmarshalFar(em *bess_pb.ExactMatchCommandAddArg) (f FakeFar) {
 	f.fseID = em.Fields[1].GetValueInt()
 
 	// Values.
-	f.applyAction = uint8(em.Values[0].GetValueInt())
+	f.action = uint8(em.Values[0].GetValueInt())
 	f.tunnelType = uint8(em.Values[1].GetValueInt())
 	f.tunnelIP4Src = uint32(em.Values[2].GetValueInt())
 	f.tunnelIP4Dst = uint32(em.Values[3].GetValueInt())

@@ -165,9 +165,20 @@ func (b *bess) AddSliceInfo(sliceInfo *SliceInfo) error {
 func (b *bess) SendMsgToUPF(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) uint8 {
-	cause, _ := b.sendMsgToUPFConfirmed(method, rules, updated)
+	cause, _, _ := b.sendMsgToUPFBatch(method, rules, updated)
 
 	return cause
+}
+
+// SendMsgToUPFWithCompletion programs the batch exactly as SendMsgToUPF does, and also
+// reports whether it finished within Timeout. The cause is the same one SendMsgToUPF
+// returns; finished is what that cause cannot say.
+func (b *bess) SendMsgToUPFWithCompletion(
+	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
+) (uint8, bool) {
+	cause, completed, _ := b.sendMsgToUPFBatch(method, rules, updated)
+
+	return cause, completed
 }
 
 // sendMsgToUPFConfirmed is SendMsgToUPF, and additionally answers whether every write in
@@ -192,6 +203,17 @@ func (b *bess) SendMsgToUPF(
 func (b *bess) sendMsgToUPFConfirmed(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) (uint8, bool) {
+	cause, _, confirmed := b.sendMsgToUPFBatch(method, rules, updated)
+
+	return cause, confirmed
+}
+
+// sendMsgToUPFBatch programs the batch and gives every answer the three functions above
+// take their part of: the cause, whether the batch completed, and whether every write in
+// it was confirmed.
+func (b *bess) sendMsgToUPFBatch(
+	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
+) (uint8, bool, bool) {
 	// create context
 	cause := ie.CauseRequestAccepted
 
@@ -208,7 +230,7 @@ func (b *bess) sendMsgToUPFConfirmed(
 	calls := len(pdrs) + len(fars) + len(qers)
 	if calls == 0 {
 		// Nothing was asked of the datapath, so there is nothing left unconfirmed.
-		return cause, true
+		return cause, true, true
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
@@ -278,7 +300,7 @@ func (b *bess) sendMsgToUPFConfirmed(
 	// Confirmed means every write was acknowledged: the batch finished, nothing reported a
 	// refusal, and no worker had an RPC that did not complete. The last of those is the
 	// one the cause deliberately forgives.
-	return cause, completed && succeeded && !batch.unconfirmed.Load()
+	return cause, completed, completed && succeeded && !batch.unconfirmed.Load()
 }
 
 func (b *bess) Exit() {
@@ -653,7 +675,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 	}
 
 	// Prepare session stats.
-	createStats := func(preResp, postResp *pb.FlowMeasureReadResponse) {
+	createStats := func(preResp, postResp *pb.FlowMeasureReadResponse, direction string) {
 		for i := 0; i < len(postResp.Statistics); i++ {
 			var pre *pb.FlowMeasureReadResponse_Statistic
 
@@ -687,6 +709,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 				fseidString,
 				pdrString,
 				ueIpString,
+				direction,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				pc.sessionRxPackets,
@@ -695,6 +718,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 				fseidString,
 				pdrString,
 				ueIpString,
+				direction,
 			)
 			ch <- prometheus.MustNewConstMetric(
 				pc.sessionTxBytes,
@@ -703,6 +727,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 				fseidString,
 				pdrString,
 				ueIpString,
+				direction,
 			)
 			ch <- prometheus.MustNewConstSummary(
 				pc.sessionLatency,
@@ -716,6 +741,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 				fseidString,
 				pdrString,
 				ueIpString,
+				direction,
 			)
 			ch <- prometheus.MustNewConstSummary(
 				pc.sessionJitter,
@@ -729,12 +755,13 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 				fseidString,
 				pdrString,
 				ueIpString,
+				direction,
 			)
 		}
 	}
 
-	createStats(qosStatsInResp, postUlQosStatsResp)
-	createStats(qosStatsInResp, postDlQosStatsResp)
+	createStats(qosStatsInResp, postUlQosStatsResp, "uplink")
+	createStats(qosStatsInResp, postDlQosStatsResp, "downlink")
 
 	return err
 }

@@ -17,14 +17,14 @@ import (
 	"github.com/wmnsk/go-pfcp/message"
 )
 
-// refusingDP is a datapath that refuses what it is asked to do *after* applying it, which is what
+// liRefusingDP is a datapath that refuses what it is asked to do *after* applying it, which is what
 // the real one does: SendMsgToUPF issues one gRPC call per rule and GRPCJoin returns on the first
 // failure with the rest of the batch still in flight, so a "rejected" answer means an unknown
 // subset was applied — not that nothing was.
 //
 // Every other datapath fake in this package models all-or-nothing, which is why none of them can
 // reach the state the live incident produced.
-type refusingDP struct {
+type liRefusingDP struct {
 	fakeDP
 
 	mu     sync.Mutex
@@ -50,11 +50,11 @@ var sharedMetrics = sync.OnceValues(func() (*metrics.Service, error) {
 	return metrics.NewPrometheusService()
 })
 
-func newRefusingDP() *refusingDP {
-	return &refusingDP{duplicating: make(map[uint32]bool)}
+func newRefusingDP() *liRefusingDP {
+	return &liRefusingDP{duplicating: make(map[uint32]bool)}
 }
 
-func (d *refusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardingRules) uint8 {
+func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardingRules) uint8 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -83,7 +83,7 @@ func (d *refusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardi
 
 // sendMsgToUPFConfirmed makes this fake a confirmingDatapath, so a test can drive the
 // accepted-but-unconfirmed branch through the real handlers.
-func (d *refusingDP) sendMsgToUPFConfirmed(
+func (d *liRefusingDP) sendMsgToUPFConfirmed(
 	method upfMsgType, all, updated PacketForwardingRules,
 ) (uint8, bool) {
 	cause := d.SendMsgToUPF(method, all, updated)
@@ -94,7 +94,7 @@ func (d *refusingDP) sendMsgToUPFConfirmed(
 	return cause, cause == ie.CauseRequestAccepted && !d.unconfirmed
 }
 
-func (d *refusingDP) sawMethod(m upfMsgType) bool {
+func (d *liRefusingDP) sawMethod(m upfMsgType) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -110,7 +110,7 @@ func (d *refusingDP) sawMethod(m upfMsgType) bool {
 // rejectionConn builds a connection whose datapath refuses, wired to a real enabler as production
 // wires it — without the enabler, applyTasking and every recorder are nil-receiver no-ops and the
 // paths under test record nothing for reasons unrelated to the defect.
-func rejectionConn(t *testing.T) (*PFCPConn, *refusingDP, *ccEnabler, *[]string) {
+func rejectionConn(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler, *[]string) {
 	t.Helper()
 
 	dp := newRefusingDP()
@@ -187,7 +187,7 @@ func TestARefusedModificationRecordsWhatItPushed(t *testing.T) {
 
 	const seid = 400
 
-	sess := storedSession(seid, "10.250.0.12")
+	sess := liStoredSession(seid, "10.250.0.12")
 	if err := pConn.store.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestARefusedLocalDeleteKeepsItsRecord(t *testing.T) {
 
 	const seid = 401
 
-	sess := storedSession(seid, "10.250.0.13")
+	sess := liStoredSession(seid, "10.250.0.13")
 	if err := pConn.store.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestAnUnconfirmedModificationDoesNotRecordDuplicationAsProgrammed(t *testin
 
 	const seid = 402
 
-	if err := pConn.store.PutSession(storedSession(seid, "10.250.0.14")); err != nil {
+	if err := pConn.store.PutSession(liStoredSession(seid, "10.250.0.14")); err != nil {
 		t.Fatal(err)
 	}
 

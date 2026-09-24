@@ -16,77 +16,6 @@ type PacketForwardingRules struct {
 	qers []qer
 }
 
-// privateCopy returns the same rules over backing arrays no other goroutine holds.
-//
-// **A stored session is shared memory, and its rule slices are the shared part.** The
-// store keeps a PFCPSession by value in a sync.Map, so every getter hands out a copy of
-// the struct — but a slice header copied by value still points at the one array. The
-// arrays are allocated at cap(MaxItems) in NewPFCPSession and never grow past it, so
-// append never reallocates and the sharing is total rather than intermittent: the
-// writer's array *is* every reader's array, for the life of the session.
-//
-// A path that mutates a stored session's rules in place therefore mutates what every
-// concurrent reader is reading, however carefully the two paths are ordered above that
-// point — UpdateFAR writes a whole far struct into the array, and RemoveFAR shifts the
-// remainder down inside it. What a reader can then observe is a rule half-replaced, or
-// a rule at an index that now belongs to a different one, and what it does with it is
-// program the user plane. Ordering arguments about which path may touch which session
-// are necessary and not sufficient: they operate on whole sessions, and this operates
-// on the bytes of one rule.
-//
-// So the copy goes on the writer, which is the only one of the two there is. The
-// alternative — copying in the getters — is both the wrong end and not a fix: GetSession
-// is on the packet path through resolveCovering, so it pays per reader for a hazard that
-// exists per writer, and copying an array another goroutine is mutating in place is
-// still a racing read. Narrowing the window is not closing it.
-//
-// The readers this protects are ccEnabler.transact, which reads sess.fars on the
-// enabler's worker, and resolveCovering, which reaches the same arrays from a framing
-// worker through sessionFor. Neither file mentions this one, which is why the property
-// is written down at both ends.
-func (p PacketForwardingRules) privateCopy() PacketForwardingRules {
-	pdrs := cloneRules(p.pdrs)
-	// **One level deeper, because one rule field is itself a slice.** Copying the three
-	// rule slices copies each rule struct, and a struct copy of a pdr copies its
-	// qerIDList's *header*: the backing array stays the one every reader is reading.
-	//
-	// MarkSessionQer mutates that array in place on every session modification
-	// (session_qer.go) — it removes the session QER's id and appends it at the end, which
-	// is a shift inside the array — while resolveCovering evaluates a TargetQERID or
-	// TargetPDR criterion against it from a framing worker and transact reads it on the
-	// enabler's worker. Neither of those files mentions this one, and neither mentions
-	// session_qer.go: the invisibility is what made a copy that stops one level short
-	// look complete. Nothing else nested needs this — far and applicationFilter are
-	// all-scalar, and qerIDList is the only slice-typed field in pdr.
-	for i := range pdrs {
-		// Only where there is one, so a rule that carried no QER list keeps carrying
-		// none: nil and empty are the same to every reader here, but this copy has no
-		// business changing which one a rule holds.
-		if pdrs[i].qerIDList != nil {
-			pdrs[i].qerIDList = cloneRules(pdrs[i].qerIDList)
-		}
-	}
-
-	return PacketForwardingRules{
-		pdrs: pdrs,
-		fars: cloneRules(p.fars),
-		qers: cloneRules(p.qers),
-	}
-}
-
-// cloneRules copies a rule slice, keeping its capacity.
-//
-// Capacity rather than length, because the headroom is load-bearing: the store
-// allocates these at cap(MaxItems) and CreateFAR appends into it. A copy sized to its
-// length would reallocate on the next append — harmless in itself, but it would change
-// behaviour this copy has no business changing.
-func cloneRules[T any](in []T) []T {
-	out := make([]T, len(in), cap(in))
-	copy(out, in)
-
-	return out
-}
-
 // PFCPSession implements one PFCP session.
 type PFCPSession struct {
 	localSEID  uint64
@@ -97,6 +26,52 @@ type PFCPSession struct {
 
 func (p PacketForwardingRules) String() string {
 	return fmt.Sprintf("PDRs=%v, FARs=%v, QERs=%v", p.pdrs, p.fars, p.qers)
+}
+
+// findPDR returns the rule this set holds under the given ID.
+func (p PacketForwardingRules) findPDR(id uint32) (pdr, bool) {
+	for _, v := range p.pdrs {
+		if v.pdrID == id {
+			return v, true
+		}
+	}
+
+	return pdr{}, false
+}
+
+// findQER returns the rule this set holds under the given ID.
+func (p PacketForwardingRules) findQER(id uint32) (qer, bool) {
+	for _, v := range p.qers {
+		if v.qerID == id {
+			return v, true
+		}
+	}
+
+	return qer{}, false
+}
+
+// Clone returns rules that share no storage with these ones.
+//
+// A PFCPSession read from the store is a struct copy, but its three slices still point
+// at the arrays the store holds: assigning into one of them -- which is what UpdatePDR,
+// UpdateFAR and UpdateQER do -- is a write the store sees at once, and removing a rule
+// shifts every rule after it through the same array. A handler that can still refuse
+// the message it is parsing therefore has to work on a copy of its own, and publish it
+// with PutSession only once the message has succeeded.
+func (p PacketForwardingRules) Clone() PacketForwardingRules {
+	c := PacketForwardingRules{
+		pdrs: append(make([]pdr, 0, cap(p.pdrs)), p.pdrs...),
+		fars: append(make([]far, 0, cap(p.fars)), p.fars...),
+		qers: append(make([]qer, 0, cap(p.qers)), p.qers...),
+	}
+
+	// qerIDList is the one field of a rule that is a slice of its own, and
+	// MarkSessionQer rewrites it in place.
+	for i := range c.pdrs {
+		c.pdrs[i].qerIDList = append(make([]uint32, 0, cap(p.pdrs[i].qerIDList)), p.pdrs[i].qerIDList...)
+	}
+
+	return c
 }
 
 // NewPFCPSession allocates an session with ID.
