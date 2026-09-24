@@ -648,13 +648,15 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// datapath before this stage ran, and this return is before PutSession — so
 		// sessionProgrammed, the only thing that records a push, never happens. Record it
 		// here or the datapath duplicates with nothing in this element able to say so, and
-		// nothing able to turn it off. See farsPushed -- or farsAttempted, where the push
-		// itself was never acknowledged and the record must not claim it was.
-		if confirmed {
-			upf.ccEnabler.farsPushed(localSEID, updated.fars)
-		} else {
-			upf.ccEnabler.farsAttempted(localSEID, updated.fars)
-		}
+		// nothing able to turn it off.
+		//
+		// Recorded as *attempted* even when the push was confirmed: sendError runs the
+		// rollback, which removes what this message created and restores the session's own
+		// rules, so the datapath no longer holds what was pushed -- and the restore is
+		// itself unconfirmed. Recording the push would claim duplication the rollback may
+		// have turned off, and a claim that agrees with the tasking is one every later pass
+		// skips. See farsAttempted.
+		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
 
 		return sendError(ErrWriteToDatapath)
 	}

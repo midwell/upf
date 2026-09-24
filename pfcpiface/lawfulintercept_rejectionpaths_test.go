@@ -29,6 +29,9 @@ type liRefusingDP struct {
 
 	mu     sync.Mutex
 	refuse bool
+	// refuseDelete refuses only deletion batches, so a modification's write can be
+	// accepted and its deletion stage refused -- the branch upstream's rollback runs on.
+	refuseDelete bool
 	// unconfirmed models the third answer: the datapath applied nothing it refused, but
 	// could not say whether it applied what it accepted. Every other fake here is
 	// all-or-nothing, which is why none of them can reach the state an RPC that did not
@@ -74,7 +77,7 @@ func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwar
 		d.duplicating[f.farID] = f.liDuplicate
 	}
 
-	if d.refuse {
+	if d.refuse || (d.refuseDelete && method == upfMsgTypeDel) {
 		return ie.CauseRequestRejected
 	}
 
@@ -172,9 +175,9 @@ func programmedFor(e *ccEnabler, seid uint64, farID uint32) (bool, bool) {
 }
 
 // TestARefusedModificationRecordsWhatItPushed drives the real handler rather than calling
-// farsPushed directly.
+// the recorder directly.
 //
-// That distinction is the finding. The existing coverage calls farsPushed by hand, so it passes
+// That distinction is the finding. The existing coverage called the recorder by hand, so it passes
 // with three of the four call sites missing — which is exactly what happened: the remedy was added
 // to the deletion stage, with a comment explaining why, and the branch that reaches the datapath
 // first was never given it.
@@ -280,7 +283,7 @@ func TestARefusedLocalDeleteKeepsItsRecord(t *testing.T) {
 	}
 
 	// The element believes FAR 1 is duplicating.
-	e.farsPushed(seid, []far{{farID: 1, fseID: seid, liDuplicate: true}})
+	e.recordFARs(seid, []far{{farID: 1, fseID: seid, liDuplicate: true}}, true)
 
 	if dup, held := programmedFor(e, seid, 1); !held || !dup {
 		t.Fatalf("fixture did not establish the record: duplicating=%v held=%v", dup, held)
@@ -483,7 +486,7 @@ func TestAFARRecreatedUnderTheSameIDKeepsItsRecord(t *testing.T) {
 	// Inside the interval the SMF removes FAR 1 and immediately re-creates it — one path
 	// switch, as far as this element is concerned.
 	f.e.farsRemoved(seid, []far{{farID: 1, fseID: seid}})
-	f.e.farsPushed(seid, []far{{farID: 1, fseID: seid, liDuplicate: true}})
+	f.e.recordFARs(seid, []far{{farID: 1, fseID: seid, liDuplicate: true}}, true)
 
 	// The pass concludes on its older view.
 	w.release <- struct{}{}
@@ -726,5 +729,63 @@ func TestAnUnconfirmedModificationDoesNotRecordDuplicationAsProgrammed(t *testin
 		t.Error("a write the datapath never acknowledged was recorded as duplicating: the FAR " +
 			"now agrees with the tasking, so every later re-derivation skips it and nothing " +
 			"ever pushes it again, while an interrogation of the task reports no fault")
+	}
+}
+
+// TestARefusedDeletionStageDoesNotClaimTheRolledBackDuplication drives a modification whose
+// write the datapath accepts and whose deletion stage it refuses.
+//
+// The refusal makes the handler roll the datapath back to the rules the session had, and those
+// predate the tasking this message applied: the restore turns FAR 1's duplication off again.
+// Recording the pushed rules as duplicating would then claim a copy the datapath is not making,
+// and because that claim agrees with the tasking, every later re-derivation would skip the FAR --
+// the warrant producing nothing while the element reports it healthy.
+func TestARefusedDeletionStageDoesNotClaimTheRolledBackDuplication(t *testing.T) {
+	pConn, dp, e, _ := rejectionConn(t)
+
+	const seid = 403
+
+	if err := pConn.store.PutSession(liStoredSession(seid, "10.250.0.15")); err != nil {
+		t.Fatal(err)
+	}
+
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      testXIDSecondary,
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr("10.250.0.15")},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+
+	dp.mu.Lock()
+	dp.refuseDelete = true
+	dp.mu.Unlock()
+
+	if _, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0,
+			ie.NewUpdateFAR(
+				ie.NewFARID(1),
+				ie.NewApplyAction(ActionForward),
+				ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+			),
+			ie.NewRemoveFAR(ie.NewFARID(4)),
+		)); err == nil {
+		t.Fatal("a modification whose deletion stage was refused was reported as succeeding")
+	}
+
+	dp.mu.Lock()
+	restored := !dp.duplicating[1]
+	dp.mu.Unlock()
+
+	if !restored {
+		t.Fatal("the rollback did not restore FAR 1 to the session's own, non-duplicating " +
+			"version, so this test is not exercising the state it is about")
+	}
+
+	if duplicating, _ := programmedFor(e, seid, 1); duplicating {
+		t.Error("the record claims FAR 1 is duplicating after the rollback turned it off: the " +
+			"claim agrees with the tasking, so no later re-derivation pushes it again")
 	}
 }

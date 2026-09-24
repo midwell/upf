@@ -84,7 +84,7 @@ func TestAConfirmedWriteIsNotRewritten(t *testing.T) {
 	updated := PacketForwardingRules{fars: append([]far(nil), modified.fars...)}
 	f.e.applyTasking(&modified, &updated)
 	f.record(updated)
-	f.e.farsPushed(101, updated.fars)
+	f.e.recordFARs(101, updated.fars, true)
 
 	if !f.duplicates(t, 101, 1) {
 		t.Fatal("the fixture did not start the interception")
@@ -263,15 +263,14 @@ func TestAnUnconfirmedWriteIsVisibleToAnInterrogation(t *testing.T) {
 	}
 }
 
-// The boundary the other direction. messages_session.go's deletion-stage branch keeps using
-// farsPushed because there the push succeeded and only the later stage failed — the element
-// knows the datapath is duplicating. Nothing about that is an LI condition, and reporting it
+// The boundary the other direction: a push the datapath confirmed — what sessionProgrammed
+// records after an accepted write — means the element knows the datapath is duplicating. Nothing about that is an LI condition, and reporting it
 // would spend the credibility of the element's most serious report on a non-event.
 func TestAConfirmedWriteRaisesNoReport(t *testing.T) {
 	f := newEnablerFixture(t)
 
 	before := len(f.reported)
-	f.e.farsPushed(108, []far{{farID: 1, fseID: 108, liDuplicate: true}})
+	f.e.recordFARs(108, []far{{farID: 1, fseID: 108, liDuplicate: true}}, true)
 
 	if len(f.reported) != before {
 		t.Errorf("reports %d -> %d: a write the datapath accepted was reported as a fault",

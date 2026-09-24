@@ -193,12 +193,12 @@ func TestDuplicationPushedBeforeAFailedRemovalIsStillWithdrawable(t *testing.T) 
 	}
 
 	// The removal stage fails. The session is never stored and sessionProgrammed never runs;
-	// this is the whole of what the handler does on that path.
-	f.e.farsPushed(100, updated.fars)
+	// the handler records the push as attempted, because its rollback may have undone it.
+	f.e.farsAttempted(100, updated.fars)
 
-	if value, held := f.recorded(100, 1); !held || !value {
-		t.Fatalf("FAR 1 recorded as (%v, held=%v) after a push the handler could not store; "+
-			"the element does not know the datapath is duplicating", value, held)
+	if _, held := f.recorded(100, 1); !held {
+		t.Fatal("FAR 1 holds no record after a push the handler could not store; the " +
+			"element does not know the datapath may be duplicating")
 	}
 
 	// The warrant is withdrawn. This is the only event that will ever revisit the session.

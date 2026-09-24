@@ -595,9 +595,8 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // duplicating", the next pass compares the record against the tasking, finds them equal, and
 // concludes there is nothing to do: copies keep being made for a session no warrant covers,
 // nothing in the element can turn them off, and the element's own account says duplication is
-// off. That is over-collection recorded as compliance. farsPushed exists for a neighbouring
-// case and already documents this as the one direction the record must never be wrong in; it is
-// now the same rule here, made unstateable rather than remembered.
+// off. That is over-collection recorded as compliance, the one direction the record must never
+// be wrong in, and the signature makes it unstateable rather than remembered.
 //
 // **The request for a pass still considers the whole session**, and that is not an oversight in
 // the other direction. What the record answers is "what does the datapath hold"; what the
@@ -784,35 +783,6 @@ func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
 	}
 }
 
-// farsPushed records duplication the datapath has been told to apply, for FARs whose session
-// may never reach the store.
-//
-// The modification handler pushes its created and updated rules to the datapath *before* it
-// processes the removals, and a failure in that removal stage returns a rejection — before
-// PutSession, and so before sessionProgrammed, which is the only thing that would have
-// recorded the push. The datapath is left duplicating and this element holds no record of
-// it. A later pass then computes the tasking's answer, finds no entry, reads that as "not
-// duplicating", and where the tasking says it should not be duplicating either, concludes
-// there is nothing to do. The copies keep being made for a session no warrant covers, which
-// is over-collection, and nothing in the element can turn it off.
-//
-// Only the FARs that were actually pushed. Recording the session's whole FAR list here would
-// claim the datapath holds what this element *wants* for FARs it never sent — and a claim of
-// "not duplicating" against a FAR that is duplicating is the one direction the record must
-// never be wrong in.
-//
-// That rule is general, and all three recorders now have the shape that enforces it rather than
-// stating it: this one and farsRemoved take the rules they concern, and sessionProgrammed takes
-// the pushed rules as an argument for the same reason. It used to walk the session, which was
-// right for an establishment and wrong for every modification — so the argument this function
-// has always had is what the other one was missing.
-//
-// It does not ask for a pass, deliberately. The handler that calls this has just failed to
-// store the session, so the store still holds the pre-modification rules; a pass reading
-// them would plan FAR bodies the datapath has already replaced, which is the one thing
-// transact's own contract says it must not do. The record is what matters here — the next
-// tasking change or the SMF's retry of the modification reconciles the datapath, and both
-// now have something correct to reconcile against.
 // abandonedDuplication reports that this element gave up on a session while the datapath may
 // still be duplicating its traffic.
 //
@@ -845,16 +815,9 @@ func (e *ccEnabler) abandonedDuplication(fars []far, why string) {
 	}
 }
 
-// farsPushed records rules the datapath **accepted**, on a path where nothing else will
-// record them — the deletion stage of a modification, which returns before PutSession so
-// sessionProgrammed never runs. The push itself succeeded, so the record states what the
-// datapath holds.
-func (e *ccEnabler) farsPushed(seid uint64, fars []far) {
-	e.recordFARs(seid, fars, true)
-}
-
 // farsAttempted records rules whose outcome this element could **not** determine — the
-// refused-modification branch, where a refusal does not mean the datapath is untouched.
+// refused-modification branches, where a refusal does not mean the datapath is untouched and
+// the rollback that follows it is itself unconfirmed.
 //
 // It records them as not duplicating, and that is the point of the function. transact
 // skips a FAR whose record already agrees with the tasking unless the answer is "off"
