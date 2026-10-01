@@ -63,6 +63,32 @@ class BessWildcardMatchTest(BessModuleTestCase):
         self.run_for(wm, [0], 3)
         self.assertBessAlive()
 
+    # get_runtime_config walks every occupied tuple's table with
+    # rte_hash_iterate, which needs a cursor of its own; it used to be handed
+    # a null one and took the daemon down as soon as any rule existed.
+    def test_get_runtime_config(self):
+        wm = WildcardMatch(fields=[{'offset': 26, 'num_bytes': 4},
+                                   {'offset': 30, 'num_bytes': 4}])
+        exact = vstring([0xff, 0xff, 0xff, 0xff], [0xff, 0xff, 0xff, 0xff])
+        prefix = vstring([0xff, 0xff, 0xff, 0x00], [0xff, 0xff, 0xff, 0xff])
+        dip = socket.inet_aton('12.34.56.78')
+        wm.add(gate=1, priority=0, masks=exact,
+               values=[{'value_bin': socket.inet_aton('65.43.21.1')},
+                       {'value_bin': dip}])
+        wm.add(gate=2, priority=0, masks=exact,
+               values=[{'value_bin': socket.inet_aton('65.43.21.2')},
+                       {'value_bin': dip}])
+        wm.add(gate=3, priority=1, masks=prefix,
+               values=[{'value_bin': socket.inet_aton('10.0.0.0')},
+                       {'value_bin': dip}])
+        wm.set_default_gate(gate=0)
+
+        config = wm.get_runtime_config()
+
+        self.assertBessAlive()
+        self.assertEqual(config.default_gate, 0)
+        self.assertEqual(sorted(rule.gate for rule in config.rules), [1, 2, 3])
+
     # Output test over fields -- just make sure packets go out right ports
     def test_wildcardmatch(self):
         # Wildcard match for ip src and dst.
@@ -175,6 +201,55 @@ class BessWildcardMatchTest(BessModuleTestCase):
         # pp2('iconf:', iconf, 'arg:', arg,
         #    '\nmut state:', cur_config, 'expecting:', expect_config)
     #    assert arg == iconf and cur_config == expect_config
+
+    # A table has room for 16 distinct masks. A mask whose last rule is deleted
+    # has to give its slot back, or the table fills up for good with masks that
+    # are no longer used. The rules here differ only in the prefix length of the
+    # source address, so each one has a mask of its own.
+    def test_deleting_a_masks_last_rule_frees_its_slot(self):
+        wm = WildcardMatch(fields=[{'offset': 26, 'num_bytes': 4},
+                                   {'offset': 30, 'num_bytes': 4}])
+        wm.set_default_gate(gate=0)
+        sip = int.from_bytes(socket.inet_aton('10.1.2.3'), 'big')
+
+        def bits(prefix):
+            return (0xffffffff << (32 - prefix)) & 0xffffffff
+
+        def mask_for(prefix):
+            return [{'value_bin': bits(prefix).to_bytes(4, 'big')},
+                    {'value_bin': b'\xff\xff\xff\xff'}]
+
+        # A rule's value may not set bits its mask leaves out.
+        def values_for(prefix):
+            return [{'value_bin': (sip & bits(prefix)).to_bytes(4, 'big')},
+                    {'value_bin': socket.inet_aton('20.0.0.%d' % prefix)}]
+
+        def add(prefix):
+            wm.add(gate=1, priority=0, masks=mask_for(prefix),
+                   values=values_for(prefix))
+
+        def matched(prefix):
+            pkt = get_tcp_packet(sip='10.1.2.3', dip='20.0.0.%d' % prefix)
+            return len(self.run_module(wm, 0, [pkt], range(2))[1]) == 1
+
+        for prefix in range(1, 17):
+            add(prefix)
+
+        with self.assertRaises(bess.Error):
+            add(17)
+
+        wm.delete(masks=mask_for(1), values=values_for(1))
+        add(17)
+
+        self.assertTrue(matched(17))
+        self.assertFalse(matched(1))
+        self.assertTrue(matched(5))
+
+        # A released slot that held the same mask is taken back as it is.
+        wm.delete(masks=mask_for(2), values=values_for(2))
+        add(2)
+        self.assertTrue(matched(2))
+        self.assertBessAlive()
 
     # Each field of a rule is assembled by copying its value_bin into a
     # uint64_t. A value longer than that must be refused rather than written
