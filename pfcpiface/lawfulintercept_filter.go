@@ -6,8 +6,8 @@ package pfcpiface
 import (
 	"encoding/binary"
 
-	"github.com/omec-project/li/types"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/types"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // Duplication is set per FAR, and a FAR may forward traffic that a task's detection

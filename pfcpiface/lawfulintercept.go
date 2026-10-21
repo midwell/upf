@@ -14,12 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/omec-project/li/mtls"
-	"github.com/omec-project/li/store"
-	"github.com/omec-project/li/types"
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
+	"github.com/omec-project/util/li/mtls"
+	"github.com/omec-project/util/li/store"
+	"github.com/omec-project/util/li/types"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // The BESS liEncap (GenericEncap) prepends a fixed tag to every duplicated

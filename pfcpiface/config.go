@@ -91,7 +91,7 @@ type LiConfig struct {
 	// AF_UNIX SEQPACKET socket rejects a write once its queue holds
 	// net.unix.max_dgram_qlen datagrams — 10 by default, regardless of buffer size.
 	// That sysctl is per network namespace and must be raised before this socket is
-	// created, so it belongs to the deployment (see li/README.md).
+	// created, so it belongs to the deployment (see util's li/README.md).
 	X3RcvBuf int `json:"x3_rcvbuf"`
 	// TriggerKeepalive is how long this CC-POI keeps its tasking after the last
 	// message from its triggering function, as a Go duration ("5m"). Empty leaves
@@ -136,7 +136,7 @@ type LiConfig struct {
 	// Nothing this project ships sends either message to a UPF: the peer here is the
 	// SMF's CC Triggering Function, whose x1.Requester implements no bulk request. So
 	// disabling both removes an unused capability from an interface reachable by
-	// anyone holding an SMF-bound LI certificate — see li/README.md.
+	// anyone holding an SMF-bound LI certificate — see util's li/README.md.
 	DeactivateAllTasks    *bool `json:"deactivate_all_tasks,omitempty"`
 	RemoveAllDestinations *bool `json:"remove_all_destinations,omitempty"`
 }

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/omec-project/li/store"
-	"github.com/omec-project/li/types"
+	"github.com/omec-project/util/li/store"
+	"github.com/omec-project/util/li/types"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )

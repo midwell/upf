@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omec-project/li/mtls"
-	"github.com/omec-project/li/types"
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/mtls"
+	"github.com/omec-project/util/li/types"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // unansweringADMF is an ADMF that accepts the connection and never answers, which is

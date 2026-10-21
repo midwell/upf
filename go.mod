@@ -18,7 +18,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/omec-project/li v0.9.6
+	github.com/omec-project/util v1.9.2
 	github.com/prometheus/common v0.72.1 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
@@ -28,4 +28,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261005182115-fad411399dd8 // indirect
 )
 
-replace github.com/omec-project/li => github.com/midwell/li v0.10.0
+replace github.com/omec-project/util => github.com/midwell/util v0.0.0-20261021072921-7bb85b6d4fd4

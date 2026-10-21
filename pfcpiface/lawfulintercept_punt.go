@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/omec-project/li/x1"
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
+	"github.com/omec-project/util/li/x1"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
 )

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omec-project/li/mtls"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/mtls"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // TestX2X3KeepaliveConfigDefaultsWhenUnusable.

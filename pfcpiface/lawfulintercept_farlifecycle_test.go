@@ -6,7 +6,7 @@ package pfcpiface
 import (
 	"testing"
 
-	"github.com/omec-project/li/types"
+	"github.com/omec-project/util/li/types"
 )
 
 // modifiedSession is the session with one FAR removed, as a session modification carrying a

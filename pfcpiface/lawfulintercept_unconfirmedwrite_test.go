@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omec-project/li/x1"
 	"github.com/omec-project/upf-epc/logger"
+	"github.com/omec-project/util/li/x1"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"

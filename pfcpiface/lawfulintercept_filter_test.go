@@ -9,9 +9,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/omec-project/li/types"
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/types"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // Frames the datapath tees, built to the layout the two directions actually carry:

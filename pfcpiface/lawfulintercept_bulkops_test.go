@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omec-project/li/mtls"
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/mtls"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // TestBulkDeactivationFollowsConfiguration drives the LI_T3 triggering interface the way its
@@ -27,7 +27,7 @@ import (
 //
 // The message is hand-built: x1.Requester implements no bulk request, since no triggering
 // function this project ships sends one. That is also what makes disabling both operations
-// on a UPF free — see li/README.md.
+// on a UPF free — see util's li/README.md.
 func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 	no := false
 

@@ -9,8 +9,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // TestADroppedCopyIsReportedAsALossAndNotAsUnreachability is the CC-POI's half of the

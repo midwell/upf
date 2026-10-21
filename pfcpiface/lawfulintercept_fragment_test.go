@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omec-project/li/types"
+	"github.com/omec-project/util/li/types"
 )
 
 // fragmentedIPv4 builds one fragment of an IPv4 datagram: the identification and the

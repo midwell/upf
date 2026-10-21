@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omec-project/li/types"
+	"github.com/omec-project/util/li/types"
 )
 
 // TestAWorkingTaskReportsNoFault comes first, because a supplier that reports a fault for

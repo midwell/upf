@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omec-project/li/mtls"
-	"github.com/omec-project/li/x1"
-	"github.com/omec-project/li/x2x3"
+	"github.com/omec-project/util/li/mtls"
+	"github.com/omec-project/util/li/x1"
+	"github.com/omec-project/util/li/x2x3"
 )
 
 // TestTheTriggeringFunctionIsToldWhenX3DeliveryIsDown asserts the wiring, not the mechanism.
