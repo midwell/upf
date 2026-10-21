@@ -319,6 +319,11 @@ type pdr struct {
 	qerIDList   []uint32
 	needDecap   uint8
 	allocIPFlag bool
+
+	// chooseID groups the PDRs of one message that are to share the F-TEID allocated for
+	// them, when hasChooseID says the control plane sent one (TS 29.244 clause 5.5.3).
+	chooseID    uint8
+	hasChooseID bool
 }
 
 func needAllocIP(ueIPaddr *ie.UEIPAddressFields) bool {
@@ -451,6 +456,10 @@ func (p *pdr) parseFTEID(teidIE *ie.IE) error {
 	teid := fteid.TEID
 	if fteid.HasCh() {
 		p.UPAllocateFteid = true
+		if fteid.HasChID() {
+			p.chooseID = fteid.ChooseID
+			p.hasChooseID = true
+		}
 	} else if teid != 0 {
 		p.tunnelTEID = teid
 		p.tunnelTEIDMask = 0xFFFFFFFF

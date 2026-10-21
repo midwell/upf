@@ -21,10 +21,16 @@ var (
 	ErrNodeIDMissing   = errors.New("mandatory Node ID IE missing")
 	ErrCPFSEIDMissing  = errors.New("mandatory CPF-SEID IE missing")
 	ErrCauseMissing    = errors.New("mandatory Cause IE missing")
+	ErrAssocReleasing  = errors.New("the PFCP association is being released")
 )
 
 func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (message.Message, error) {
 	upf := pConn.upf
+
+	// Taken before the deferred cleanup below is registered, so that it is released
+	// after the cleanup has run: the cleanup writes the store too.
+	pConn.sessionsMu.Lock()
+	defer pConn.sessionsMu.Unlock()
 
 	sereq, ok := msg.(*message.SessionEstablishmentRequest)
 	if !ok {
@@ -105,6 +111,12 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		return errProcessReply(ErrAssocNotFound, ie.CauseNoEstablishedPFCPAssociation)
 	}
 
+	// Checked before the first side effect: NewPFCPSession counts the session, and
+	// parsing a CHOOSE PDR allocates an address.
+	if pConn.IsShutdown() {
+		return errProcessReply(ErrAssocReleasing, ie.CauseNoEstablishedPFCPAssociation)
+	}
+
 	session, ok := pConn.NewPFCPSession(remoteSEID)
 	if !ok {
 		return errProcessReply(ErrAllocateSession,
@@ -113,16 +125,17 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 
 	// From here the session holds resources before it is known whether it will exist:
 	// NewPFCPSession has counted it, and parsing a CHOOSE PDR allocates the UE address
-	// (parse_pdr.go) as a side effect of reading it. A rejected establishment is never
+	// (parse_pdr.go) as a side effect of reading it. A rejected establishment is not
 	// stored and the control plane is handed no F-SEID for it, so nothing else will
-	// give either back -- not a deletion request, not the association teardown. Every
-	// way out of this function short of an accepted batch is a return, and several of
+	// give either back -- not a deletion request, not the association teardown. The one
+	// rejection that is stored, a rollback that did not finish, is below. Every way out
+	// of this function short of storing the session is a return, and several of
 	// them are inside the parse loops below, so the cleanup is deferred rather than
 	// repeated.
-	accepted := false
+	stored := false
 
 	defer func() {
-		if accepted {
+		if stored {
 			return
 		}
 
@@ -134,6 +147,13 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	addFARs := make([]far, 0, MaxItems)
 	addQERs := make([]qer, 0, MaxItems)
 
+	// The F-TEID allocated for each CHOOSE ID in this request. PDRs that carry the same
+	// CHOOSE ID share one F-TEID; the clauses group by the value alone and set no interface
+	// condition (TS 29.244 clauses 5.5.3 and 8.2.3). The scope is one request, and only
+	// Establishment allocates here. It is how a control plane gives the uplink PDRs of a PDU
+	// session the one TEID it tells the RAN.
+	chosen := make(map[uint8]uint32)
+
 	for _, cPDR := range sereq.CreatePDR {
 		var p pdr
 		if err = p.parsePDR(cPDR, session.localSEID, pConn.appPFDs, upf.ippool); err != nil {
@@ -141,11 +161,22 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		}
 
 		if p.UPAllocateFteid {
-			var fteid uint32
-			fteid, err = pConn.upf.fteidGenerator.Allocate()
-			if err != nil {
-				return errProcessReply(err, ie.CauseNoResourcesAvailable)
+			fteid, shared := uint32(0), false
+			if p.hasChooseID {
+				fteid, shared = chosen[p.chooseID]
 			}
+
+			if !shared {
+				fteid, err = pConn.upf.fteidGenerator.Allocate()
+				if err != nil {
+					return errProcessReply(err, ie.CauseNoResourcesAvailable)
+				}
+
+				if p.hasChooseID {
+					chosen[p.chooseID] = fteid
+				}
+			}
+
 			p.tunnelTEID = fteid
 			p.tunnelTEIDMask = 0xFFFFFFFF
 			p.tunnelIP4Dst = ip2int(upf.accessIP)
@@ -204,18 +235,49 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	if cause == ie.CauseRequestRejected {
 		// The batch reported a failure, which means it completed and some of its rules
 		// may be programmed. Take them out before forgetting the session: nothing else
-		// will, because the session is never stored on this path and the SMF has no
-		// F-SEID to release. Best effort -- a datapath that just refused a write may
-		// refuse this one too.
+		// will, because the session is not stored on this path unless this removal fails
+		// to finish, and the SMF has no F-SEID to release. Best effort -- a datapath that
+		// just refused a write may refuse this one too.
 		//
-		// Recording the abandonment is not a remedy here, and this is the one place it is
-		// not: the session is never stored, so no re-derivation will ever walk it and no
-		// record written here could be read again. Where the datapath will not take the
-		// delete either, the ADMF is told instead, because a subscriber's traffic may then
-		// be copied with nothing in this element able to stop it.
-		if delCause := upf.SendMsgToUPF(
-			upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{},
-		); delCause == ie.CauseRequestRejected {
+		// Where the session is not stored, recording the abandonment is no remedy: no
+		// re-derivation will ever walk it and no record written here could be read again.
+		// Where the datapath will not take the delete either, the ADMF is told instead,
+		// because a subscriber's traffic may then be copied with nothing in this element
+		// able to stop it.
+		delCause, finished := upf.SendMsgToUPFWithCompletion(
+			upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{})
+		if !finished {
+			// A removal that ran out of time may have left any of the rules the refused
+			// batch programmed, and once the session is forgotten nothing names them: the
+			// control plane has no F-SEID to delete. So the session is stored after all,
+			// holding its rules and -- where this UPF allocates it -- its UE address, and
+			// the association teardown removes it like any other. The establishment is
+			// still refused.
+			logger.PfcpLog.Warnln("the rollback of a rejected session did not finish; " +
+				"keeping the session until the association is torn down")
+
+			// Set whether or not the store takes the session. If it refuses -- which it
+			// does only for a local SEID of zero -- nothing names the rules either way,
+			// and letting the cleanup run would hand the address to another UE while a
+			// rule the rollback did not remove may still match it. Holding it is the
+			// cheaper failure.
+			stored = true
+
+			err = pConn.store.PutSession(session)
+			if err != nil {
+				logger.PfcpLog.Errorf("failed to put PFCP session to store: %v", err)
+			}
+
+			// Lawful Interception: stored, this session is now one a re-derivation walks,
+			// so its rules are recorded -- as attempted, because neither the refused add
+			// nor the unfinished removal says what the datapath holds. Recorded after the
+			// store, for the reason sessionProgrammed is below. See farsAttempted.
+			upf.ccEnabler.farsAttempted(session.localSEID, session.fars)
+
+			return errProcessReply(ErrWriteToDatapath, ie.CauseRequestRejected)
+		}
+
+		if delCause == ie.CauseRequestRejected {
 			// A rule that could not be translated (`CreatePortRangeCartesianProduct`)
 			// or marshalled was never programmed either, so there is nothing to strand,
 			// and that is exactly what happens when the add was refused for the same
@@ -243,7 +305,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			ie.CauseRequestRejected)
 	}
 
-	accepted = true
+	stored = true
 
 	err = pConn.store.PutSession(session)
 	if err != nil {
@@ -288,6 +350,25 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (message.Message, error) {
 	upf := pConn.upf
 
+	// End markers are sent once sessionsMu is released, by a defer registered before it.
+	// A send can block -- bess queues them on a bounded channel whose drain loop may not
+	// be running -- and nothing about them needs the store, so a send that blocks stalls
+	// this association's reader, as it always could, but not its teardown.
+	var endMarkers [][]byte
+
+	defer func() {
+		if len(endMarkers) == 0 {
+			return
+		}
+
+		if err := upf.SendEndMarkers(&endMarkers); err != nil {
+			logger.PfcpLog.Errorln("sending End Markers Failed:", err)
+		}
+	}()
+
+	pConn.sessionsMu.Lock()
+	defer pConn.sessionsMu.Unlock()
+
 	smreq, ok := msg.(*message.SessionModificationRequest)
 	if !ok {
 		return nil, errUnmarshal(errMsgUnexpectedType)
@@ -322,7 +403,20 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 	session, ok := pConn.store.GetSession(localSEID)
 	if !ok {
-		return sendError(ErrNotFoundWithParam("PFCP session", "localSEID", localSEID))
+		// Teardown removes sessions after releasing sessionsMu, so while the association
+		// is shutting down a miss may be a session it has just removed.
+		if pConn.IsShutdown() {
+			return message.NewSessionModificationResponse(0, 0, 0, smreq.SequenceNumber, 0,
+				ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)), ErrAssocReleasing
+		}
+
+		// 29.244 clause 7.2.2.4.2: a message for a session this node has no context for
+		// is answered "Session context not found", under header SEID 0.
+		err := ErrNotFoundWithParam("PFCP session", "localSEID", localSEID)
+		logger.PfcpLog.Errorln(err)
+
+		return message.NewSessionModificationResponse(0, 0, 0, smreq.SequenceNumber, 0,
+			ie.NewCause(ie.CauseSessionContextNotFound)), err
 	}
 
 	// Parse into rules of our own. Every loop below can still refuse the message, and a
@@ -351,6 +445,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	}
 
 	remoteSEID = session.remoteSEID
+
+	// Checked before the first side effect: parsing a CHOOSE PDR allocates an address.
+	if pConn.IsShutdown() {
+		return message.NewSessionModificationResponse(0, 0, remoteSEID, smreq.SequenceNumber, 0,
+			ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)), ErrAssocReleasing
+	}
 
 	addPDRs := make([]pdr, 0, MaxItems)
 	addFARs := make([]far, 0, MaxItems)
@@ -462,10 +562,21 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	}
 
 	session.MarkSessionQer(session.qers)
-	// TODO: since PacketForwardingRules doesn't store pointers,
-	//  we must also mark session QERs in addQERs.
-	//  We need a kind of refactoring to clean it up.
-	session.MarkSessionQer(addQERs)
+
+	// Write what the session now holds of the rules this message touched. That is not
+	// the same as what the loops above parsed: an Update following a Create of the same
+	// ID replaces the rule the Create just added, so both versions are among the parsed
+	// rules -- and written together they race, because one batch programs its rules
+	// concurrently, while the session keeps only the second. And a QER's level is the
+	// one the session's marking gave it: marked on the message's own QERs instead, a
+	// message updating one QER alone, or carrying two versions of one, is written to a
+	// table the session does not record it in.
+	addPDRs, createdPDRs = heldVersions(session.pdrs, len(before.pdrs), addPDRs[createdPDRs:],
+		func(p pdr) uint32 { return p.pdrID })
+	addFARs, createdFARs = heldVersions(session.fars, len(before.fars), addFARs[createdFARs:],
+		func(f far) uint32 { return f.farID })
+	addQERs, createdQERs = heldVersions(session.qers, len(before.qers), addQERs[createdQERs:],
+		func(q qer) uint32 { return q.qerID })
 
 	updated := PacketForwardingRules{
 		pdrs: addPDRs,
@@ -495,8 +606,9 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// occupies -- or that have no version of their own before the message at all.
 		// UpdatePDR and UpdateQER find their rule in the session as the message has built
 		// it so far, so an Update following a Create of the same ID replaces the rule that
-		// Create just added, and the write programs both. The restore writes nothing for
-		// such a rule, so removing it cannot take out anything the restore puts back.
+		// Create just added, and only that final version is written. The restore writes
+		// nothing for such a rule, so removing it cannot take out anything the restore
+		// puts back.
 		//
 		// The second set is the one nothing else would ever reach. The restore below
 		// re-adds the old key; it does not remove the new one, and the session's later
@@ -584,10 +696,7 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	}
 
 	if upf.enableEndMarker {
-		err := upf.SendEndMarkers(&endMarkerList)
-		if err != nil {
-			logger.PfcpLog.Errorln("sending End Markers Failed:", err)
-		}
+		endMarkers = endMarkerList
 	}
 
 	delPDRs := make([]pdr, 0, MaxItems)
@@ -699,14 +808,17 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (message.Message, error) {
 	upf := pConn.upf
 
+	pConn.sessionsMu.Lock()
+	defer pConn.sessionsMu.Unlock()
+
 	sdreq, ok := msg.(*message.SessionDeletionRequest)
 	if !ok {
 		return nil, errUnmarshal(errMsgUnexpectedType)
 	}
 
-	// Zero until the session is found. A message for a session this UPF does not know is
-	// the case 29.244 clause 7.2.2.4.2 answers with header SEID 0; a refusal after that
-	// is for a session the control plane has an SEID for, and carries it.
+	// Zero until the session is found. The lookup's own refusal is answered separately
+	// below; every refusal after it is for a session the control plane has an SEID for,
+	// and carries it.
 	var remoteSEID uint64
 
 	sendError := func(err error) (message.Message, error) {
@@ -726,10 +838,29 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 
 	session, ok := pConn.store.GetSession(localSEID)
 	if !ok {
-		return sendError(ErrNotFoundWithParam("PFCP session", "localSEID", localSEID))
+		// Teardown removes sessions after releasing sessionsMu, so while the association
+		// is shutting down a miss may be a session it has just removed.
+		if pConn.IsShutdown() {
+			return message.NewSessionDeletionResponse(0, 0, 0, sdreq.SequenceNumber, 0,
+				ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)), ErrAssocReleasing
+		}
+
+		// 29.244 clause 7.2.2.4.2: a message for a session this node has no context for
+		// is answered "Session context not found", under header SEID 0.
+		err := ErrNotFoundWithParam("PFCP session", "localSEID", localSEID)
+
+		return message.NewSessionDeletionResponse(0, 0, 0, sdreq.SequenceNumber, 0,
+			ie.NewCause(ie.CauseSessionContextNotFound)), err
 	}
 
 	remoteSEID = session.remoteSEID
+
+	// The association's teardown removes this session; removing it here as well would
+	// count it out of the gauge twice.
+	if pConn.IsShutdown() {
+		return message.NewSessionDeletionResponse(0, 0, remoteSEID, sdreq.SequenceNumber, 0,
+			ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)), ErrAssocReleasing
+	}
 
 	// This caller needs more than the cause. A batch that ran out of time is answered
 	// accepted, which elsewhere is the answer that destroys nothing -- but here accepted
@@ -866,6 +997,9 @@ func reportDropBufferedRequest(srres *message.SessionReportResponse) {
 func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 	upf := pConn.upf
 
+	pConn.sessionsMu.Lock()
+	defer pConn.sessionsMu.Unlock()
+
 	srres, ok := msg.(*message.SessionReportResponse)
 	if !ok {
 		return errUnmarshal(errMsgUnexpectedType)
@@ -894,6 +1028,12 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 	seid := srres.SEID()
 
 	if cause == ie.CauseSessionContextNotFound {
+		// The association's teardown removes this session -- and may already have, since
+		// it removes sessions after releasing sessionsMu, so check before the lookup.
+		if pConn.IsShutdown() {
+			return nil
+		}
+
 		sessItem, ok := pConn.store.GetSession(seid)
 		if !ok {
 			return errProcess(ErrNotFoundWithParam("PFCP session context", "SEID", seid))

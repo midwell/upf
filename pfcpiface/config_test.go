@@ -98,11 +98,11 @@ func TestLoadConfigFile(t *testing.T) {
 	})
 }
 
-// TestRemoveCommentsKeepsStringContents pins the defect that a URL-valued setting
-// used to destroy the configuration: the comment stripper matched the "//" inside
-// "https://…" and, because the rendered config is a single line, deleted the rest
-// of the file. The parse then failed as "unexpected end of JSON input", pointing
-// nowhere near the URL that caused it.
+// TestRemoveCommentsKeepsStringContents pins the comment stripper to string context. A sweep for
+// "//.*$" also matched the "//" inside a string value and deleted the rest of the line -- in a
+// configuration rendered on one line, as the bess-upf chart renders it, the rest of the file -- so
+// the parse failed as "unexpected end of JSON input", pointing nowhere near the value that caused
+// it.
 func TestRemoveCommentsKeepsStringContents(t *testing.T) {
 	tests := []struct {
 		name string
@@ -111,8 +111,8 @@ func TestRemoveCommentsKeepsStringContents(t *testing.T) {
 	}{
 		{
 			name: "url in a string is not a comment",
-			in:   `{"admf_url":"https://admf.example:9443/X1/ADMF","ne_id":"upf-1"}`,
-			want: `{"admf_url":"https://admf.example:9443/X1/ADMF","ne_id":"upf-1"}`,
+			in:   `{"url":"https://example.org:9443/path","hostname":"upf"}`,
+			want: `{"url":"https://example.org:9443/path","hostname":"upf"}`,
 		},
 		{
 			name: "line comment outside a string is removed",
@@ -128,6 +128,36 @@ func TestRemoveCommentsKeepsStringContents(t *testing.T) {
 			name: "comment markers inside a string survive",
 			in:   `{"a":"/* not a comment */","b":"// nor this"}`,
 			want: `{"a":"/* not a comment */","b":"// nor this"}`,
+		},
+		{
+			name: "a block comment opened by /*/ is not closed by its own slash",
+			in:   `{"b":2}/*/ x */`,
+			want: `{"b":2}`,
+		},
+		{
+			name: "block comment as the last bytes",
+			in:   `{"a":1} /* end */`,
+			want: `{"a":1} `,
+		},
+		{
+			name: "block comment spanning lines",
+			in:   "{\"c\":/* a\nb */3}",
+			want: `{"c":3}`,
+		},
+		{
+			name: "line comment at end of input with no newline",
+			in:   `{"a":1} // end`,
+			want: `{"a":1} `,
+		},
+		{
+			name: "slash at end of input",
+			in:   `{"a":1}/`,
+			want: `{"a":1}/`,
+		},
+		{
+			name: "unterminated block comment is left for the parser",
+			in:   `{"a":1} /* trailing`,
+			want: `{"a":1} /* trailing`,
 		},
 		{
 			name: "escaped quote does not end the string",
@@ -162,5 +192,44 @@ func TestLoadConfigFileWithURL(t *testing.T) {
 	}
 	if conf.Li == nil || conf.Li.AdmfURL != "https://10.0.0.1:9443/X1/ADMF" {
 		t.Errorf("admf_url not parsed: %+v", conf.Li)
+	}
+}
+
+// TestLoadConfigFileWithDoubleSlashInAString is the end-to-end form: a setting whose value
+// holds "//" -- here a socket path with a doubled separator, which the kernel accepts -- must
+// load as written, on one line or several.
+func TestLoadConfigFileWithDoubleSlashInAString(t *testing.T) {
+	for name, body := range map[string]string{
+		"one line":      `{"mode":"af_packet","notify_sockaddr":"/pod-share//notifycp","cpiface":{"dnn":"internet"}}`,
+		"several lines": "{\n  \"mode\": \"af_packet\",\n  \"notify_sockaddr\": \"/pod-share//notifycp\", // where the agent listens\n  \"cpiface\": {\"dnn\": \"internet\"}\n}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			confPath := t.TempDir() + "/conf.jsonc"
+			mustWriteStringToDisk(body, confPath)
+
+			conf, err := LoadConfigFile(confPath)
+			if err != nil {
+				t.Fatalf("a config holding \"//\" in a string did not load: %v", err)
+			}
+
+			if conf.NotifySockAddr != "/pod-share//notifycp" {
+				t.Errorf("notify_sockaddr = %q, want %q", conf.NotifySockAddr, "/pod-share//notifycp")
+			}
+
+			if conf.CPIface.Dnn != "internet" {
+				t.Errorf("cpiface.dnn = %q, want %q: the setting after the string was lost", conf.CPIface.Dnn, "internet")
+			}
+		})
+	}
+}
+
+// An unterminated block comment is a broken file, and loading it must say so. Treating it as running
+// to the end of input would load {"mode":"af_packet"} /* ... and silently drop whatever followed.
+func TestLoadConfigFileRefusesAnUnterminatedBlockComment(t *testing.T) {
+	confPath := t.TempDir() + "/conf.jsonc"
+	mustWriteStringToDisk(`{"mode":"af_packet"} /* trailing`, confPath)
+
+	if _, err := LoadConfigFile(confPath); err == nil {
+		t.Error("a config ending in an unterminated block comment loaded")
 	}
 }

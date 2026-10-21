@@ -84,6 +84,15 @@ func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwar
 	return ie.CauseRequestAccepted
 }
 
+// SendMsgToUPFWithCompletion routes through SendMsgToUPF: the embedded fakeDP's version would
+// not reach the override above, because embedding does not dispatch. This datapath answers
+// every batch, so every batch finished.
+func (d *liRefusingDP) SendMsgToUPFWithCompletion(
+	method upfMsgType, all, updated PacketForwardingRules,
+) (uint8, bool) {
+	return d.SendMsgToUPF(method, all, updated), true
+}
+
 // sendMsgToUPFConfirmed makes this fake a confirmingDatapath, so a test can drive the
 // accepted-but-unconfirmed branch through the real handlers.
 func (d *liRefusingDP) sendMsgToUPFConfirmed(
@@ -221,9 +230,9 @@ func TestARefusedModificationRecordsWhatItPushed(t *testing.T) {
 
 // TestARefusedEstablishmentDoesNotStrandDuplication drives the establishment handler.
 //
-// This branch cannot be fixed by recording: NewPFCPSession does not store the session and the
-// branch abandons it before PutSession, so no re-derivation will ever walk it and no record
-// written here could be read again. Removing the rules from the datapath is the only remedy, and
+// This branch cannot be fixed by recording: NewPFCPSession does not store the session and, when
+// the rollback finishes, the branch abandons it before PutSession, so no re-derivation will ever
+// walk it and no record written here could be read again. Removing the rules from the datapath is the only remedy, and
 // the absence of that push is what leaves a PDR matching the UE address and a FAR duplicating for
 // the life of the process.
 func TestARefusedEstablishmentDoesNotStrandDuplication(t *testing.T) {

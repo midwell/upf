@@ -69,6 +69,14 @@ type PFCPConn struct {
 
 	shutdownOnce sync.Once
 	isShutdown   atomic.Bool
+
+	// sessionsMu orders the session handlers against teardown's snapshot of the store.
+	// Every session handler holds it for its whole run and refuses the message if the
+	// association is shutting down; executeShutdown holds it only to take the snapshot.
+	// So each handler runs entirely before the snapshot -- its datapath write and its
+	// store write both done, for teardown to reclaim -- or entirely after it, as a
+	// refusal that changes nothing.
+	sessionsMu sync.Mutex
 }
 
 func (pConn *PFCPConn) startHeartBeatMonitor() {
@@ -295,8 +303,23 @@ func (pConn *PFCPConn) executeShutdown() {
 		pConn.hbCtxCancel = nil
 	}
 
-	// Cleanup all sessions in this conn
-	for _, sess := range pConn.store.GetAllSessions() {
+	// Cleanup all sessions in this conn. isShutdown is already set, so once the lock is
+	// held no session handler is running and none will change the store again.
+	pConn.sessionsMu.Lock()
+	sessions := pConn.store.GetAllSessions()
+	pConn.sessionsMu.Unlock()
+
+	var unfinished []PFCPSession
+
+	for _, sess := range sessions {
+		// A removal that ran out of time may have left rules matching the session's
+		// address, and once the session is forgotten nothing names them. So the address
+		// is released only once a removal of its rules has finished; the sessions whose
+		// removal did not are retried together below.
+		cause, finished := pConn.upf.SendMsgToUPFWithCompletion(
+			upfMsgTypeDel, sess.PacketForwardingRules, PacketForwardingRules{},
+		)
+
 		// The datapath's answer, consulted rather than discarded. This path deletes every
 		// session of an association at once, so it storms the datapath with one batch per
 		// session — which makes it the likeliest of all the delete paths to be refused, and a
@@ -304,11 +327,15 @@ func (pConn *PFCPConn) executeShutdown() {
 		// copies continue with no session, no record and no tasking to account for them:
 		// removeSource below drops this store, so no re-derivation can ever walk them again.
 		//
-		// Nothing here can retry usefully — the association is going away — so the remedy is to
-		// say so.
-		if cause := pConn.upf.SendMsgToUPF(upfMsgTypeDel, sess.PacketForwardingRules,
-			PacketForwardingRules{}); cause == ie.CauseRequestRejected {
+		// A refused removal is not retried — the retry below is for removals that did not
+		// finish, and the association is going away — so the remedy is to say so.
+		if cause == ie.CauseRequestRejected {
 			pConn.upf.ccEnabler.abandonedDuplication(sess.fars, "an association teardown")
+		}
+
+		if !finished {
+			unfinished = append(unfinished, sess)
+			continue
 		}
 
 		// The pool is built in NewUPF and belongs to the upf, which every connection
@@ -319,6 +346,8 @@ func (pConn *PFCPConn) executeShutdown() {
 
 		pConn.RemoveSession(sess)
 	}
+
+	pConn.retryUnfinishedRemovals(unfinished)
 
 	pConn.upf.ccEnabler.removeSource(pConn.store)
 
@@ -331,6 +360,65 @@ func (pConn *PFCPConn) executeShutdown() {
 	}
 
 	logger.PfcpLog.Infoln("shutdown complete for", rAddr)
+}
+
+// retryUnfinishedRemovals makes one more attempt at removing the rules of the sessions
+// whose removal ran out of time at teardown. Each session is retried in a batch of its
+// own and all of them at once, so the retry adds one batch's timeout to the teardown
+// rather than one per session, and a session whose rules drained is not held back by
+// another's that did not. A rule the late removal already took out is answered ENOENT,
+// which counts as done, so a removal that merely landed late finishes here.
+//
+// The addresses of sessions whose rules are still not known to be gone stay held:
+// releasing them would let the pool give another UE, on any association, an address a
+// surviving rule still matches, and nothing is left that could remove that rule. They
+// are lost until the process restarts, which clears the datapath.
+//
+// A removal the datapath refused is released, here as on the first pass. What refuses
+// one today is a rule that could not be translated or marshalled, or an EINVAL about
+// its shape that the rule's own add would have met first -- so it was never programmed,
+// and holding its address would lose it for nothing.
+func (pConn *PFCPConn) retryUnfinishedRemovals(sessions []PFCPSession) {
+	causes := make([]uint8, len(sessions))
+	finished := make([]bool, len(sessions))
+
+	var wg sync.WaitGroup
+
+	for i, s := range sessions {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			causes[i], finished[i] = pConn.upf.SendMsgToUPFWithCompletion(
+				upfMsgTypeDel, s.PacketForwardingRules, PacketForwardingRules{})
+		}()
+	}
+
+	wg.Wait()
+
+	held := 0
+
+	for i, s := range sessions {
+		// As on the first pass: a refused removal of a duplicating rule is reported, because
+		// once the session is forgotten nothing can stop the copies.
+		if causes[i] == ie.CauseRequestRejected {
+			pConn.upf.ccEnabler.abandonedDuplication(s.fars, "an association teardown")
+		}
+
+		if finished[i] {
+			pConn.upf.ippool.Release(s.localSEID)
+		} else {
+			held++
+		}
+
+		pConn.RemoveSession(s)
+	}
+
+	if held > 0 {
+		logger.PfcpLog.Warnln("the removal of", held, "session(s) did not finish at "+
+			"teardown, twice; holding their UE addresses until the process restarts")
+	}
 }
 
 // IsShutdown returns true if the connection has been shutdown

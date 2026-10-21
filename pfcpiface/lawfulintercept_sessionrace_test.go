@@ -401,6 +401,14 @@ func (d *liRecordingDP) SendMsgToUPF(_ upfMsgType, _ PacketForwardingRules, upda
 	return ie.CauseRequestAccepted
 }
 
+// SendMsgToUPFWithCompletion routes through SendMsgToUPF, which the embedded fakeDP's version
+// would not reach.
+func (d *liRecordingDP) SendMsgToUPFWithCompletion(
+	method upfMsgType, all, updated PacketForwardingRules,
+) (uint8, bool) {
+	return d.SendMsgToUPF(method, all, updated), true
+}
+
 func (d *liRecordingDP) lastFor(farID uint32) (far, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -97,14 +97,16 @@ var bessIP = flag.String("bess", "localhost:10514", "BESS IP/port combo")
 var enableGtpuPathMonitoring = false
 
 type bess struct {
-	client          pb.BESSControlClient
-	conn            *grpc.ClientConn
-	endMarkerSocket net.Conn
-	notifyStop      chan struct{}
-	notifyMu        sync.Mutex
-	notifyConn      net.Conn
-	endMarkerChan   chan []byte
-	qciQosMap       map[uint8]*QosConfigVal
+	client        pb.BESSControlClient
+	conn          *grpc.ClientConn
+	notifyStop    chan struct{}
+	notifyMu      sync.Mutex
+	notifyConn    net.Conn
+	endMarkerStop chan struct{}
+	endMarkerDone chan struct{}
+	endMarkerChan chan []byte
+	endMarkerDial dialFunc // nil means a net.Dialer; set by tests
+	qciQosMap     map[uint8]*QosConfigVal
 }
 
 func (b *bess) IsConnected(accessIP *net.IP) bool {
@@ -313,6 +315,8 @@ func (b *bess) Exit() {
 		// datapath happens to disconnect.
 		b.closeNotifyConn()
 	}
+
+	b.stopEndMarkerSender()
 
 	b.conn.Close()
 }
@@ -660,7 +664,7 @@ func (b *bess) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) 
 	// TODO: pick first connection for now
 	var con *PFCPConn
 
-	pc.node.pConns.Range(func(key, value interface{}) bool {
+	pc.node.pConns.Range(func(key, value any) bool {
 		pConn, ok := value.(*PFCPConn)
 		if !ok {
 			return false
@@ -788,15 +792,6 @@ func resolveUEIP(
 		}
 	}
 	return ueIpString, true
-}
-
-func (b *bess) endMarkerSendLoop(endMarkerChan chan []byte) {
-	for outPacket := range endMarkerChan {
-		_, err := b.endMarkerSocket.Write(outPacket)
-		if err != nil {
-			logger.BessLog.Errorln("end marker write failed")
-		}
-	}
 }
 
 // notifyListen owns the connection to the datapath's control-plane notification
@@ -1068,16 +1063,13 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 			pfcpCommAddr = PfcpAddr
 		}
 
-		var d net.Dialer
-		b.endMarkerSocket, err = d.DialContext(context.Background(), "unixpacket", pfcpCommAddr)
-		if err != nil {
-			logger.BessLog.Errorln("dial error:", err)
-			return
-		}
-
-		logger.BessLog.Infoln("Starting end marker loop")
-
-		go b.endMarkerSendLoop(b.endMarkerChan)
+		// As with the notification listener above, the sender dials for itself
+		// and keeps redialing, so nothing here waits for the socket.
+		//
+		// A sender from an earlier call is stopped first; otherwise it would
+		// outlive the stop channel Exit closes.
+		b.stopEndMarkerSender()
+		b.startEndMarkerSender(pfcpCommAddr)
 	}
 
 	// Lawful Interception CC-POI: start the X3 shipper only when the opt-in Li
@@ -1100,6 +1092,35 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	if conf.EnableGtpuPathMonitoring {
 		enableGtpuPathMonitoring = true
 	}
+}
+
+func (b *bess) startEndMarkerSender(addr string) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	link := newEndMarkerLink(addr, b.endMarkerDial, b.endMarkerChan, stop)
+
+	b.endMarkerStop = stop
+	b.endMarkerDone = done
+
+	go func() {
+		defer close(done)
+
+		link.run()
+	}()
+}
+
+// stopEndMarkerSender stops the End Marker sender, if one is running, and waits
+// for it to return. It is safe to call more than once.
+func (b *bess) stopEndMarkerSender() {
+	if b.endMarkerStop == nil {
+		return
+	}
+
+	close(b.endMarkerStop)
+	<-b.endMarkerDone
+
+	b.endMarkerStop = nil
+	b.endMarkerDone = nil
 }
 
 func (b *bess) setupSliceMeter(conf *Conf) {

@@ -499,7 +499,7 @@ func TestEgressProbeFollowsTheSocket(t *testing.T) {
 		close(reconnected)
 	}()
 
-	waitFor(t, func() bool { return egress() != nil },
+	waitUntil(t, func() bool { return egress() != nil },
 		"the egress socket went away and the element still answers that nothing is wrong")
 	if fault := egress(); !strings.Contains(fault.ErrorDescription, x1.NEIssueX3EgressDown) {
 		t.Errorf("the fault does not name the condition: %q", fault.ErrorDescription)
@@ -523,10 +523,10 @@ func TestEgressProbeFollowsTheSocket(t *testing.T) {
 	}
 }
 
-// waitFor polls cond until it holds, failing with why if it never does. The states these
+// waitUntil polls cond until it holds, failing with why if it never does. The states these
 // probes report are set by another goroutine, so an assertion has to be allowed to wait —
 // but only for as long as the thing it is waiting for could legitimately take.
-func waitFor(t *testing.T, cond func() bool, why string) {
+func waitUntil(t *testing.T, cond func() bool, why string) {
 	t.Helper()
 
 	deadline := time.Now().Add(10 * time.Second)
