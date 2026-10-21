@@ -123,7 +123,7 @@ func Test_parsePDR(t *testing.T) {
 				ie.NewPrecedence(precedence),
 				ie.NewPDI(
 					ie.NewSourceInterface(ie.SrcInterfaceAccess),
-					ie.NewNetworkInstance("internet"),
+					ie.NewNetworkInstance(testNetInstance()),
 					ie.NewFTEID(0x01, teid, N3Address, nil, 0),
 				),
 				ie.NewOuterHeaderRemoval(0, 0),
@@ -143,7 +143,7 @@ func Test_parsePDR(t *testing.T) {
 				farID:            farID,
 				qerIDList:        []uint32{qerID},
 				needDecap:        0x1,
-				networkInstance:  "internet",
+				networkInstance:  testNetInstance(),
 			},
 			description: "Create PDR carrying a Network Instance",
 		},

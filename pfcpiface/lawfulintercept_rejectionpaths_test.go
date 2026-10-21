@@ -37,7 +37,10 @@ type liRefusingDP struct {
 	// all-or-nothing, which is why none of them can reach the state an RPC that did not
 	// complete produces.
 	unconfirmed bool
-	methods     []upfMsgType
+	// unfinishedDelete makes every deletion batch report that it did not finish, as one that
+	// ran out of time does: the answer upstream's establishment rollback stores the session on.
+	unfinishedDelete bool
+	methods          []upfMsgType
 	// duplicating is what this datapath believes it is duplicating, keyed by FAR ID. It is
 	// written whatever the answer, because that is the point.
 	duplicating map[uint32]bool
@@ -85,12 +88,17 @@ func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwar
 }
 
 // SendMsgToUPFWithCompletion routes through SendMsgToUPF: the embedded fakeDP's version would
-// not reach the override above, because embedding does not dispatch. This datapath answers
-// every batch, so every batch finished.
+// not reach the override above, because embedding does not dispatch. Every batch finished
+// unless unfinishedDelete says a deletion did not.
 func (d *liRefusingDP) SendMsgToUPFWithCompletion(
 	method upfMsgType, all, updated PacketForwardingRules,
 ) (uint8, bool) {
-	return d.SendMsgToUPF(method, all, updated), true
+	cause := d.SendMsgToUPF(method, all, updated)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return cause, !d.unfinishedDelete || method != upfMsgTypeDel
 }
 
 // sendMsgToUPFConfirmed makes this fake a confirmingDatapath, so a test can drive the
@@ -272,6 +280,81 @@ func TestARefusedEstablishmentDoesNotStrandDuplication(t *testing.T) {
 			"remove the rules it had already applied. The session is never stored, so nothing " +
 			"in this element will ever walk it again: whatever was programmed — including " +
 			"duplication — stays for the life of the process, with no record of it anywhere")
+	}
+}
+
+// TestARefusedEstablishmentWhoseRollbackDidNotFinishIsRecorded drives the other half of the
+// establishment's refusal: the rollback's removal runs out of time, so the handler stores the
+// session after all rather than forget rules nothing else names.
+//
+// Stored, the session is one a re-derivation walks, and that changes what the record must say.
+// Neither the refused add nor the unfinished removal says whether FAR 1 is duplicating, so the
+// record has to hold it as attempted: an entry claiming duplication would agree with the tasking
+// and be skipped by every later pass, and no entry at all leaves a withdrawal with nothing it
+// knows to turn off.
+func TestARefusedEstablishmentWhoseRollbackDidNotFinishIsRecorded(t *testing.T) {
+	pConn, dp, e, reported := rejectionConn(t)
+
+	const ue = "10.250.0.15"
+
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      testXIDSecondary,
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr(ue)},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+
+	dp.mu.Lock()
+	dp.refuse = true
+	dp.unfinishedDelete = true
+	dp.mu.Unlock()
+
+	_, err := pConn.handleSessionEstablishmentRequest(
+		message.NewSessionEstablishmentRequest(0, 0, 0, 1, 0,
+			ie.NewNodeID("1.1.1.1", "", ""),
+			ie.NewFSEID(201, net.ParseIP("1.1.1.1"), nil),
+			ie.NewCreatePDR(
+				ie.NewPDRID(1),
+				ie.NewPrecedence(0),
+				ie.NewPDI(
+					ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x2, ue, "", 0, 0),
+				),
+				ie.NewFARID(1),
+			),
+			ie.NewCreateFAR(
+				ie.NewFARID(1),
+				ie.NewApplyAction(ActionForward),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)),
+			),
+		))
+	if err == nil {
+		t.Fatal("the refused establishment was reported as succeeding")
+	}
+
+	stored := pConn.store.GetAllSessions()
+	if len(stored) != 1 {
+		t.Fatalf("the handler holds %d sessions, want the one whose rollback did not finish; "+
+			"this test is not exercising the branch it exists for", len(stored))
+	}
+
+	duplicating, held := programmedFor(e, stored[0].localSEID, 1)
+	if !held {
+		t.Error("a stored session's FARs have no record, so a withdrawal of the task finds " +
+			"nothing it knows to turn off on a session whose duplication may be running")
+	}
+
+	if duplicating {
+		t.Error("a FAR the datapath refused was recorded as duplicating: the record agrees " +
+			"with the tasking, so no later re-derivation pushes it again")
+	}
+
+	if len(*reported) == 0 || (*reported)[0] != x1.NEIssueDuplicationRefused {
+		t.Errorf("reported %v, want %q: the ADMF is not told that an accepted task's "+
+			"duplication may not be running", *reported, x1.NEIssueDuplicationRefused)
 	}
 }
 
