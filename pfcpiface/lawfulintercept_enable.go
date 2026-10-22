@@ -412,6 +412,14 @@ func (e *ccEnabler) canApply(task types.InterceptTask) error {
 			return err
 		}
 	}
+	// Every criterion must match (TS 103 221-1 table 6.2.1.2-1), so two that no packet
+	// satisfies together — two sessions, two directions, two ports — select nothing at
+	// every moment. The same table has the element reject the combination rather than
+	// acknowledge an interception that can never run.
+	if a, b, ok := task.ContradictoryTargets(); ok {
+		return fmt.Errorf("li: task names %s and %s, which no packet satisfies together, and "+
+			"every criterion of a task must match", a.Type, b.Type)
+	}
 
 	return nil
 }
@@ -426,22 +434,53 @@ func producesCC(t types.InterceptTask) bool {
 }
 
 // criteriaOf returns the parsed criteria of every active task that requires content,
-// dropping any that no longer parse. canApply refused both of those at tasking time,
-// so a leftover can only come from a task installed before those checks existed.
-func (e *ccEnabler) criteriaOf(tasks []types.InterceptTask) []criterion {
-	var out []criterion
+// one set per task, because a task's criteria are conjunctive and selection is decided
+// per task. A task with a criterion that does not parse is left out whole: dropping the
+// one criterion would select more than the task asks for. canApply refuses such a task
+// at tasking time, so a leftover can only come from one installed before that check.
+func (e *ccEnabler) criteriaOf(tasks []types.InterceptTask) [][]criterion {
+	var out [][]criterion
 	for _, t := range tasks {
 		if !producesCC(t) {
 			continue
 		}
-		for _, id := range t.Targets {
-			if c, err := parseCriterion(id); err == nil {
-				out = append(out, c)
-			}
+		if set, ok := parseAll(t); ok {
+			out = append(out, set)
 		}
 	}
 
 	return out
+}
+
+// parseAll parses every criterion of a task, reporting false if any does not parse or the
+// task names none.
+func parseAll(t types.InterceptTask) ([]criterion, bool) {
+	if len(t.Targets) == 0 {
+		return nil, false
+	}
+	set := make([]criterion, 0, len(t.Targets))
+	for _, id := range t.Targets {
+		c, err := parseCriterion(id)
+		if err != nil {
+			return nil, false
+		}
+		set = append(set, c)
+	}
+
+	return set, true
+}
+
+// wantedFARs returns the FARs of one session whose PDRs some task's criteria select.
+func wantedFARs(sets [][]criterion, sess PFCPSession) map[uint32]bool {
+	one := []PFCPSession{sess}
+	want := make(map[uint32]bool, len(sess.fars))
+	for _, set := range sets {
+		for _, ref := range selection(set, one) {
+			want[ref.farID] = true
+		}
+	}
+
+	return want
 }
 
 // setTasks gives the enabler the task store and parses what it holds.
@@ -482,13 +521,8 @@ func (e *ccEnabler) reparse() {
 			continue
 		}
 
-		criteria := make([]criterion, 0, len(t.Targets))
-		for _, id := range t.Targets {
-			if c, err := parseCriterion(id); err == nil {
-				criteria = append(criteria, c)
-			}
-		}
-		if len(criteria) == 0 {
+		criteria, ok := parseAll(t)
+		if !ok {
 			continue
 		}
 		fresh = append(fresh, parsedTask{task: t, criteria: criteria})
@@ -534,17 +568,9 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 		return
 	}
 
-	criteria := e.criteriaOf(e.tasks.Snapshot())
-
 	// One session, so the resolver is given just this one: a criterion selecting
 	// another session's traffic is that session's business.
-	one := []PFCPSession{*s}
-	want := make(map[uint32]bool, len(s.fars))
-	for _, c := range criteria {
-		for _, ref := range c.resolve(one) {
-			want[ref.farID] = true
-		}
-	}
+	want := wantedFARs(e.criteriaOf(e.tasks.Snapshot()), *s)
 
 	for i := range s.fars {
 		s.fars[i].liDuplicate = want[s.fars[i].farID]
@@ -1005,13 +1031,7 @@ func (e *ccEnabler) transact() {
 
 	for _, src := range sources {
 		for _, sess := range src.GetAllSessions() {
-			one := []PFCPSession{sess}
-			want := make(map[uint32]bool, len(sess.fars))
-			for _, c := range criteria {
-				for _, ref := range c.resolve(one) {
-					want[ref.farID] = true
-				}
-			}
+			want := wantedFARs(criteria, sess)
 
 			var changed []far
 			// What the record said before this pass touched it, for the FARs this pass
@@ -1424,19 +1444,16 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 
 	var out []coveredTask
 	for _, pt := range *parsed {
-		for _, c := range pt.criteria {
-			if len(c.resolve(one)) > 0 {
-				out = append(out, coveredTask{
-					task: pt.task,
-					// The reporter is this element's, so the memo built inside can report a
-					// fragment it had to discard through the same channel every other content
-					// loss uses.
-					filter: filterFrom(pt.criteria, sess, e.lostContent),
-				})
-
-				break
-			}
+		if len(selection(pt.criteria, one)) == 0 {
+			continue
 		}
+		out = append(out, coveredTask{
+			task: pt.task,
+			// The reporter is this element's, so the memo built inside can report a
+			// fragment it had to discard through the same channel every other content
+			// loss uses.
+			filter: filterFrom(pt.criteria, sess, e.lostContent),
+		})
 	}
 
 	return out
@@ -1563,13 +1580,7 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 			continue
 		}
 		for _, sess := range src.GetAllSessions() {
-			one := []PFCPSession{sess}
-			want := map[uint32]bool{}
-			for _, c := range criteria {
-				for _, ref := range c.resolve(one) {
-					want[ref.farID] = true
-				}
-			}
+			want := wantedFARs([][]criterion{criteria}, sess)
 			if len(want) == 0 {
 				continue
 			}

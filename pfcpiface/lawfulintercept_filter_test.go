@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"net"
+	"reflect"
 	"testing"
 
+	"github.com/omec-project/util/li/store"
 	"github.com/omec-project/util/li/types"
 	"github.com/omec-project/util/li/x1"
 	"github.com/omec-project/util/li/x2x3"
@@ -191,27 +193,38 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			wantTrivial: false, wantUplink: false, wantDownlink: true,
 		},
 		{
-			// The criteria of a task are alternatives, so one covering the session makes
-			// the whole filter trivial however narrow the others are.
-			name:    "a broad criterion beside a narrow one covers everything",
+			// The criteria of a task are conjunctive (TS 103 221-1 table 6.2.1.2-1), so a
+			// session-wide criterion beside a one-direction one selects that direction only.
+			name:    "a broad criterion beside a narrow one selects the narrow one",
 			session: sharedFARSession(),
 			ids: []types.TargetIdentifier{
-				// A one-direction criterion beside a session-wide one. It was a PDR ID
-				// before, which is refused now.
 				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
 				ueAddr(testUEIPv4),
 			},
-			wantTrivial: true, wantUplink: true, wantDownlink: true,
+			wantTrivial: false, wantUplink: false, wantDownlink: true,
 		},
 		{
-			// Two narrow criteria, one per direction, add up to both.
-			name:    "two directions tasked separately",
+			// No packet travels both ways, so two directions together select nothing —
+			// canApply refuses such a task, and a filter built for one matches no copy.
+			name:    "two directions together select nothing",
 			session: sharedFARSession(),
 			ids: []types.TargetIdentifier{
 				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionInbound},
 				{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
 			},
-			wantTrivial: false, wantUplink: true, wantDownlink: true,
+			wantTrivial: false, wantUplink: false, wantDownlink: false,
+		},
+		{
+			// A session and a transport port: the session's PDRs do not pin the port, so
+			// the packet decides — and a copy on another port is not the task's however
+			// squarely the session criterion covers it.
+			name:    "a session and a port leave the port to the packet",
+			session: wildcardSession(),
+			ids: []types.TargetIdentifier{
+				{Type: types.TargetFSEID, Value: "100"},
+				{Type: types.TargetTCPPort, Value: "80"},
+			},
+			wantTrivial: false, wantUplink: false, wantDownlink: false,
 		},
 	}
 
@@ -537,5 +550,121 @@ func TestSelectedCopyIsNotDiscarded(t *testing.T) {
 	if len(got) != 1 || got[0] != x1.NEIssueInvalidConfig {
 		t.Errorf("reported %v, want the selected copy to reach delivery and complain "+
 			"about the missing destination (%s)", got, x1.NEIssueInvalidConfig)
+	}
+}
+
+// TestDuplicationFollowsEveryCriterion is TS 103 221-1 table 6.2.1.2-1 at the point where
+// it decides what the datapath copies: "Where multiple criteria are present, all criteria
+// are required to be matched." A session with a FAR per direction, tasked by its F-SEID and
+// one direction, duplicates that direction's FAR and not the other — duplicating both would
+// copy traffic the task's second criterion excludes.
+func TestDuplicationFollowsEveryCriterion(t *testing.T) {
+	sess := wildcardSession() // uplink PDR → FAR 1, downlink PDR → FAR 2
+	parse := func(ids ...types.TargetIdentifier) [][]criterion {
+		set, ok := parseAll(taskWith(ids...))
+		if !ok {
+			t.Fatalf("criteria %v do not parse", ids)
+		}
+
+		return [][]criterion{set}
+	}
+	session := types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"}
+
+	for _, tc := range []struct {
+		name string
+		sets [][]criterion
+		want map[uint32]bool
+	}{
+		{"the session alone", parse(session), map[uint32]bool{1: true, 2: true}},
+		{
+			"the session and its downlink",
+			parse(session, types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound}),
+			map[uint32]bool{2: true},
+		},
+		{"the session and another UE's address", parse(session, ueAddr("10.250.0.99")), map[uint32]bool{}},
+	} {
+		if got := wantedFARs(tc.sets, sess); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: duplicated FARs %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestSelectionCarriesTheBroadestCoverage: a PDR every criterion selects is exact only
+// where every criterion is. A transport port the PDR's filter does not pin leaves the PDR's
+// copies to the packet, whatever the session criterion beside it says.
+func TestSelectionCarriesTheBroadestCoverage(t *testing.T) {
+	set, ok := parseAll(taskWith(
+		types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"},
+		types.TargetIdentifier{Type: types.TargetTCPPort, Value: "443"},
+	))
+	if !ok {
+		t.Fatal("criteria do not parse")
+	}
+
+	refs := selection(set, []PFCPSession{wildcardSession()})
+	if len(refs) != 2 {
+		t.Fatalf("selected %d PDRs, want both of the session's", len(refs))
+	}
+	for _, r := range refs {
+		if r.cover != coverBroader {
+			t.Errorf("%s covers exactly, want broader: the port is not pinned by the rule", r)
+		}
+	}
+
+	f := filterFrom(set, wildcardSession(), nil)
+	if !f.matches(farForwardUAndDuplicate, uplinkCopy(443)) {
+		t.Error("an uplink copy from the tasked port was not delivered")
+	}
+	if f.matches(farForwardUAndDuplicate, uplinkCopy(444)) {
+		t.Error("an uplink copy from another port was delivered")
+	}
+}
+
+// TestACombinationNoPacketSatisfiesIsRefused: every criterion must match, so two that no
+// packet satisfies together select nothing at every moment, and TS 103 221-1 table
+// 6.2.1.2-1 has the element reject "an inappropriate combination of identifiers" rather
+// than acknowledge an interception that can never run. A combination that narrows — a
+// session and one direction — is accepted.
+func TestACombinationNoPacketSatisfiesIsRefused(t *testing.T) {
+	f := newEnablerFixture(t)
+	session := types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"}
+
+	for _, tc := range []struct {
+		name    string
+		ids     []types.TargetIdentifier
+		refused bool
+	}{
+		{"two sessions", []types.TargetIdentifier{session, {Type: types.TargetFSEID, Value: "200"}}, true},
+		{"a TCP and a UDP port", []types.TargetIdentifier{
+			{Type: types.TargetTCPPort, Value: "53"}, {Type: types.TargetUDPPort, Value: "53"},
+		}, true},
+		{"a session and one direction", []types.TargetIdentifier{
+			session, {Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound},
+		}, false},
+	} {
+		err := f.e.canApply(ccTask("W1", tc.ids...))
+		if (err != nil) != tc.refused {
+			t.Errorf("%s: canApply = %v, want refused=%v", tc.name, err, tc.refused)
+		}
+	}
+}
+
+// TestWithoutADatapathOnlyASessionOnlyTaskIsAttributed: with no session state to resolve
+// against, the only criterion that can be answered is the session identity. A task naming
+// it beside another criterion cannot be decided there, and attributing a copy to it would
+// deliver traffic its other criterion may exclude.
+func TestWithoutADatapathOnlyASessionOnlyTaskIsAttributed(t *testing.T) {
+	tasks := store.New()
+	session := types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"}
+	tasks.Activate(ccTask("W1", session, types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound}))
+
+	if _, _, _, ok := lookupTrigger(tasks, nil, 100); ok {
+		t.Error("a task naming the session and a direction was attributed without session state")
+	}
+
+	tasks.Activate(ccTask("W2", session))
+	task, _, _, ok := lookupTrigger(tasks, nil, 100)
+	if !ok || task.XID != "W2" {
+		t.Errorf("lookupTrigger = %v, %v, want the session-only task W2", task.XID, ok)
 	}
 }

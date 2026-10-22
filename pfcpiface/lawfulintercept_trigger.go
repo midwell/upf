@@ -342,10 +342,15 @@ func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.I
 		// the only criterion that can be answered is the session identity itself, which
 		// covers a whole session and so needs no filtering. This is the path a shipper
 		// built without a datapath takes.
-		for _, task := range tasks.Match(types.TargetIdentifier{
-			Type:  types.TargetFSEID,
-			Value: strconv.FormatUint(seid, 10),
-		}) {
+		session := types.TargetIdentifier{Type: types.TargetFSEID, Value: strconv.FormatUint(seid, 10)}
+		for _, task := range tasks.Match(session) {
+			// Every criterion must match, and without session state only the session
+			// identity can be answered: a task naming it beside anything else cannot be
+			// decided here, and attributing the copy to it would deliver traffic its other
+			// criteria may exclude.
+			if !task.MatchedBy([]types.TargetIdentifier{session}) {
+				continue
+			}
 			// The same filter tasksCovering applies, and it matters here for the reason
 			// stated there: the caller takes the first task, so a task that requires no
 			// content — and therefore has no X3 destination to deliver it to — would

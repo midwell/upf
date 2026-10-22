@@ -149,12 +149,14 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 		// scoped to a PFCP session, so a criterion using one is only unambiguous alongside
 		// the session it belongs to". The hazard was written down and then implemented.
 		//
-		// **A session cannot qualify them.** A task's identifiers are *alternatives* — the
-		// same package documents that, and a CC-POI is required to intercept traffic
-		// matching any of them — so naming an F-SEID beside the rule ID widens the
-		// interception rather than narrowing it. Nor can the filter recover it: every
-		// session holding a rule of that number holds it legitimately, so there is nothing
-		// in a duplicated copy that distinguishes the intended one.
+		// **Each criterion is judged alone here.** A task's criteria are conjunctive, so an
+		// F-SEID beside the rule ID would scope it to one session — but this function sees
+		// one criterion at a time, and a rule ID on its own selects that rule in every
+		// session. Accepting the pair would need the check made per task, which is not done;
+		// until it is, the rule IDs are refused whatever accompanies them. Nor can the filter
+		// recover a lone one: every session holding a rule of that number holds it
+		// legitimately, so there is nothing in a duplicated copy that distinguishes the
+		// intended one.
 		//
 		// TS 33.128 table 6.2.3-7 lists these among the criteria a CC-POI supports, so
 		// refusing them is a declared gap rather than a silent one — README.md and the
@@ -361,6 +363,51 @@ func (c criterion) resolve(sessions []PFCPSession) []pdrRef {
 					cover: cov, uplink: p.IsUplink(),
 				})
 			}
+		}
+	}
+
+	return out
+}
+
+// selection returns every PDR, across the given sessions, that carries traffic all of a
+// task's criteria identify, each with how closely it corresponds.
+//
+// A task's criteria are conjunctive — ETSI TS 103 221-1 table 6.2.1.2-1: "Where multiple
+// criteria are present, all criteria are required to be matched" — so a PDR is selected
+// only where every criterion selects it, and its coverage is exact only where every
+// criterion's is: a criterion that covers the PDR more broadly than itself, a transport
+// port on a PDR whose filter does not pin it, leaves copies of that PDR to be decided
+// packet by packet. A task with no criteria selects nothing.
+func selection(criteria []criterion, sessions []PFCPSession) []pdrRef {
+	if len(criteria) == 0 {
+		return nil
+	}
+
+	var out []pdrRef
+
+	for i := range sessions {
+		for j := range sessions[i].pdrs {
+			p := sessions[i].pdrs[j]
+			cov := coverExact
+			for _, c := range criteria {
+				switch c.matchPDR(p) {
+				case coverNone:
+					cov = coverNone
+				case coverBroader:
+					cov = coverBroader
+				default:
+				}
+				if cov == coverNone {
+					break
+				}
+			}
+			if cov == coverNone {
+				continue
+			}
+			out = append(out, pdrRef{
+				seid: p.fseID, pdrID: p.pdrID, farID: p.farID,
+				cover: cov, uplink: p.IsUplink(),
+			})
 		}
 	}
 
