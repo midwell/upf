@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/omec-project/util/li/x1"
@@ -56,5 +57,25 @@ func TestAnOrdinaryDeliveryFailureIsNotReportedAsALostCopy(t *testing.T) {
 
 	if slices.Contains(rec.reported(), x1.NEIssueX3DeliveryLost) {
 		t.Errorf("a connection failure was reported as lost content: %v", rec.reported())
+	}
+}
+
+// TestADroppedRunOfCopiesIsReportedWithItsCount: a resend that does not land loses every copy
+// from the one the write stopped in to the end of its batch, and the library counts them. The
+// report must say how many, or the agency's gap is larger than this element's account of it.
+func TestADroppedRunOfCopiesIsReportedWithItsCount(t *testing.T) {
+	rec := &recordingReporter{}
+	s := &liShipper{reporter: rec, senders: make(map[string]x2x3.Sender)}
+
+	s.reportDeliveryError(&x2x3.DeliveryError{
+		Lost: 7,
+		Err:  fmt.Errorf("%w: send to 192.0.2.1:42069", x2x3.ErrUnitDropped),
+	})
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+
+	if len(rec.descriptions) != 1 || !strings.Contains(rec.descriptions[0], "7 content copies") {
+		t.Errorf("the loss was reported as %q, want it to say how many copies it cost", rec.descriptions)
 	}
 }

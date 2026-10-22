@@ -834,12 +834,32 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 // A method rather than a closure inside senderFor so the mapping can be asserted directly.
 // What produces ErrUnitDropped is the transport, tested where it lives in li/x2x3; what this
 // element does with it is this function.
+//
+// The report says how many copies the drop cost. A write that stops inside one unit is resent
+// from that unit to the end of its batch, so a resend that does not land loses every copy in
+// that tail, and the library counts them (x2x3.LostUnits). Saying "a content copy" for what may
+// be a run of them would leave the agency's gap larger than this element's own account of it.
 func (s *liShipper) reportDeliveryError(err error) {
 	if errors.Is(err, x2x3.ErrUnitDropped) {
-		s.report(x1.NEIssueX3DeliveryLost,
-			"a content copy was partially written to a reachable mediation function and dropped")
+		s.report(x1.NEIssueX3DeliveryLost, droppedCopies(x2x3.LostUnits(err)))
 	}
 	s.watcher.Nudge()
+}
+
+// droppedCopies describes a drop of n content copies on the way to a reachable mediation
+// function. An error that carries no count (n is 0) still lost at least the copy it names, so it
+// is not described as a number this element cannot back.
+func droppedCopies(n int) string {
+	switch {
+	case n > 1:
+		return fmt.Sprintf("%d content copies were partially written to a reachable mediation "+
+			"function and dropped", n)
+	case n == 1:
+		return "a content copy was partially written to a reachable mediation function and dropped"
+	default:
+		return "at least one content copy was partially written to a reachable mediation function " +
+			"and dropped"
+	}
 }
 
 // checkTag reports whether a punted copy's datapath tag can be trusted enough to
