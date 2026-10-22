@@ -253,8 +253,14 @@ func TestAnUnusableLIBlockDoesNotStopTheUserPlane(t *testing.T) {
 		{"no x1_listen", func(c *LiConfig) { c.X1Listen = "" }},
 		{"no x3_sockaddr", func(c *LiConfig) { c.X3SockAddr = "" }},
 		{"no credentials", func(c *LiConfig) { c.Cert = "" }},
+		{"an unparseable keepalive_timeout", func(c *LiConfig) { c.KeepaliveTimeout = "5min" }},
+		{"a keepalive_timeout below the floor", func(c *LiConfig) { c.KeepaliveTimeout = testKeepaliveP1 }},
 		{"an unparseable trigger_keepalive", func(c *LiConfig) { c.TriggerKeepalive = "5min" }},
 		{"a trigger_keepalive below the floor", func(c *LiConfig) { c.TriggerKeepalive = testKeepaliveP1 }},
+		{"keepalive_timeout and trigger_keepalive differing", func(c *LiConfig) {
+			c.KeepaliveTimeout, c.TriggerKeepalive = "5m", "10m"
+		}},
+		{"an unparseable keepalive_time_p1", func(c *LiConfig) { c.KeepaliveTimeP1 = "1min" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			li := complete()

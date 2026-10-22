@@ -93,21 +93,33 @@ type LiConfig struct {
 	// That sysctl is per network namespace and must be raised before this socket is
 	// created, so it belongs to the deployment (see util's li/README.md).
 	X3RcvBuf int `json:"x3_rcvbuf"`
-	// TriggerKeepalive is how long this CC-POI keeps its tasking after the last
-	// message from its triggering function, as a Go duration ("5m"). Empty leaves
-	// the fail-safe off.
+	// The X1 keepalive procedure of TS 103 221-1 clause 6.6.2 on the triggering
+	// interface, as Go durations ("5m"). It runs unless KeepaliveDisabled is set, because
+	// the clause enables it by default.
 	//
 	// It exists because tasking must not outlive the party responsible for it: a
-	// triggering function that restarts forgets the triggers it installed, and
-	// without this the POI would keep intercepting content nobody can withdraw —
-	// past the point where the warrant itself is revoked. The triggering function
-	// keeps tasking alive by sending keepalives, so this only lapses when it is
-	// genuinely gone.
+	// triggering function that restarts forgets the triggers it installed, and without
+	// this the POI would keep intercepting content nobody can withdraw — past the point
+	// where the warrant itself is revoked. The triggering function keeps the procedure
+	// quiet by sending keepalives, so it only acts when that function is genuinely gone.
+	//
+	// KeepaliveTimeout is TIME_P2, the silence after which this element reports fault
+	// 9050 (default 1h); KeepaliveTimeP1 bounds the wait for the ADMF's answer to that
+	// report (default 1m), and KeepaliveTimeP3 the wait after an acknowledged report
+	// (default 2h) before tasking is deactivated — unless KeepaliveRetainTasking is set.
+	KeepaliveTimeout       string `json:"keepalive_timeout"`
+	KeepaliveTimeP1        string `json:"keepalive_time_p1"`
+	KeepaliveTimeP3        string `json:"keepalive_time_p3"`
+	KeepaliveRetainTasking bool   `json:"keepalive_retain_tasking"`
+	KeepaliveDisabled      bool   `json:"keepalive_disabled"`
+	// TriggerKeepalive is the deprecated name for KeepaliveTimeout, still read so an
+	// existing configuration keeps its TIME_P2. Setting both to different values is
+	// refused: the element cannot know which the operator meant.
 	TriggerKeepalive string `json:"trigger_keepalive"`
 
 	// The X2/X3 keepalive mechanism of ETSI TS 103 221-2 clause 6.2.4, on the X3
 	// delivery connections this shipper holds. A different mechanism from
-	// trigger_keepalive above, which is the fail-safe against the triggering
+	// keepalive_timeout above, which is the fail-safe against the triggering
 	// function going quiet; the prefix keeps the two apart in a file that would
 	// otherwise carry two unrelated settings called keepalive.
 	//

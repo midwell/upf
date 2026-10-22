@@ -1087,21 +1087,20 @@ func validateLiConfig(cfg *LiConfig) error {
 		}
 	}
 
-	// An unparseable fail-safe window is rejected rather than treated as "off": a
-	// deployment that asked for the fail-safe and silently did not get it keeps tasking
-	// that nothing will ever reclaim.
-	window, err := triggerKeepalive(cfg.TriggerKeepalive)
+	// An unparseable keepalive timer is rejected rather than treated as the default: a
+	// deployment that asked for a timer and silently got another holds tasking on terms
+	// nobody chose.
+	keepalive, err := keepaliveProcedure(cfg)
 	if err != nil {
-		return fmt.Errorf("li: trigger_keepalive %q must be a positive Go duration (e.g. %q) or empty to disable",
-			cfg.TriggerKeepalive, "5m")
+		return fmt.Errorf("%w (each timer is a positive Go duration, e.g. %q; empty takes the default)", err, "5m")
 	}
-	// And long enough to mean what it is for. A triggering function sends keepalives on
-	// a cadence it does not let an operator change, so a window shorter than a couple of
-	// those purges tasking that is live and being answered for — the fail-safe firing as
-	// a fault rather than as a backstop.
-	if tooShortTriggerKeepalive(window) {
-		return fmt.Errorf("li: trigger_keepalive %q must be at least %s, or tasking a healthy triggering function still holds will be purged",
-			cfg.TriggerKeepalive, minTriggerKeepalive)
+	// And TIME_P2 long enough to mean what it is for. A triggering function sends
+	// keepalives on a cadence it does not let an operator change, so a TIME_P2 shorter than
+	// a couple of those reports — and then purges — tasking that is live and being answered
+	// for: the procedure firing as a fault rather than as a backstop.
+	if keepalive != nil && tooShortTriggerKeepalive(keepalive.TimeP2) {
+		return fmt.Errorf("li: keepalive_timeout %s must be at least %s, or tasking a healthy triggering function still holds will be purged",
+			keepalive.TimeP2, minTriggerKeepalive)
 	}
 
 	return nil

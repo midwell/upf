@@ -13,9 +13,10 @@ import (
 // model.
 //
 // **A misspelled LI key is silently dropped by encoding/json, and the defaults it lands on are the
-// dangerous ones.** A typo'd `trigger_keepalive` leaves the fail-safe *off*, so this CC-POI keeps
-// duplicating content after the triggering function responsible for it is gone — past the point
-// where the warrant itself is revoked. A typo'd `admf_url` leaves the fault channel a no-op, so
+// dangerous ones.** A typo'd `keepalive_retain_tasking` or `keepalive_timeout` leaves the X1
+// keepalive procedure on a purge policy or timers the operator did not choose, so this CC-POI may
+// keep duplicating content after the triggering function responsible for it is gone for longer
+// than intended. A typo'd `admf_url` leaves the fault channel a no-op, so
 // every condition this element is required to report goes nowhere, including the report that would
 // have said the configuration was wrong. In both cases the operator wrote the setting, the element
 // ignored it, and nothing anywhere says so.
@@ -50,8 +51,8 @@ func strictLiBlock(jsonData []byte) error {
 	if err := dec.Decode(&li); err != nil {
 		return fmt.Errorf("li: %w — a key this element does not recognise is a setting that never "+
 			"reaches it, and the defaults it leaves in place are the unsafe ones: an unread "+
-			"trigger_keepalive leaves this CC-POI duplicating content no triggering function can "+
-			"withdraw, and an unread admf_url leaves it with no channel to report that on", err)
+			"keepalive setting leaves this CC-POI holding tasking on terms the operator did not "+
+			"choose, and an unread admf_url leaves it with no channel to report that on", err)
 	}
 
 	return nil

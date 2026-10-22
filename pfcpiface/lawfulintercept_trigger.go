@@ -51,10 +51,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// a listener accepting and applying tasking into a store this function had
 	// already abandoned by returning an error — an element that looks un-tasked to
 	// its operator while quietly holding warrants.
-	keepalive, err := triggerKeepalive(cfg.TriggerKeepalive)
+	keepalive, err := keepaliveProcedure(cfg)
 	if err != nil {
 		return nil, err
 	}
+	// The X1 reporter, where one is configured: the keepalive procedure's reports and the
+	// task-fault watcher need the reporter itself, not just its notifications.
+	x1Reporter, _ := reporter.(*x1.Reporter)
 
 	tasks := store.New()
 	// setTasks rather than an assignment: it also parses what the store holds, so the
@@ -166,24 +169,12 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			binary.BigEndian.PutUint64(corr[:], prev.CorrelationID)
 			ids.ForgetContext(prev.DeliveryXID().Bytes(), corr)
 		}),
-		// A purge is reported only when nobody asked for it. An explicit
-		// DeactivateTask, a retarget and a bulk deactivation are all expected ends of
-		// an interception; reporting them as fail-safe purges — which this element did,
-		// 179 times in one captured run — trains an operator to ignore the one channel
-		// that says the triggering function has stopped answering.
-		x1.OnPurge(func(_ types.InterceptTask, reason x1.PurgeReason) {
-			if reason != x1.PurgeKeepaliveLapse || reporter == nil {
-				return
-			}
-			// Off the caller's goroutine, for OnAuthFailure's reason and one more: a
-			// purge reaches here from the X1 request goroutine (DeactivateAllTasks) as
-			// well as from the fail-safe watchdog, and the transition lock this
-			// callback now runs under serialises every other X1 operation behind it.
-			// A blocking POST here would make one provisioning request wait on the
-			// ADMF's own reachability and hold the rest of the interface behind it.
-			reporter.NotifyAsync(x1.NEIssueTaskingPurged,
-				"content interception tasking removed; the triggering function went quiet")
-		}),
+		// The keepalive procedure reports on the fault channel: fault 9050 when the
+		// triggering function goes quiet, its clearing, and the 10000 alert once the
+		// procedure has deactivated the tasking (TS 103 221-1 clause 6.6.2). An explicit
+		// DeactivateTask, a retarget and a bulk deactivation are expected ends of an
+		// interception and report nothing.
+		x1.KeepaliveReporter(x1Reporter),
 		// A task is refused unless every detection criterion is one this datapath can
 		// resolve. Acknowledging one it cannot leaves the triggering function believing
 		// an interception is running that can never produce anything — and nothing
@@ -249,22 +240,24 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	//nolint:errcheck // serve-until-close; a bind failure already surfaced above
 	go func() { _ = httpSrv.ServeTLS(ln, "", "") }()
 
-	// The keepalive fail-safe (TS 103 221-1), applied to the triggering interface
-	// for the reason it exists: a triggering function that goes away must not leave
-	// interception running behind it. The same mechanism already guards the ADMF
-	// path on the AMF and SMF. A nil stop channel means it runs for as long as this
-	// element can hold tasking, which is the whole point.
-	if keepalive > 0 {
-		go srv.WatchKeepalive(keepalive, nil)
+	// The keepalive procedure (TS 103 221-1 clause 6.6.2), applied to the triggering
+	// interface for the reason it exists: a triggering function that goes away must not
+	// leave interception running behind it. The same procedure guards the ADMF path on
+	// the AMF and SMF. A nil stop channel means it runs for as long as this element can
+	// hold tasking, which is the whole point.
+	if keepalive != nil {
+		go srv.WatchKeepalive(*keepalive, nil)
+	}
+	// Both edges of the task-scoped faults this element answers from state (clause
+	// 6.5.2.1): a duplication the datapath is not applying, or a task selecting no
+	// traffic, is reported when it appears and retracted once it has cleared.
+	if x1Reporter != nil {
+		go srv.WatchTaskFaults(x1Reporter, 0, nil)
 	}
 
 	return tasks, nil
 }
 
-// triggerKeepalive validates the configured fail-safe window. An empty value
-// leaves the fail-safe off and yields zero; anything unparseable or non-positive
-// is an error rather than a silent "off", since a deployment that asked for the
-// fail-safe and did not get it holds tasking nothing will ever reclaim.
 // ccTFKeepaliveCadence is how often a CC triggering function tells this element it
 // is still there. It is not configurable at the triggering function, so it is the
 // fixed quantity this element's fail-safe window has to be expressed against.
@@ -296,15 +289,64 @@ func tooShortTriggerKeepalive(d time.Duration) bool {
 	return d > 0 && d < minTriggerKeepalive
 }
 
-func triggerKeepalive(v string) (time.Duration, error) {
+// keepaliveProcedure reads the keepalive procedure an operator configured, or nil when they
+// disabled it (TS 103 221-1 clause 6.6.2: "By default (with no prior agreement) they are
+// enabled", so only a stated agreement turns it off). A timer left empty takes the clause
+// default.
+//
+// keepalive_timeout is TIME_P2; trigger_keepalive is its deprecated name and is still read.
+// Both set to different values is refused rather than resolved, because the element cannot
+// know which one the operator meant.
+func keepaliveProcedure(cfg *LiConfig) (*x1.KeepaliveProcedure, error) {
+	if cfg.KeepaliveDisabled {
+		return nil, nil //nolint:nilnil // a disabled procedure is not an error
+	}
+
+	timeP2 := cfg.KeepaliveTimeout
+	if cfg.TriggerKeepalive != "" {
+		if timeP2 != "" && timeP2 != cfg.TriggerKeepalive {
+			return nil, fmt.Errorf("li: keepalive_timeout %q and its deprecated name trigger_keepalive %q "+
+				"are both set and differ; set keepalive_timeout only", timeP2, cfg.TriggerKeepalive)
+		}
+		timeP2 = cfg.TriggerKeepalive
+	}
+
+	p := x1.KeepaliveProcedure{RetainTasking: cfg.KeepaliveRetainTasking}
+	for _, t := range []struct {
+		name, value string
+		into        *time.Duration
+	}{
+		{"keepalive_timeout", timeP2, &p.TimeP2},
+		{"keepalive_time_p1", cfg.KeepaliveTimeP1, &p.TimeP1},
+		{"keepalive_time_p3", cfg.KeepaliveTimeP3, &p.TimeP3},
+	} {
+		d, err := parseKeepaliveTimer(t.name, t.value)
+		if err != nil {
+			return nil, err
+		}
+		*t.into = d
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+
+	return &p, nil
+}
+
+// parseKeepaliveTimer reads one keepalive timer. Empty is the clause default, returned as
+// zero; anything unparseable or non-positive is an error rather than the default, since a
+// deployment that asked for a timer and silently got another holds tasking on terms nobody
+// chose.
+func parseKeepaliveTimer(name, v string) (time.Duration, error) {
 	if v == "" {
 		return 0, nil
 	}
 
 	d, err := time.ParseDuration(v)
 	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("li: invalid trigger_keepalive %q", v)
+		return 0, fmt.Errorf("li: invalid %s %q", name, v)
 	}
+
 	return d, nil
 }
 

@@ -343,10 +343,10 @@ func bulkRequest(msgType, tfID, neID string) []byte {
 // is that a mistyped LI key stops the user plane from starting on a configuration whose settings
 // it silently ignored, and that is only true if LoadConfigFile calls the check.
 //
-// The two keys below are chosen because their defaults fail *unsafely* and neither is mandatory,
-// so validateLiConfig cannot see them go missing. A dropped `trigger_keepalive` leaves the
-// fail-safe off, and this CC-POI keeps duplicating content after the triggering function
-// responsible for it is gone. A dropped `admf_url` leaves the fault channel a no-op, so nothing
+// The two keys below are chosen because their defaults are not what the operator asked for and
+// neither is mandatory, so validateLiConfig cannot see them go missing. A dropped
+// `trigger_keepalive` leaves TIME_P2 at the clause default rather than the operator's. A dropped
+// `admf_url` leaves the fault channel a no-op, so nothing
 // this element is required to report — that one included — reaches the ADMF.
 //
 // This refusal is a load-time one, which is a deliberate exception to the rule the test above

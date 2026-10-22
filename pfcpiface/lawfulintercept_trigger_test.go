@@ -486,14 +486,15 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	rec := &recordingReporter{}
+	admf := newRecordingADMF(t, nil)
 	cfg := &LiConfig{
 		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
-		// Short enough to observe, long enough that the tasking below lands first.
-		TriggerKeepalive: "1s",
+		// Short enough to observe, long enough that the tasking below lands first. TIME_P1
+		// bounds the wait for an answer to the 9050 report, which this ADMF never gives.
+		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
 	}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(), nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -555,29 +556,17 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 	}
 
-	// And the ADMF is told, because interception stopping must not be silent.
-	var purged bool
-	for _, i := range rec.reported() {
-		if i == x1.NEIssueTaskingPurged {
-			purged = true
+	// And the ADMF is told, because interception stopping must not be silent: first that
+	// keepalives stopped (fault 9050), then that the tasking was deactivated (Alert 10000).
+	for _, condition := range []string{x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged} {
+		deadline := time.Now().Add(5 * time.Second)
+		for !admf.received(condition) && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !admf.received(condition) {
+			t.Errorf("the ADMF was not told %s", condition)
 		}
 	}
-
-	if !purged {
-		t.Errorf("reported %v, want %s", rec.reported(), x1.NEIssueTaskingPurged)
-	}
-}
-
-// orderingReporter records each fault it is told about into a shared sequence, so
-// that when a report happened relative to something else can be asserted.
-type orderingReporter struct{ note func(string) }
-
-func (o orderingReporter) Notify(issueType, _ string) { o.note("report:" + issueType) }
-
-// NotifyAsync notes synchronously: this double exists to assert the *order* of a
-// report against the work it reports on, which a goroutine would make unobservable.
-func (o orderingReporter) NotifyAsync(issueType, description string) {
-	o.Notify(issueType, description)
 }
 
 // TestTheStopReportFollowsTheStop pins the ordering obligation the asynchronous
@@ -633,11 +622,16 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	t.Cleanup(enabler.stop)
 	enabler.addSource(sessions)
 
+	admf := newRecordingADMF(t, func(body string) {
+		if strings.Contains(body, x1.NEIssueTaskingPurged) {
+			note("report:" + x1.NEIssueTaskingPurged)
+		}
+	})
 	cfg := &LiConfig{
 		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
-		TriggerKeepalive: "1s",
+		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
 	}
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), orderingReporter{note: note},
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(),
 		enabler, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
@@ -676,6 +670,10 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	}
 	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Fatal("tasking outlived the triggering function")
+	}
+	// The alert is sent after the purge; wait for it to arrive before reading the order.
+	for alertBy := time.Now().Add(5 * time.Second); !admf.received(x1.NEIssueTaskingPurged) && time.Now().Before(alertBy); {
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	mu.Lock()
@@ -762,33 +760,33 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 	}
 }
 
-// TestTriggerKeepaliveMustBeValid: an unparseable fail-safe window used to be
-// checked only after the X1 listener was already serving, so the error returned
-// here left an element accepting and applying tasking into a store its caller had
-// abandoned — un-tasked to its operator, holding warrants in fact.
+// TestTriggerKeepaliveMustBeValid: an unparseable keepalive timer is checked before the
+// X1 listener serves, so the error returned here cannot leave an element accepting and
+// applying tasking into a store its caller has abandoned — un-tasked to its operator,
+// holding warrants in fact.
 func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	for _, v := range []string{testUnparseable, "-5m", "0s"} {
-		if _, err := triggerKeepalive(v); err == nil {
-			t.Errorf("triggerKeepalive(%q) accepted an unusable window", v)
+		if _, err := parseKeepaliveTimer("keepalive_timeout", v); err == nil {
+			t.Errorf("parseKeepaliveTimer(%q) accepted an unusable timer", v)
 		}
 	}
-	if d, err := triggerKeepalive(""); err != nil || d != 0 {
-		t.Errorf(`triggerKeepalive("") = %v, %v; want 0, nil (fail-safe off)`, d, err)
+	if d, err := parseKeepaliveTimer("keepalive_timeout", ""); err != nil || d != 0 {
+		t.Errorf(`parseKeepaliveTimer("") = %v, %v; want 0, nil (the clause default)`, d, err)
 	}
-	if d, err := triggerKeepalive("5m"); err != nil || d != 5*time.Minute {
-		t.Errorf(`triggerKeepalive("5m") = %v, %v; want 5m, nil`, d, err)
+	if d, err := parseKeepaliveTimer("keepalive_timeout", "5m"); err != nil || d != 5*time.Minute {
+		t.Errorf(`parseKeepaliveTimer("5m") = %v, %v; want 5m, nil`, d, err)
 	}
 
-	// Nothing may be left listening when the window is rejected.
+	// Nothing may be left listening when the timer is rejected.
 	addr := freePort(t)
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: addr, TriggerKeepalive: testUnparseable}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: addr, KeepaliveTimeout: testUnparseable}
 	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); err == nil {
-		t.Fatal("startTriggerListener accepted an invalid trigger_keepalive")
+		t.Fatal("startTriggerListener accepted an invalid keepalive_timeout")
 	}
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
-		t.Fatalf("X1 port still bound after a rejected trigger_keepalive: %v", err)
+		t.Fatalf("X1 port still bound after a rejected keepalive_timeout: %v", err)
 	}
 	_ = ln.Close()
 }
@@ -810,12 +808,13 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	rec := &recordingReporter{}
-	// No fail-safe window: nothing here is meant to lapse, so anything reported as a
-	// purge would be this element mislabelling a withdrawal it was asked for.
+	admf := newRecordingADMF(t, nil)
+	// The default keepalive procedure, whose TIME_P2 is an hour: nothing here is meant to
+	// lapse, so anything reported as a purge would be this element mislabelling a
+	// withdrawal it was asked for.
 	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
 
-	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), rec, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
+	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(), nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -856,11 +855,10 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("the task survived its own deactivation")
 	}
-	for _, issue := range rec.reported() {
-		if issue == x1.NEIssueTaskingPurged {
-			t.Errorf("an explicit DeactivateTask was reported as a fail-safe purge; reported %v",
-				rec.reported())
-		}
+	// Long enough for an asynchronous report to have arrived, had one been sent.
+	time.Sleep(300 * time.Millisecond)
+	if admf.received(x1.NEIssueTaskingPurged) {
+		t.Error("an explicit DeactivateTask was reported as a fail-safe purge")
 	}
 }
 
@@ -1192,9 +1190,8 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 	}
 }
 
-// TestTriggerKeepaliveHasAFloor: an unparseable window was already refused; a
-// parseable but far-too-short one was not, and it is the more damaging of the two
-// because the element starts and looks healthy.
+// TestTriggerKeepaliveHasAFloor: a parseable but far-too-short TIME_P2 is the more
+// damaging configuration mistake, because the element starts and looks healthy.
 //
 // A triggering function's keepalive cadence is not configurable at the triggering
 // function, so a window shorter than a couple of them purges tasking that is live
@@ -1208,16 +1205,16 @@ func TestTriggerKeepaliveHasAFloor(t *testing.T) {
 		window string
 		reject bool
 	}{
-		{"", false},      // disabled is a choice an operator may state
+		{"", false},      // the clause default, an hour
 		{"5m", false},    // the documented example
 		{"2m30s", false}, // exactly the floor
 		{"1s", true},     // shorter than a single keepalive cadence
 		{testKeepaliveP1, true},
 		{"1m", true}, // one cadence: any jitter reads as absence
 	} {
-		d, err := triggerKeepalive(tc.window)
+		d, err := parseKeepaliveTimer("keepalive_timeout", tc.window)
 		if err != nil {
-			t.Fatalf("triggerKeepalive(%q): %v", tc.window, err)
+			t.Fatalf("parseKeepaliveTimer(%q): %v", tc.window, err)
 		}
 		if got := tooShortTriggerKeepalive(d); got != tc.reject {
 			t.Errorf("tooShortTriggerKeepalive(%q) = %v, want %v", tc.window, got, tc.reject)
