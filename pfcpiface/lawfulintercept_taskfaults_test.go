@@ -160,3 +160,37 @@ func TestATaskTheElementDoesNotHoldReportsNothing(t *testing.T) {
 		t.Errorf("the element answered %+v about a task it does not hold", got)
 	}
 }
+
+// TestATaskSelectsTrafficOnlyWhereEveryCriterionHolds: a task's criteria are conjunctive (TS
+// 103 221-1 table 6.2.1.2-1). This session's UE address matches the task's, but the task also
+// names a PFCP session this element does not hold, so the task selects nothing — and must say so.
+// Read per criterion, the address would select the session and the task would report itself
+// healthy while producing nothing.
+func TestATaskSelectsTrafficOnlyWhereEveryCriterionHolds(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W1", ueAddr(testUEIPv4),
+		types.TargetIdentifier{Type: types.TargetFSEID, Value: "999"})
+	f.settle(t)
+
+	faults := f.e.taskFaults("W1")
+	if len(faults) != 1 || !strings.Contains(faults[0].ErrorDescription, "carries traffic this task selects") {
+		t.Errorf("a task whose criteria no session satisfies together reports %+v, want a "+
+			"no-traffic-selected fault", faults)
+	}
+}
+
+// TestATaskWithACriterionThatDoesNotParseIsLeftOutWhole: criteria are conjunctive, so dropping
+// the one that does not parse and keeping the rest would widen the task to traffic its warrant
+// does not describe. The whole task is left out instead.
+func TestATaskWithACriterionThatDoesNotParseIsLeftOutWhole(t *testing.T) {
+	good := ueAddr(testUEIPv4)
+	bad := types.TargetIdentifier{Type: types.TargetTCPPort, Value: "not-a-port"}
+
+	if _, ok := parseAll(types.InterceptTask{Targets: []types.TargetIdentifier{good}}); !ok {
+		t.Fatal("a task whose every criterion parses was left out")
+	}
+	if set, ok := parseAll(types.InterceptTask{Targets: []types.TargetIdentifier{good, bad}}); ok {
+		t.Errorf("a task with a criterion that does not parse was kept, narrowed to %d criteria", len(set))
+	}
+}

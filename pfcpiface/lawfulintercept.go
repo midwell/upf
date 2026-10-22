@@ -188,7 +188,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// forwarding — the same policy the AMF and SMF apply to their own LI block.
 	// The refused `li` object, first, because it is the reason the rest cannot be trusted: the
 	// keys that did decode are not a trustworthy set, and one of the ones that did not may be
-	// the fail-safe window or the fault endpoint.
+	// a keepalive timer or the fault endpoint.
 	if cfg.blockErr != nil {
 		if issueReporter != nil {
 			issueReporter.Notify(x1.NEIssueInvalidConfig,

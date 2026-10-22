@@ -47,7 +47,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	enabler *ccEnabler, ids *x2x3.Identity, onTasking func(),
 	unreachable func(addr string) bool, probes ...x1.FaultProbe,
 ) (*store.Store, error) {
-	// Parse the fail-safe window before anything is bound. Doing it afterwards left
+	// Parse the keepalive timers before anything is bound. Doing it afterwards left
 	// a listener accepting and applying tasking into a store this function had
 	// already abandoned by returning an error — an element that looks un-tasked to
 	// its operator while quietly holding warrants.
@@ -68,10 +68,10 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// POI has lost the destination it provisioned — after a restart, say. Accepting
 	// such a trigger would mean duplicating a subject's traffic and discarding every
 	// copy while the triggering function is told interception is running, which is
-	// exactly what used to happen. The purge hook is what keeps the fail-safe from
-	// being silent: interception stopping is the safe outcome, but only if somebody
-	// is told it happened.
-	// Reports are throttled per type, so a purge of many tasks yields one.
+	// exactly the failure this refuses. The keepalive procedure reports its own
+	// deactivation to the ADMF (Alert 10000, through the reporter passed to the server):
+	// interception stopping is the safe outcome, but only if somebody is told it
+	// happened.
 	//
 	// Deliberately *without* x1.WithConfiguredDestinations, which the AMF and SMF do wire.
 	// A triggered POI takes its destinations from the function that triggered it and from
@@ -163,7 +163,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			// bounded by live tasking and visible through Identity.Contexts().
 			//
 			// Done on every removal — an ordinary withdrawal, a bulk deactivation, a
-			// fail-safe purge — because the state belongs to the tasking and not to the
+			// keepalive deactivation — because the state belongs to the tasking and not to the
 			// circumstances of its removal.
 			var corr [x2x3.CorrelationIDLength]byte
 			binary.BigEndian.PutUint64(corr[:], prev.CorrelationID)
@@ -252,39 +252,47 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// 6.5.2.1): a duplication the datapath is not applying, or a task selecting no
 	// traffic, is reported when it appears and retracted once it has cleared.
 	if x1Reporter != nil {
-		go srv.WatchTaskFaults(x1Reporter, 0, nil)
+		go srv.WatchTaskFaults(x1Reporter, taskFaultInterval, taskFaultStop)
 	}
 
 	return tasks, nil
 }
 
+// taskFaultInterval is how often the task-fault watcher samples, and taskFaultStop ends
+// it. Zero takes the X1 reporter's throttle interval and nil runs it for the life of the
+// process; only tests set them, so a watcher started by one test does not outlive it.
+var (
+	taskFaultInterval time.Duration
+	taskFaultStop     <-chan struct{}
+)
+
 // ccTFKeepaliveCadence is how often a CC triggering function tells this element it
 // is still there. It is not configurable at the triggering function, so it is the
-// fixed quantity this element's fail-safe window has to be expressed against.
+// fixed quantity this element's keepalive TIME_P2 has to be expressed against.
 const ccTFKeepaliveCadence = 60 * time.Second
 
-// minTriggerKeepalive is the shortest fail-safe window that can distinguish a
-// triggering function that has gone away from one that is merely between
-// keepalives. Two cadences plus a margin: at one cadence any jitter, retransmit or
-// scheduling delay reads as absence.
+// minTriggerKeepalive is the shortest TIME_P2 that can distinguish a triggering
+// function that has gone away from one that is merely between keepalives. Two
+// cadences plus a margin: at one cadence any jitter, retransmit or scheduling delay
+// reads as absence.
 //
-// Below it the fail-safe stops being a backstop and becomes a fault. It purges
-// live tasking that a healthy triggering function is still answering for, and the
-// element then reports taskingPurged — which names the triggering function as the
-// thing that went silent, sending an operator to investigate an element that was
-// behaving correctly, while interception the agency believes is running has in
-// fact stopped.
+// Below it the keepalive procedure (TS 103 221-1 clause 6.6.2) stops being a backstop
+// and becomes a fault: it reports fault 9050 against a healthy triggering function and,
+// at TIME_P1 or TIME_P3, deactivates tasking that function is still answering for —
+// sending an operator to investigate an element that was behaving correctly, while
+// interception the agency believes is running has in fact stopped.
 const minTriggerKeepalive = 2*ccTFKeepaliveCadence + 30*time.Second
 
-// tooShortTriggerKeepalive reports whether a configured window is short enough to
-// purge tasking a healthy triggering function is still answering for.
+// tooShortTriggerKeepalive reports whether a configured TIME_P2 is short enough to
+// report and then deactivate tasking a healthy triggering function is still answering
+// for.
 //
-// Separate from triggerKeepalive, and checked only where operator configuration is
-// validated, because the two answer different questions. triggerKeepalive asks
-// whether a window is usable at all, and the shipper is built directly with short
-// windows in tests that have to observe a purge without waiting minutes for one.
-// This asks whether a window an operator wrote is one the deployment can live
-// with, which is a question only configuration can be wrong about.
+// Separate from keepaliveProcedure, and checked only where operator configuration is
+// validated, because the two answer different questions. keepaliveProcedure asks
+// whether the timers are usable at all, and the shipper is built directly with short
+// timers in tests that have to observe the procedure without waiting minutes for it.
+// This asks whether a TIME_P2 an operator wrote is one the deployment can live with,
+// which is a question only configuration can be wrong about.
 func tooShortTriggerKeepalive(d time.Duration) bool {
 	return d > 0 && d < minTriggerKeepalive
 }
