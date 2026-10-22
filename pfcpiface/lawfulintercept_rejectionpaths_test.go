@@ -6,6 +6,7 @@ package pfcpiface
 import (
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -133,6 +134,16 @@ func (d *liRefusingDP) sawMethod(m upfMsgType) bool {
 func rejectionConn(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler, *[]string) {
 	t.Helper()
 
+	pConn, dp, e, reported, _ := rejectionConnDescribed(t)
+
+	return pConn, dp, e, reported
+}
+
+// rejectionConnDescribed is rejectionConn that also keeps each report's description, for the
+// tests where what a report says is the point and not only its issue code.
+func rejectionConnDescribed(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler, *[]string, *[]string) {
+	t.Helper()
+
 	dp := newRefusingDP()
 	sessions := NewInMemoryStore()
 	tasks := store.New()
@@ -143,17 +154,19 @@ func rejectionConn(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler, *[]strin
 	}
 
 	var (
-		mu       sync.Mutex
-		reported []string
+		mu        sync.Mutex
+		reported  []string
+		described []string
 	)
 
 	e := newCCEnabler(tasks, confirmedPush(func(all, updated PacketForwardingRules) uint8 {
 		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
-	}), func(issueType, _ string) {
+	}), func(issueType, description string) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		reported = append(reported, issueType)
+		described = append(described, description)
 	})
 
 	t.Cleanup(e.stop)
@@ -174,7 +187,7 @@ func rejectionConn(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler, *[]strin
 		InstrumentPFCP: svc,
 	}
 
-	return pConn, dp, e, &reported
+	return pConn, dp, e, &reported, &described
 }
 
 // programmedFor reports what the element's record says about a FAR, and whether it holds one.
@@ -281,6 +294,70 @@ func TestARefusedEstablishmentDoesNotStrandDuplication(t *testing.T) {
 			"in this element will ever walk it again: whatever was programmed — including " +
 			"duplication — stays for the life of the process, with no record of it anywhere")
 	}
+}
+
+// TestARefusedEstablishmentOfATaskedSessionIsReported drives the abandoning report on the
+// establishment path: a warrant already covers the UE, so the refused write carried duplication,
+// the rollback that should have removed it was refused too, and the session is never stored. Nothing
+// in this element will walk it again, so saying so is the only remedy left.
+func TestARefusedEstablishmentOfATaskedSessionIsReported(t *testing.T) {
+	pConn, dp, e, _, described := rejectionConnDescribed(t)
+
+	const ue = "10.250.0.16"
+
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      testXIDPrimary,
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr(ue)},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+
+	// Every batch refused, the rollback's deletion included, and every batch finished: the
+	// branch that abandons the session rather than storing it.
+	dp.mu.Lock()
+	dp.refuse = true
+	dp.mu.Unlock()
+
+	_, err := pConn.handleSessionEstablishmentRequest(
+		message.NewSessionEstablishmentRequest(0, 0, 0, 1, 0,
+			ie.NewNodeID("1.1.1.1", "", ""),
+			ie.NewFSEID(202, net.ParseIP("1.1.1.1"), nil),
+			ie.NewCreatePDR(
+				ie.NewPDRID(1),
+				ie.NewPrecedence(0),
+				ie.NewPDI(
+					ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x2, ue, "", 0, 0),
+				),
+				ie.NewFARID(1),
+			),
+			ie.NewCreateFAR(
+				ie.NewFARID(1),
+				ie.NewApplyAction(ActionForward),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)),
+			),
+		))
+	if err == nil {
+		t.Fatal("the refused establishment was reported as succeeding")
+	}
+
+	if n := len(pConn.store.GetAllSessions()); n != 0 {
+		t.Fatalf("the handler holds %d sessions; this test is about the branch that abandons it", n)
+	}
+
+	for _, d := range *described {
+		if strings.Contains(d, "did not accept the removal of a duplication rule") &&
+			strings.Contains(d, "a refused session establishment") {
+			return
+		}
+	}
+
+	t.Errorf("a refused establishment of a tasked session, whose rollback was refused too, was "+
+		"abandoned without saying so: its duplication may still be running with nothing able to "+
+		"stop it. Reported: %v", *described)
 }
 
 // TestARefusedEstablishmentWhoseRollbackDidNotFinishIsRecorded drives the other half of the
@@ -421,7 +498,7 @@ func TestAbandonedDuplicationIsReportedOnlyWhenSomethingWasDuplicating(t *testin
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, e, reported := rejectionConn(t)
 
-			e.abandonedDuplication(tt.fars, "a test")
+			e.abandonedDuplication(1, tt.fars, "a test")
 
 			got := len(*reported) > 0
 			if got != tt.want {

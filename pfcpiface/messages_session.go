@@ -298,7 +298,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			logger.PfcpLog.Warnln("the rollback of a rejected session reported a failure; " +
 				"no rule the datapath holds is known to be stranded")
 
-			upf.ccEnabler.abandonedDuplication(session.fars, "a refused session establishment")
+			upf.ccEnabler.abandonedDuplication(session.localSEID, session.fars, "a refused session establishment")
 		}
 
 		return errProcessReply(ErrWriteToDatapath,

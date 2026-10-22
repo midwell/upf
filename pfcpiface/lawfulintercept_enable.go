@@ -793,26 +793,59 @@ func (e *ccEnabler) farsRemoved(seid uint64, removed []far) {
 // datapath, which the caller attempts, and to say so when that fails, which is this.
 //
 // Reported as a refused duplication change because that is what it is: the element instructed the
-// datapath to stop duplicating and the datapath did not accept it. Only when a rule that was
-// actually duplicating is involved — an ordinary failed delete of a session no warrant covered is
-// the datapath's business, not the ADMF's.
-func (e *ccEnabler) abandonedDuplication(fars []far, why string) {
-	if e == nil || e.report == nil {
+// datapath to stop duplicating and the datapath did not accept it. Only when a rule that may be
+// duplicating is involved — an ordinary failed delete of a session no warrant covered is the
+// datapath's business, not the ADMF's. Which rules those are is mayBeDuplicating's answer.
+//
+// Called before the session is forgotten, because forgetting it drops the record that answer reads.
+func (e *ccEnabler) abandonedDuplication(seid uint64, fars []far, why string) {
+	e.reportAbandoned(seid, fars, "the datapath did not accept the removal of a duplication rule", why)
+}
+
+// removalUnconfirmed is abandonedDuplication's report for a removal that did not finish, rather
+// than one the datapath refused: an association teardown whose retry also ran out of time. The
+// rules may still be in the datapath, and the session is about to be forgotten either way, so the
+// remedy is the same and only what happened differs. Saying "did not accept" for a removal that
+// timed out would send an operator looking for a refusal that never occurred.
+func (e *ccEnabler) removalUnconfirmed(seid uint64, fars []far, why string) {
+	e.reportAbandoned(seid, fars,
+		"the datapath did not confirm the removal of a duplication rule in time", why)
+}
+
+func (e *ccEnabler) reportAbandoned(seid uint64, fars []far, what, why string) {
+	if e == nil || e.report == nil || !e.mayBeDuplicating(seid, fars) {
 		return
 	}
+
+	e.report(x1.NEIssueDuplicationRefused,
+		what+" for a session this element is no longer tracking, so content may still be "+
+			"copied with nothing able to stop it: "+why)
+}
+
+// mayBeDuplicating says whether any of a session's FARs may be duplicating in the datapath.
+//
+// **The session's own liDuplicate is not enough to answer it.** That flag is what the session
+// path last derived, and the re-derivation deliberately writes the record, not the session
+// store: a warrant activated after the UE attached is turned on by a pass, so the datapath is
+// duplicating while every stored FAR still says it is not. Gating on the flag alone made a
+// refused teardown delete of exactly that session — the ordinary operational case — silent.
+//
+// So the record answers too, and everDuplicated rather than the current record value, for the
+// reason everDuplicated exists: a record that wrongly says "off" is the unrecoverable direction.
+// Every write of a duplicating record also writes everDuplicated, so it covers those. A rule this
+// element once turned on and has since turned off costs, at worst, a report that says content
+// *may* still be copied.
+func (e *ccEnabler) mayBeDuplicating(seid uint64, fars []far) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	for i := range fars {
-		if !fars[i].liDuplicate {
-			continue
+		if fars[i].liDuplicate || e.everDuplicated[farRef{seid: seid, farID: fars[i].farID}] {
+			return true
 		}
-
-		e.report(x1.NEIssueDuplicationRefused,
-			"the datapath did not accept the removal of a duplication rule for a session this "+
-				"element is no longer tracking, so content may still be copied with nothing "+
-				"able to stop it: "+why)
-
-		return
 	}
+
+	return false
 }
 
 // farsAttempted records rules whose outcome this element could **not** determine — the

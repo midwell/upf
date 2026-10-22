@@ -330,7 +330,7 @@ func (pConn *PFCPConn) executeShutdown() {
 		// A refused removal is not retried — the retry below is for removals that did not
 		// finish, and the association is going away — so the remedy is to say so.
 		if cause == ie.CauseRequestRejected {
-			pConn.upf.ccEnabler.abandonedDuplication(sess.fars, "an association teardown")
+			pConn.upf.ccEnabler.abandonedDuplication(sess.localSEID, sess.fars, "an association teardown")
 		}
 
 		if !finished {
@@ -401,9 +401,15 @@ func (pConn *PFCPConn) retryUnfinishedRemovals(sessions []PFCPSession) {
 
 	for i, s := range sessions {
 		// As on the first pass: a refused removal of a duplicating rule is reported, because
-		// once the session is forgotten nothing can stop the copies.
-		if causes[i] == ie.CauseRequestRejected {
-			pConn.upf.ccEnabler.abandonedDuplication(s.fars, "an association teardown")
+		// once the session is forgotten nothing can stop the copies. So is one that did not
+		// finish twice, for the same reason -- its rules are as likely to have survived as its
+		// address is to be matched, which is why that address is held below. Both before
+		// RemoveSession, which drops the record the reports read.
+		switch {
+		case causes[i] == ie.CauseRequestRejected:
+			pConn.upf.ccEnabler.abandonedDuplication(s.localSEID, s.fars, "an association teardown")
+		case !finished[i]:
+			pConn.upf.ccEnabler.removalUnconfirmed(s.localSEID, s.fars, "an association teardown")
 		}
 
 		if finished[i] {
