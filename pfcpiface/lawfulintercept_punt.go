@@ -18,10 +18,10 @@ import (
 // discarded before any Go code sees it — so the shipper cannot report a loss it
 // never witnessed, and neither can the delivery layer.
 //
-// That is the whole problem: a throughput ceiling is a capacity fact and design
-// documents one, but *silent* loss means a mediation function receives part of the
-// ordered content believing it complete, and an agency has no way to know. Decision
-// D11 exists so that LI-plane faults reach the ADMF rather than failing invisibly.
+// That is the whole problem: a throughput ceiling is a capacity fact and can be
+// documented, but *silent* loss means a mediation function receives part of the
+// ordered content believing it complete, and an agency has no way to know. LI-plane
+// faults are reported so that they reach the ADMF rather than failing invisibly.
 //
 // The only vantage point that can see the loss is the datapath's own accounting:
 // the merge module counts what it handed to the egress port, the port counts what

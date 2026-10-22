@@ -438,8 +438,8 @@ func TestShipperDeliveryProbeAnswersOnBothEdges(t *testing.T) {
 	}
 }
 
-// TestLostCopiesAreNotAnElementStatus is decision D3 held in place: the loss counters stay
-// events.
+// TestLostCopiesAreNotAnElementStatus holds the loss counters as events, not as element
+// status.
 //
 // "Am I losing copies" is tempting to answer from the reports this element already sends,
 // but loss in the last N seconds is retention with an expiry — it discards real faults on a
@@ -966,7 +966,7 @@ func TestShipperPDUNumbersUnderConcurrentFraming(t *testing.T) {
 	}
 }
 
-// TestShipperRefusesWithoutAnElementIdentifier is design D9 for the CC-POI: content
+// TestShipperRefusesWithoutAnElementIdentifier: content
 // that a mediation function cannot attribute to the element that produced it is not
 // delivered at all. The datapath is unaffected — it keeps forwarding — because a UPF
 // that refuses to come up over its LI configuration tells every operator it is
@@ -986,8 +986,8 @@ func triggerToDID(xid, addr, did string) types.InterceptTask {
 	return t
 }
 
-// TestTheWatcherSeesWhatTheRetiredSitesReported is the check task 5.2 asks for, and
-// it is the most likely way this change makes something worse.
+// TestTheWatcherSeesWhatTheRetiredSitesReported guards the most likely way routing these
+// reports through the watcher could make something worse.
 //
 // Two sites used to report an unreachable MDF3 the moment they noticed — the
 // delivery-failure hook and the keepalive one. Both now nudge the watcher instead.

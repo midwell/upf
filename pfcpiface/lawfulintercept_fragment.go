@@ -44,7 +44,7 @@ const (
 //
 // The session and the task generation are not in the key because they are in the *memo*: a
 // memo belongs to one cached copyFilter, which is held per session under the tasking epoch
-// and dropped when either changes. That is what task 9.2 asks for, and getting it from the
+// and dropped when either changes. Getting it from the
 // memo's lifetime rather than from the key means a generation change cannot leave a
 // classification behind to be reused across lifecycles.
 //

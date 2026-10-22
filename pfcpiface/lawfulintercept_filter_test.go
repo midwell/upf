@@ -118,7 +118,7 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 		session PFCPSession
 		ids     []types.TargetIdentifier
 		// wantTrivial is whether the filter should decide without reading a packet at
-		// all — task 4.3's requirement that the common case costs nothing.
+		// all — the common case must cost nothing.
 		wantTrivial  bool
 		wantUplink   bool
 		wantDownlink bool
@@ -414,8 +414,8 @@ func TestFilterAllocatesNothingPerCopy(t *testing.T) {
 	}
 }
 
-// TestTrivialFilterReadsNoPacket is task 4.3 in the form that can actually be
-// asserted: where coverage is exact the frame is never touched, so a filter that
+// TestTrivialFilterReadsNoPacket asserts that the common case costs nothing, in the form
+// that can actually be asserted: where coverage is exact the frame is never touched, so a filter that
 // claims to be trivial must decide a copy it could not possibly parse.
 func TestTrivialFilterReadsNoPacket(t *testing.T) {
 	f := filterFor(taskWith(ueAddr(testUEIPv4)), wildcardSession())
