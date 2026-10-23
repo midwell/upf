@@ -271,3 +271,48 @@ func TestAnOverlapAndARefusalAreBothAnswered(t *testing.T) {
 		t.Errorf("W-a receives the content but answers %+v", got)
 	}
 }
+
+// TestAPartialOverlapSaysTheContentIsNotAllDelivered: the warrant ahead selects only one direction
+// of the session's tunnel, while the other selects the whole session. The shipping path takes the
+// first covering task and applies that task's filter alone, so the copies it rejects are dropped
+// rather than offered to the next task: the second warrant receives nothing, and part of the
+// session reaches nobody. The fault must say that, rather than claim the content went elsewhere.
+func TestAPartialOverlapSaysTheContentIsNotAllDelivered(t *testing.T) {
+	t.Parallel()
+
+	const ahead types.XID = "W-a"
+
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, ahead, types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound})
+	f.activate(t, "W-b", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
+	f.settle(t)
+
+	task, filter, ok := lookupTrigger(f.tasks, f.e, 100)
+	if !ok || task.XID != ahead {
+		t.Fatalf("the session's content goes to %q, want %q", task.XID, ahead)
+	}
+	up := filter.matches(farForwardUAndDuplicate, uplinkCopy(443))
+	down := filter.matches(farForwardDAndDuplicate, downlinkCopy(443))
+	if up == down {
+		t.Fatalf("the winning filter takes uplink=%v downlink=%v, so this is not a partial overlap "+
+			"and the test would assert nothing about dropped copies", up, down)
+	}
+
+	faults := f.e.taskFaults("W-b")
+	if !hasCondition(faults, x1.TaskIssueContentUnderAnotherTask) {
+		t.Fatalf("the whole-session warrant answers %+v, want contentUnderAnotherTask", faults)
+	}
+	var desc string
+	for _, fl := range faults {
+		if strings.HasPrefix(fl.ErrorDescription, x1.TaskIssueContentUnderAnotherTask+": ") {
+			desc = fl.ErrorDescription
+		}
+	}
+	for _, want := range []string{"1 session(s)", "lower-XID task", "or not at all"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the overlap fault %q does not say %q: a partial overlap drops what the first "+
+				"task's criteria exclude, so 'delivered under another task' alone is untrue", desc, want)
+		}
+	}
+}

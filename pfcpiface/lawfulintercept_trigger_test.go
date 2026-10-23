@@ -645,13 +645,28 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		t.Fatalf("PutSession: %v", putErr)
 	}
 
+	// The push that stops duplication is held until the test releases it, so a report sent
+	// without waiting for the stop would arrive while the datapath is still duplicating. Without
+	// the hold the push completes long before the report reaches the ADMF over HTTPS, and the
+	// order below would hold whether or not the purge waited for it.
+	stopping := make(chan struct{})
+	release := make(chan struct{})
+	var holdOnce sync.Once
 	enabler := newCCEnabler(nil, confirmedPush(func(_, updated PacketForwardingRules) uint8 {
 		for i := range updated.fars {
 			if updated.fars[i].Duplicates() {
 				note("program:on")
-			} else {
-				note("program:off")
+
+				continue
 			}
+			holdOnce.Do(func() {
+				close(stopping)
+				select {
+				case <-release:
+				case <-time.After(10 * time.Second):
+				}
+			})
+			note("program:off")
 		}
 
 		return ie.CauseRequestAccepted
@@ -697,17 +712,26 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	}
 
 	// Then the triggering function goes quiet and the fail-safe reclaims the tasking.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
-			break
-		}
-
-		time.Sleep(25 * time.Millisecond)
+	select {
+	case <-stopping:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the fail-safe never began stopping the duplication")
 	}
 	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Fatal("tasking outlived the triggering function")
 	}
+
+	// While the stop is held, the purge must not have been reported: the report says
+	// interception has stopped, and it has not.
+	for heldUntil := time.Now().Add(750 * time.Millisecond); time.Now().Before(heldUntil); {
+		if admf.received(x1.NEIssueTaskingPurged) {
+			close(release)
+			t.Fatal("the purge was reported while the datapath was still being told to stop " +
+				"duplicating; the report describes a state that does not hold yet")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	close(release)
 	// The alert is sent after the purge; wait for it to arrive before reading the order.
 	for alertBy := time.Now().Add(5 * time.Second); !admf.received(x1.NEIssueTaskingPurged) && time.Now().Before(alertBy); {
 		time.Sleep(50 * time.Millisecond)

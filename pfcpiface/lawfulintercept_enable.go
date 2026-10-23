@@ -1462,7 +1462,7 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 // taskFaults answers what is wrong with one task's interception, now, for the triggering
 // function that asks — see x1.WithTaskFaults.
 //
-// **Computed, never stored, and the two conditions it reports are the ones a CC-POI can
+// **Computed, never stored, and the three conditions it reports are the ones a CC-POI can
 // re-observe.** A refusal from the datapath is an event; whether this element is duplicating
 // what a task requires is a state, and it is the state that matters — it is equally true after a
 // refusal, after a push that was lost, and after a FAR that was never programmed at all. So the
@@ -1478,6 +1478,13 @@ func (e *ccEnabler) resolveCovering(seid uint64) []coveredTask {
 //     interception producing nothing — and the answer says what was observed rather than
 //     accusing anybody, because a session torn down and one never established look the same from
 //     here.
+//   - Sessions this task selects that a lower-XID task also selects. The shipping path attributes
+//     each copy to the first covering task and filters it by that task's criteria alone, so this
+//     task receives none of that session's content: the part the first task also wants is
+//     delivered under it, and the part the first task's criteria exclude — the other direction of
+//     a tunnel-direction task, say — is not delivered at all. Only sessions this element has
+//     stored are walked, so a session whose rules reach the datapath before it is stored is
+//     answered for once it is stored, not before.
 //
 // **Reported against the task and nowhere else.** Both conditions are already reported at
 // element scope, which is what a triggering function has had to work with: it learns that
@@ -1621,7 +1628,9 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 	}
 	if elsewhere > 0 {
 		faults = append(faults, x1.TaskFault(x1.TaskIssueContentUnderAnotherTask, fmt.Sprintf(
-			"%d session(s) this task selects are delivered under another task", elsewhere)))
+			"%d session(s) this task selects are also selected by a lower-XID task; their content "+
+				"is delivered under that task, or not at all where that task's own criteria "+
+				"exclude it", elsewhere)))
 	}
 
 	return faults
@@ -1629,9 +1638,10 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 
 // anySelects reports whether any of the criteria sets selects traffic in the session.
 //
-// It is what makes a task's content go elsewhere: the shipping path delivers each copy under
-// the first covering task in XID order, so a session one of the tasks ahead also selects is
-// delivered under that one. Asked per selected session of the task being answered for, so its
+// It is what takes a task's content away: the shipping path attributes each copy to the first
+// covering task in XID order and filters it by that task's criteria only, so of a session one of
+// the tasks ahead also selects, this task receives nothing — what the task ahead also wants goes
+// to it, and what its criteria exclude is dropped rather than tried against the next task. Asked per selected session of the task being answered for, so its
 // cost is the tasks ahead of it per session — inside the walk of every session resolveTaskFaults
 // already makes, and paid only when taskFaults' memo has been invalidated.
 func anySelects(sets [][]criterion, sess PFCPSession) bool {

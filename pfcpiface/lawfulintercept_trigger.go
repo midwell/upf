@@ -376,9 +376,15 @@ func parseKeepaliveTimer(name, v string) (time.Duration, error) {
 // every packet, and store.Match orders by XID precisely so this choice is stable.
 // Picking from a map's iteration order instead — as this did — scattered one
 // session's packets across the covering warrants at random, leaving every agency
-// with a partial stream and none with a usable one. The warrants served nothing are
-// told to the ADMF as a task fault against each of them (resolveTaskFaults), which
-// is the part of this compromise that must not stay quiet.
+// with a partial stream and none with a usable one. The filter returned is the chosen
+// task's alone, so a copy it rejects is dropped, not offered to the next covering task:
+// where the first task selects only part of a session — one tunnel direction, say —
+// the rest of that session reaches no warrant. The warrants served nothing are told to
+// the ADMF as a task fault against each of them (resolveTaskFaults), which is the part
+// of this compromise that must not stay quiet. That fault walks the sessions the
+// enabler has stored, so a session it does not yet hold — one whose rules reach the
+// datapath before it is stored, which takes the fallback below — has its overlap
+// reported only once it is stored; a shipper built with no enabler at all reports none.
 func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, copyFilter, bool) {
 	if tasks == nil || seid == 0 {
 		return types.InterceptTask{}, copyFilter{}, false
