@@ -531,8 +531,8 @@ func (s *liShipper) addressUnreachable(addr string) bool {
 //
 // **Every caller of this is a path that may not block, so it dispatches off the
 // caller's goroutine.** The read loop reports the egress being down and copies dropped
-// before framing; the framing workers report untasked content, overlapping tasks, an
-// unusable configuration, an unreachable MDF and an invalid tag; the delivery worker
+// before framing; the framing workers report untasked content, an unusable
+// configuration, an unreachable MDF and an invalid tag; the delivery worker
 // reports copies dropped from its queue. All of them are driven by packet rate, in
 // front of a datagram queue whose whole invariant is that everything done before
 // returning to Read is time that queue spends filling — so a synchronous mTLS POST
@@ -635,7 +635,7 @@ func (s *liShipper) recycle(b []byte) {
 func (s *liShipper) ship(tagged []byte) {
 	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
 
-	task, filter, covering, ok := lookupTrigger(s.tasks, s.enabler, fseid)
+	task, filter, ok := lookupTrigger(s.tasks, s.enabler, fseid)
 	if !ok {
 		s.report(x1.NEIssueContentUntasked, "duplicated content for a session with no interception task")
 
@@ -650,14 +650,6 @@ func (s *liShipper) ship(tagged []byte) {
 	// failures out of correct behaviour.
 	if !filter.matches(tagged[fseidTagLen], tagged[liTagLen:]) {
 		return
-	}
-
-	if covering > 1 {
-		// Every copy of this session goes to one warrant, so the others are
-		// authorised and receiving nothing. Only the ADMF can reconcile that, and it
-		// cannot do so from an absence of product.
-		s.report(x1.NEIssueContentTaskOverlap,
-			"several interception tasks cover one session; content is delivered under one of them")
 	}
 
 	// Every destination the task named for this product, and only those: a destination

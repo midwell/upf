@@ -579,7 +579,7 @@ func TestNoDuplicationForTaskingWithoutContent(t *testing.T) {
 	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
 		t.Error("a task that does not require content is duplicating a subject's traffic")
 	}
-	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
+	if _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
 		t.Error("a copy was attributed to a task with no content product to deliver")
 	}
 }
@@ -598,15 +598,16 @@ func TestTaskingWithoutContentDoesNotStealAttribution(t *testing.T) {
 	}
 	f.activate(t, "W-b", ueAddr(testUEIPv4))
 
-	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	task, _, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("no task found for a session under a content warrant")
 	}
 	if task.XID != "W-b" {
 		t.Errorf("attributed to %q, want the warrant that requires content", task.XID)
 	}
-	if covering != 1 {
-		t.Errorf("covering = %d, want 1 — a task this POI cannot serve is not an overlap", covering)
+	if hasCondition(f.e.taskFaults("W-b"), x1.TaskIssueContentUnderAnotherTask) {
+		t.Error("the content warrant reports its content going to another task, but a task this " +
+			"POI cannot serve takes none of it")
 	}
 }
 
@@ -1161,21 +1162,21 @@ func TestLookupFindsTaskByNonSessionCriterion(t *testing.T) {
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 	f.activate(t, "W1", ueAddr(testUEIPv4))
 
-	task, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	task, _, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("a copy from the tasked session was not attributed to its warrant")
 	}
-	if task.XID != "W1" || covering != 1 {
-		t.Errorf("attributed to %q (%d covering), want W1 (1)", task.XID, covering)
+	if task.XID != "W1" {
+		t.Errorf("attributed to %q, want W1", task.XID)
 	}
 
 	// The other subscriber's session is not covered, and a copy from it must stay
 	// unattributed rather than be labelled with someone else's warrant.
-	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 200); ok {
+	if _, _, ok := lookupTrigger(f.tasks, f.e, 200); ok {
 		t.Error("a copy from an untasked session was attributed to a warrant")
 	}
 	// Nor may a session this element has never heard of resolve to anything.
-	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 999); ok {
+	if _, _, ok := lookupTrigger(f.tasks, f.e, 999); ok {
 		t.Error("a copy tagged with an unknown session was attributed to a warrant")
 	}
 }
@@ -1191,15 +1192,12 @@ func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 	f.activate(t, "W-b", ueAddr(testUEIPv4))
 	f.activate(t, "W-a", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
 
-	first, _, covering, ok := lookupTrigger(f.tasks, f.e, 100)
+	first, _, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("no task found")
 	}
-	if covering != 2 {
-		t.Errorf("covering = %d, want both warrants counted so the overlap is reported", covering)
-	}
 	for range 20 {
-		task, _, _, _ := lookupTrigger(f.tasks, f.e, 100)
+		task, _, _ := lookupTrigger(f.tasks, f.e, 100)
 		if task.XID != first.XID {
 			t.Fatalf("attribution moved between warrants: %q then %q", first.XID, task.XID)
 		}
@@ -1209,20 +1207,23 @@ func TestLookupOrderIsStableAcrossWarrants(t *testing.T) {
 	}
 }
 
-// TestLookupCountsOnlyCoveringWarrants checks that the overlap report counts
-// warrants that actually cover the session. Counting every active task would report
+// TestAnOverlapCountsOnlyCoveringWarrants checks that the overlap fault is raised only
+// for warrants that actually share a session. Counting every active task would report
 // an overlap whenever two unrelated subscribers were under interception, which
 // tells an ADMF that a warrant is receiving nothing when it is receiving
 // everything.
-func TestLookupCountsOnlyCoveringWarrants(t *testing.T) {
+func TestAnOverlapCountsOnlyCoveringWarrants(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))
 	f.putSession(t, unmarkedSession(200, "10.250.0.10"))
 	f.activate(t, "W1", ueAddr(testUEIPv4))
 	f.activate(t, "W2", ueAddr("10.250.0.10"))
 
-	if _, _, covering, _ := lookupTrigger(f.tasks, f.e, 100); covering != 1 {
-		t.Errorf("covering = %d for a session under one warrant, want 1", covering)
+	for _, xid := range []types.XID{"W1", "W2"} {
+		if hasCondition(f.e.taskFaults(xid), x1.TaskIssueContentUnderAnotherTask) {
+			t.Errorf("%s reports its content going to another task, but no other task shares "+
+				"its session", xid)
+		}
 	}
 }
 
@@ -1253,7 +1254,7 @@ func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
 	f.tasks.Activate(task)
 	f.e.retaskAndWait()
 
-	_, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
+	_, filter, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("the task does not cover the session")
 	}
@@ -1276,7 +1277,7 @@ func TestModifyTaskChangesCriteriaInPlace(t *testing.T) {
 	f.tasks.Activate(task)
 	f.e.retaskAndWait()
 
-	got, filter, _, ok := lookupTrigger(f.tasks, f.e, 100)
+	got, filter, ok := lookupTrigger(f.tasks, f.e, 100)
 	if !ok {
 		t.Fatal("the modified task no longer covers the session")
 	}
@@ -1316,7 +1317,7 @@ func TestModifyToACriterionSelectingNothingStopsContent(t *testing.T) {
 	if f.duplicates(t, 100, 1) || f.duplicates(t, 100, 2) {
 		t.Error("duplication continued for criteria the task no longer carries")
 	}
-	if _, _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
+	if _, _, ok := lookupTrigger(f.tasks, f.e, 100); ok {
 		t.Error("copies of the session are still attributed to the retargeted warrant")
 	}
 }

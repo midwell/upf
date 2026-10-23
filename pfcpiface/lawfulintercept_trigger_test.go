@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -214,11 +213,11 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	if err := req.ActivateTask(unknown); err == nil {
 		t.Error("a content trigger naming an unknown destination was accepted")
 	}
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid+7); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid+7); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 
-	task, _, _, ok := lookupTrigger(tasks, nil, seid)
+	task, _, ok := lookupTrigger(tasks, nil, seid)
 	if !ok {
 		t.Fatal("no trigger found for the tasked session")
 	}
@@ -233,7 +232,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 
 	// A session nobody tasked must not resolve to a warrant, or content would be
 	// delivered labelled with someone else's.
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid+1); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid+1); ok {
 		t.Error("an untasked session resolved to a trigger")
 	}
 
@@ -241,7 +240,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 		t.Fatalf("DeactivateTask: %v", err)
 	}
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("trigger still installed after DeactivateTask")
 	}
 }
@@ -298,7 +297,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Errorf("err = %v, want X1 error 1030 (identifier does not match certificate)", err)
 	}
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("a refused trigger was installed anyway")
 	}
 }
@@ -524,7 +523,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("ActivateTask: %v", err)
 	}
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("trigger was not installed")
 	}
 
@@ -538,21 +537,21 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		}
 	}
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("tasking was purged while the triggering function was still talking")
 	}
 
 	// Now it goes quiet, as a restarted one does.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 			break
 		}
 
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 	}
 
@@ -662,13 +661,13 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 	// Then the triggering function goes quiet and the fail-safe reclaims the tasking.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 			break
 		}
 
 		time.Sleep(200 * time.Millisecond)
 	}
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Fatal("tasking outlived the triggering function")
 	}
 	// The alert is sent after the purge; wait for it to arrive before reading the order.
@@ -707,8 +706,8 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 // which is what reading store.Match unsorted amounted to — scattered a session's
 // packets across the covering warrants at random, leaving each agency with an
 // arbitrary fraction of the content and none of them with a usable stream. The
-// agency that ends up with nothing is the ADMF's problem to resolve, so the
-// overlap is reported rather than left to be inferred from an absence of product.
+// agencies that end up with nothing are told as a task fault against each of them,
+// which TestAWarrantServedNothingByAnOverlapSaysSo covers.
 func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 	const seid = 42
 
@@ -728,35 +727,13 @@ func TestOverlappingWarrantsPickTheSameOneEveryTime(t *testing.T) {
 
 	const wantXID = types.XID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	for i := range 50 {
-		task, _, covering, ok := lookupTrigger(tasks, nil, seid)
+		task, _, ok := lookupTrigger(tasks, nil, seid)
 		if !ok {
 			t.Fatalf("pass %d: tasked session did not resolve to a trigger", i)
 		}
 		if task.XID != wantXID {
 			t.Fatalf("pass %d: selected warrant %q, want %q on every packet", i, task.XID, wantXID)
 		}
-		if covering != 3 {
-			t.Fatalf("pass %d: covering = %d, want 3", i, covering)
-		}
-	}
-
-	// And the shipper tells the ADMF, since two of these three warrants are
-	// authorised and receiving nothing.
-	tagged := make([]byte, 0, 9+20)
-	tagged = binary.LittleEndian.AppendUint64(tagged, seid)
-	tagged = append(tagged, farForwardUAndDuplicate)
-	tagged = append(tagged, 0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2)
-
-	rec := &recordingReporter{}
-	s := &liShipper{
-		tasks: tasks, reporter: rec,
-		senders: make(map[string]x2x3.Sender),
-		ids:     x2x3.NewIdentity(testNEID, upfInterceptionPoint),
-	}
-	s.ship(tagged)
-
-	if !slices.Contains(rec.reported(), x1.NEIssueContentTaskOverlap) {
-		t.Errorf("reported = %v, want it to include %s", rec.reported(), x1.NEIssueContentTaskOverlap)
 	}
 }
 
@@ -842,7 +819,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ActivateTask: %v", err)
 	}
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 		t.Fatal("trigger was not installed")
 	}
 
@@ -852,7 +829,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 
 	// The withdrawal itself must still have happened — the acknowledgement above is
 	// what says so, and this is what it says about.
-	if _, _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Error("the task survived its own deactivation")
 	}
 	// Long enough for an asynchronous report to have arrived, had one been sent.

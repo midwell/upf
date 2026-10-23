@@ -201,6 +201,7 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 	if err := sender.Send(&x2x3.PDU{
 		Type:          x2x3.PDUTypeX3,
 		PayloadFormat: x2x3.PayloadFormatIPv4,
+		Direction:     x2x3.DirectionToTarget,
 		Payload:       []byte{0x45, 0x00},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)

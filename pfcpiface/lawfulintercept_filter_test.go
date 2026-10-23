@@ -658,12 +658,12 @@ func TestWithoutADatapathOnlyASessionOnlyTaskIsAttributed(t *testing.T) {
 	session := types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"}
 	tasks.Activate(ccTask("W1", session, types.TargetIdentifier{Type: types.TargetGTPTunnelDirection, Value: x1.GTPDirectionOutbound}))
 
-	if _, _, _, ok := lookupTrigger(tasks, nil, 100); ok {
+	if _, _, ok := lookupTrigger(tasks, nil, 100); ok {
 		t.Error("a task naming the session and a direction was attributed without session state")
 	}
 
 	tasks.Activate(ccTask("W2", session))
-	task, _, _, ok := lookupTrigger(tasks, nil, 100)
+	task, _, ok := lookupTrigger(tasks, nil, 100)
 	if !ok || task.XID != "W2" {
 		t.Errorf("lookupTrigger = %v, %v, want the session-only task W2", task.XID, ok)
 	}

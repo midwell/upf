@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/omec-project/util/li/types"
+	"github.com/omec-project/util/li/x1"
 )
 
 // TestAWorkingTaskReportsNoFault comes first, because a supplier that reports a fault for
@@ -192,5 +193,81 @@ func TestATaskWithACriterionThatDoesNotParseIsLeftOutWhole(t *testing.T) {
 	}
 	if set, ok := parseAll(types.InterceptTask{Targets: []types.TargetIdentifier{good, bad}}); ok {
 		t.Errorf("a task with a criterion that does not parse was kept, narrowed to %d criteria", len(set))
+	}
+}
+
+// hasCondition reports whether a task's fault list carries the named condition, which
+// TaskFault puts at the head of the description.
+func hasCondition(faults []x1.X1Error, condition string) bool {
+	for _, f := range faults {
+		if strings.HasPrefix(f.ErrorDescription, condition+": ") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// TestAWarrantServedNothingByAnOverlapSaysSo: two warrants select one session, and the shipping
+// path delivers each copy under the lowest XID only. The other warrant is authorised and receives
+// none of that session's content, which nothing in the delivered product would show — so it is
+// that warrant, and only that one, that answers with a fault. The fault is a state: once the
+// overlap ends it is no longer answered, which is what lets the task watcher retract it.
+func TestAWarrantServedNothingByAnOverlapSaysSo(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W-b", ueAddr(testUEIPv4))
+	f.activate(t, "W-a", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
+	f.settle(t)
+
+	if task, _, ok := lookupTrigger(f.tasks, f.e, 100); !ok || task.XID != "W-a" {
+		t.Fatalf("the session's content goes to %q, want W-a, so this test would assert the "+
+			"wrong warrant", task.XID)
+	}
+
+	faults := f.e.taskFaults("W-b")
+	if !hasCondition(faults, x1.TaskIssueContentUnderAnotherTask) {
+		t.Fatalf("the warrant receiving none of the session's content answers %+v, so the ADMF "+
+			"is told it is faultless while its product is incomplete", faults)
+	}
+	if len(faults) != 1 {
+		t.Errorf("the overlapping warrant answers %d faults, want only the overlap: %+v", len(faults), faults)
+	}
+	if !strings.Contains(faults[0].ErrorDescription, "1 session(s)") {
+		t.Errorf("the fault does not count the sessions delivered elsewhere: %q", faults[0].ErrorDescription)
+	}
+	if got := f.e.taskFaults("W-a"); len(got) != 0 {
+		t.Errorf("the warrant receiving the content answers %+v; nothing is wrong with it", got)
+	}
+
+	// The warrant ahead of it goes, so the session's content is now W-b's, and the fault with it.
+	f.deactivate(t, "W-a")
+	f.settle(t)
+	if got := f.e.taskFaults("W-b"); hasCondition(got, x1.TaskIssueContentUnderAnotherTask) {
+		t.Errorf("the overlap fault outlived the overlap: %+v", got)
+	}
+}
+
+// TestAnOverlapAndARefusalAreBothAnswered: a warrant whose content goes to another task and whose
+// duplication the datapath could not confirm has two conditions, each with its own ending.
+// Answering only one would leave the other to be discovered only once the first ended.
+func TestAnOverlapAndARefusalAreBothAnswered(t *testing.T) {
+	f := newEnablerFixture(t)
+	f.putSession(t, unmarkedSession(100, testUEIPv4))
+	f.activate(t, "W-b", ueAddr(testUEIPv4))
+	f.activate(t, "W-a", types.TargetIdentifier{Type: types.TargetFSEID, Value: "100"})
+	f.settle(t)
+
+	// The session's rules were written and the write not confirmed, so the record no longer
+	// claims they are duplicating.
+	f.e.farsAttempted(100, []far{{farID: 1, fseID: 100, liDuplicate: true}})
+
+	got := f.e.taskFaults("W-b")
+	if !hasCondition(got, x1.TaskIssueContentUnderAnotherTask) ||
+		!hasCondition(got, x1.TaskIssueDuplicationNotProgrammed) {
+		t.Errorf("W-b answers %+v, want both duplicationNotProgrammed and contentUnderAnotherTask", got)
+	}
+	if got := f.e.taskFaults("W-a"); hasCondition(got, x1.TaskIssueContentUnderAnotherTask) {
+		t.Errorf("W-a receives the content but answers %+v", got)
 	}
 }

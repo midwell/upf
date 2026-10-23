@@ -1558,13 +1558,19 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 		return nil
 	}
 
-	var criteria []criterion
+	// The tasks ahead of this one in the snapshot's XID order are the ones the shipping path
+	// would deliver a session's content under instead — it takes the first covering task.
+	var (
+		criteria []criterion
+		ahead    [][]criterion
+	)
 	for i := range *snapshot {
 		if (*snapshot)[i].task.XID == xid {
 			criteria = (*snapshot)[i].criteria
 
 			break
 		}
+		ahead = append(ahead, (*snapshot)[i].criteria)
 	}
 	if len(criteria) == 0 {
 		return nil
@@ -1574,7 +1580,7 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 	sources := append([]SessionsStore(nil), e.sources...)
 	e.mu.Unlock()
 
-	selecting, undup := 0, 0
+	selecting, undup, elsewhere := 0, 0, 0
 	for _, src := range sources {
 		if src == nil {
 			continue
@@ -1585,6 +1591,9 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 				continue
 			}
 			selecting++
+			if anySelects(ahead, sess) {
+				elsewhere++
+			}
 
 			e.mu.Lock()
 			for farID := range want {
@@ -1596,16 +1605,42 @@ func (e *ccEnabler) resolveTaskFaults(xid types.XID) []x1.X1Error {
 		}
 	}
 
-	switch {
-	case selecting == 0:
+	if selecting == 0 {
 		return []x1.X1Error{x1.TaskFault(x1.TaskIssueNoTrafficSelected,
 			"no session this element holds carries traffic this task selects, so this "+
 				"interception is producing nothing")}
-	case undup > 0:
-		return []x1.X1Error{x1.TaskFault(x1.TaskIssueDuplicationNotProgrammed, fmt.Sprintf(
-			"the datapath is not duplicating %d forwarding rule(s) this task requires, across "+
-				"%d session(s) it selects", undup, selecting))}
 	}
 
-	return nil
+	// Both of the remaining conditions can hold at once, and each is its own state with its own
+	// retraction, so both are answered.
+	var faults []x1.X1Error
+	if undup > 0 {
+		faults = append(faults, x1.TaskFault(x1.TaskIssueDuplicationNotProgrammed, fmt.Sprintf(
+			"the datapath is not duplicating %d forwarding rule(s) this task requires, across "+
+				"%d session(s) it selects", undup, selecting)))
+	}
+	if elsewhere > 0 {
+		faults = append(faults, x1.TaskFault(x1.TaskIssueContentUnderAnotherTask, fmt.Sprintf(
+			"%d session(s) this task selects are delivered under another task", elsewhere)))
+	}
+
+	return faults
+}
+
+// anySelects reports whether any of the criteria sets selects traffic in the session.
+//
+// It is what makes a task's content go elsewhere: the shipping path delivers each copy under
+// the first covering task in XID order, so a session one of the tasks ahead also selects is
+// delivered under that one. Asked per selected session of the task being answered for, so its
+// cost is the tasks ahead of it per session — inside the walk of every session resolveTaskFaults
+// already makes, and paid only when taskFaults' memo has been invalidated.
+func anySelects(sets [][]criterion, sess PFCPSession) bool {
+	one := []PFCPSession{sess}
+	for _, set := range sets {
+		if len(selection(set, one)) > 0 {
+			return true
+		}
+	}
+
+	return false
 }

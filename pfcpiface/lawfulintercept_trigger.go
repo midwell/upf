@@ -64,11 +64,13 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 	// shipping path is not left falling back to the one criterion a bare store lookup
 	// can answer until the first tasking change happens to rebuild it.
 	enabler.setTasks(tasks)
-	// RequireResolvableDIDs is what lets the triggering function find out that this
-	// POI has lost the destination it provisioned — after a restart, say. Accepting
-	// such a trigger would mean duplicating a subject's traffic and discarding every
-	// copy while the triggering function is told interception is running, which is
-	// exactly the failure this refuses. The keepalive procedure reports its own
+	// A trigger naming a destination this POI has lost — after a restart, say — is
+	// refused with 2040 by every element. RequireResolvableDIDs covers the remaining
+	// case, a trigger ordering content that names no destination at all: this POI has
+	// no configured X3 endpoint to serve it from, so it is refused with 3040. Accepting
+	// either would mean duplicating a subject's traffic and discarding every copy while
+	// the triggering function is told interception is running, which is exactly the
+	// failure this refuses. The keepalive procedure reports its own
 	// deactivation to the ADMF (Alert 10000, through the reporter passed to the server):
 	// interception stopping is the safe outcome, but only if somebody is told it
 	// happened.
@@ -359,7 +361,7 @@ func parseKeepaliveTimer(name, v string) (time.Duration, error) {
 }
 
 // lookupTrigger returns the LI_T3 task covering the PFCP session identified by
-// seid, how many tasks cover it in all, and whether any does. The F-SEID is the
+// seid, and whether any does. The F-SEID is the
 // detection criterion the CC-TF sends (TS 33.128 table 6.2.3-7, "PFCP Session
 // ID") and the value the datapath tags onto every duplicated packet, so it is
 // what ties a copy on the wire back to the warrant that authorised taking it.
@@ -374,12 +376,12 @@ func parseKeepaliveTimer(name, v string) (time.Duration, error) {
 // every packet, and store.Match orders by XID precisely so this choice is stable.
 // Picking from a map's iteration order instead — as this did — scattered one
 // session's packets across the covering warrants at random, leaving every agency
-// with a partial stream and none with a usable one. The count is returned so the
-// caller can tell the ADMF that a warrant is being served nothing, which is the
-// part of this compromise that must not stay quiet.
-func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, copyFilter, int, bool) {
+// with a partial stream and none with a usable one. The warrants served nothing are
+// told to the ADMF as a task fault against each of them (resolveTaskFaults), which
+// is the part of this compromise that must not stay quiet.
+func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.InterceptTask, copyFilter, bool) {
 	if tasks == nil || seid == 0 {
-		return types.InterceptTask{}, copyFilter{}, 0, false
+		return types.InterceptTask{}, copyFilter{}, false
 	}
 
 	// A task may be keyed by any of the detection criteria of table 6.2.3-7, most of
@@ -414,8 +416,8 @@ func lookupTrigger(tasks *store.Store, enabler *ccEnabler, seid uint64) (types.I
 		}
 	}
 	if len(matched) == 0 {
-		return types.InterceptTask{}, copyFilter{}, 0, false
+		return types.InterceptTask{}, copyFilter{}, false
 	}
 
-	return matched[0].task, matched[0].filter, len(matched), true
+	return matched[0].task, matched[0].filter, true
 }
