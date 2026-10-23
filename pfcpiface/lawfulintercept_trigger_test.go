@@ -535,6 +535,22 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		// keepalives stopped (fault 9050), then that the tasking was deactivated (Alert 10000).
 		awaitTold(t, admf, x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged)
 	})
+
+	t.Run("an ADMF answering the report does not keep an orphaned trigger alive", func(t *testing.T) {
+		t.Parallel()
+
+		// The real ADMF is alive and answers the 9050 report OK. Over LI_T3 the triggering
+		// function, not this ADMF, plays the ADMF (TS 33.128 clause 5.2.6): its answer says
+		// nothing about the function that installed the trigger, so it must not start the two
+		// hours of TIME_P3 — the e2e run found an orphan still intercepting long after that.
+		tasks, _, admf := keepaliveTaskedReportingTo(t, seid, newAnsweringADMF(t))
+
+		if !awaitPurge(tasks, seid, 10*time.Second) {
+			t.Error("an ADMF's OK kept a trigger alive after the triggering function went quiet: " +
+				"content keeps being intercepted for a warrant no live process holds")
+		}
+		awaitTold(t, admf, x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged)
+	})
 }
 
 // awaitPurge reports whether the trigger for seid is gone from tasks within limit.
@@ -573,6 +589,13 @@ func awaitTold(t *testing.T, admf *recordingADMF, conditions ...string) {
 func keepaliveTasked(t *testing.T, seid uint64) (*store.Store, *x1.Requester, *recordingADMF) {
 	t.Helper()
 
+	return keepaliveTaskedReportingTo(t, seid, newRecordingADMF(t, nil))
+}
+
+// keepaliveTaskedReportingTo is keepaliveTasked with the ADMF the element reports to given.
+func keepaliveTaskedReportingTo(t *testing.T, seid uint64, admf *recordingADMF) (*store.Store, *x1.Requester, *recordingADMF) {
+	t.Helper()
+
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
 	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
@@ -583,11 +606,10 @@ func keepaliveTasked(t *testing.T, seid uint64) (*store.Store, *x1.Requester, *r
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	admf := newRecordingADMF(t, nil)
 	cfg := &LiConfig{
 		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
-		// The shortest the procedure allows. TIME_P1 bounds the wait for an answer to the
-		// 9050 report, which this ADMF never gives.
+		// The shortest the procedure allows. TIME_P1 is the wait after the 9050 report, which
+		// no answer ends at a POI triggered over LI_T3.
 		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
 	}
 

@@ -104,9 +104,11 @@ type LiConfig struct {
 	// quiet by sending keepalives, so it only acts when that function is genuinely gone.
 	//
 	// KeepaliveTimeout is TIME_P2, the silence after which this element reports fault
-	// 9050 (default 1h); KeepaliveTimeP1 bounds the wait for the ADMF's answer to that
-	// report (default 1m), and KeepaliveTimeP3 the wait after an acknowledged report
-	// (default 2h) before tasking is deactivated — unless KeepaliveRetainTasking is set.
+	// 9050 (default 1h), and KeepaliveTimeP1 the wait after that report (default 1m) before
+	// tasking is deactivated — unless KeepaliveRetainTasking is set. There is no TIME_P3
+	// here: over LI_T3 the triggering function plays the ADMF (TS 33.128 clause 5.2.6) and
+	// cannot answer the report, and the real ADMF's answer says nothing about it, so
+	// KeepaliveTimeP3 is refused rather than silently ignored.
 	KeepaliveTimeout       string `json:"keepalive_timeout"`
 	KeepaliveTimeP1        string `json:"keepalive_time_p1"`
 	KeepaliveTimeP3        string `json:"keepalive_time_p3"`

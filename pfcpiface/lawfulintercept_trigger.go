@@ -321,7 +321,12 @@ func keepaliveProcedure(cfg *LiConfig) (*x1.KeepaliveProcedure, error) {
 		timeP2 = cfg.TriggerKeepalive
 	}
 
-	p := x1.KeepaliveProcedure{RetainTasking: cfg.KeepaliveRetainTasking}
+	// This element is triggered over LI_T3, where the triggering function plays the ADMF (TS
+	// 33.128 clause 5.2.6). The reports go to the real ADMF, and its answer says nothing about
+	// whether the triggering function is still there, so no answer starts TIME_P3: an orphaned
+	// trigger is deactivated when TIME_P1 expires. keepalive_time_p3 would never run here and
+	// is refused by Validate below.
+	p := x1.KeepaliveProcedure{RetainTasking: cfg.KeepaliveRetainTasking, TriggeredOverLIT3: true}
 	for _, t := range []struct {
 		name, value string
 		into        *time.Duration
