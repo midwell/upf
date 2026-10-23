@@ -5,8 +5,9 @@ package pfcpiface
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -34,10 +35,12 @@ import (
 // Every certificate in a test must come from this one CA: a second CA would make
 // the peers reject each other on chain validity, which looks nothing like the
 // identity-binding refusals these tests are about.
-func liCA(t *testing.T, dir string) (caPath string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
+func liCA(t *testing.T, dir string) (caPath string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey) {
 	t.Helper()
 
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	// ECDSA rather than RSA: an RSA-2048 key costs ~150 ms to generate under -race, and the LI
+	// tests issue dozens of credentials per run.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("ca key: %v", err)
 	}
@@ -71,10 +74,10 @@ func liCA(t *testing.T, dir string) (caPath string, caCert *x509.Certificate, ca
 // liLeaf issues a certificate from ca binding identifier for the given X1 role.
 // The binding is an annex G subjectAltName URN, one of the two forms clause 8.2.4
 // accepts.
-func liLeaf(t *testing.T, dir string, caCert *x509.Certificate, caKey *rsa.PrivateKey, role, identifier string) (certPath, keyPath string) {
+func liLeaf(t *testing.T, dir string, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, role, identifier string) (certPath, keyPath string) {
 	t.Helper()
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("leaf key: %v", err)
 	}
@@ -105,7 +108,11 @@ func liLeaf(t *testing.T, dir string, caCert *x509.Certificate, caKey *rsa.Priva
 	keyPath = dir + "/" + identifier + ".key"
 
 	writePEM(t, certPath, &pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
-	writePEM(t, keyPath, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("leaf key encoding: %v", err)
+	}
+	writePEM(t, keyPath, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	return certPath, keyPath
 }
@@ -474,7 +481,75 @@ func (r *recordingReporter) described() []string {
 // forgets the triggers it installed, and content intercepted under a trigger
 // nobody can withdraw keeps flowing past the point where the warrant itself is
 // revoked. The fail-safe makes that lapse instead.
+//
+// The two halves run on separate listeners, side by side: one triggering function keeps
+// talking past the point where silence would have purged it, the other goes quiet.
 func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
+	t.Parallel()
+
+	const seid = 4242
+
+	t.Run("keepalives hold the tasking", func(t *testing.T) {
+		t.Parallel()
+
+		tasks, req, _ := keepaliveTasked(t, seid)
+
+		// A keepalive keeps it alive: the fail-safe must not remove tasking merely
+		// because no new session happened to be established. Kept up past TIME_P2 plus
+		// TIME_P1 from the activation (2 s), when silence would already have purged it, so
+		// a keepalive that did not restart TIME_P2 is caught here rather than passing.
+		for range 4 {
+			time.Sleep(600 * time.Millisecond)
+
+			if err := req.Keepalive(); err != nil {
+				t.Fatalf("Keepalive: %v", err)
+			}
+		}
+
+		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+			t.Fatal("tasking was purged while the triggering function was still talking")
+		}
+	})
+
+	t.Run("silence purges the tasking and tells the ADMF", func(t *testing.T) {
+		t.Parallel()
+
+		tasks, _, admf := keepaliveTasked(t, seid)
+
+		// The triggering function goes quiet, as a restarted one does.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+				break
+			}
+
+			time.Sleep(25 * time.Millisecond)
+		}
+
+		if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+			t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
+		}
+
+		// And the ADMF is told, because interception stopping must not be silent: first that
+		// keepalives stopped (fault 9050), then that the tasking was deactivated (Alert 10000).
+		for _, condition := range []string{x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged} {
+			deadline := time.Now().Add(5 * time.Second)
+			for !admf.received(condition) && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if !admf.received(condition) {
+				t.Errorf("the ADMF was not told %s", condition)
+			}
+		}
+	})
+}
+
+// keepaliveTasked starts a trigger listener running the keepalive procedure at its shortest
+// timers, has a triggering function install one trigger for seid on it, and returns the
+// task store, that triggering function's requester and the ADMF the element reports to.
+func keepaliveTasked(t *testing.T, seid uint64) (*store.Store, *x1.Requester, *recordingADMF) {
+	t.Helper()
+
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
 	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
@@ -488,8 +563,8 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	admf := newRecordingADMF(t, nil)
 	cfg := &LiConfig{
 		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
-		// Short enough to observe, long enough that the tasking below lands first. TIME_P1
-		// bounds the wait for an answer to the 9050 report, which this ADMF never gives.
+		// The shortest the procedure allows. TIME_P1 bounds the wait for an answer to the
+		// 9050 report, which this ADMF never gives.
 		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
 	}
 
@@ -503,7 +578,6 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	const seid = 4242
 	req := x1.NewRequester("https://"+cfg.X1Listen, testTFID, testNEID, tfMat.ClientTLS())
 
 	const did = testXIDTertiary
@@ -527,45 +601,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		t.Fatal("trigger was not installed")
 	}
 
-	// A keepalive keeps it alive: the fail-safe must not remove tasking merely
-	// because no new session happened to be established.
-	for range 3 {
-		time.Sleep(600 * time.Millisecond)
-
-		if err := req.Keepalive(); err != nil {
-			t.Fatalf("Keepalive: %v", err)
-		}
-	}
-
-	if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
-		t.Fatal("tasking was purged while the triggering function was still talking")
-	}
-
-	// Now it goes quiet, as a restarted one does.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
-			break
-		}
-
-		time.Sleep(300 * time.Millisecond)
-	}
-
-	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
-		t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
-	}
-
-	// And the ADMF is told, because interception stopping must not be silent: first that
-	// keepalives stopped (fault 9050), then that the tasking was deactivated (Alert 10000).
-	for _, condition := range []string{x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged} {
-		deadline := time.Now().Add(5 * time.Second)
-		for !admf.received(condition) && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-		}
-		if !admf.received(condition) {
-			t.Errorf("the ADMF was not told %s", condition)
-		}
-	}
+	return tasks, req, admf
 }
 
 // TestTheStopReportFollowsTheStop pins the ordering obligation the asynchronous
@@ -581,6 +617,8 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 // Driven through the keepalive fail-safe because that is the removal path that
 // reports, and it exercises the same hook an ordinary withdrawal does.
 func TestTheStopReportFollowsTheStop(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
 	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)
@@ -665,7 +703,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 			break
 		}
 
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 	if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
 		t.Fatal("tasking outlived the triggering function")
@@ -775,6 +813,8 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 // stopped answering is the channel the durability of withdrawal depends on, and an
 // operator who sees it on every normal deactivation learns to ignore it.
 func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	caPath, caCert, caKey := liCA(t, dir)
 	upfCert, upfKey := liLeaf(t, dir, caCert, caKey, "NE", testNEID)

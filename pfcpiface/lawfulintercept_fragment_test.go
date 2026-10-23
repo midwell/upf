@@ -259,6 +259,8 @@ func TestAnExpiredClassificationIsReportedAsLoss(t *testing.T) {
 // session normally does — which is also the shape of an attempt to make this element
 // allocate. Passing it costs visibility rather than silence.
 func TestTheMemoIsBounded(t *testing.T) {
+	t.Parallel()
+
 	var losses int
 	m := newFragmentMemo(func() { losses++ })
 
@@ -281,6 +283,8 @@ func TestTheMemoIsBounded(t *testing.T) {
 // TestTheFragmentMemoIsConcurrent: framing runs four workers deep and they share the cached
 // filter, so they share the memo. Run under -race.
 func TestTheFragmentMemoIsConcurrent(t *testing.T) {
+	t.Parallel()
+
 	f := portFilter(t)
 
 	const workers, each = 8, 200

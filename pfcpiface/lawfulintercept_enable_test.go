@@ -646,6 +646,8 @@ func TestRetaskSkipsUnchangedSessions(t *testing.T) {
 // dropped copy produces no record for anybody to miss — so it could hold for the
 // life of the warrant.
 func TestConcurrentTaskingChangesDoNotLoseAnUpdate(t *testing.T) {
+	t.Parallel()
+
 	for round := range 50 {
 		f := newEnablerFixture(t)
 		// One pass is made slow, so the losing interleaving is reached rather than

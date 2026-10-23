@@ -153,6 +153,8 @@ func TestAPDRThatCannotBeExpandedStillReportsItsResult(t *testing.T) {
 // Asserted at the join, because that is where the guarantee lives: after it returns, no worker of
 // that batch may still write.
 func TestASecondBatchCannotBeOvertakenByTheFirst(t *testing.T) {
+	t.Parallel()
+
 	b := &bess{}
 
 	var (
