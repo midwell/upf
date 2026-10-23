@@ -483,16 +483,18 @@ func (r *recordingReporter) described() []string {
 // revoked. The fail-safe makes that lapse instead.
 //
 // The two halves run on separate listeners, side by side: one triggering function keeps
-// talking past the point where silence would have purged it, the other goes quiet.
+// talking past the point where silence would have purged it and then goes quiet, so the
+// keepalives are shown to restart the fail-safe rather than disarm it; the other is quiet
+// from the start.
 func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 	t.Parallel()
 
 	const seid = 4242
 
-	t.Run("keepalives hold the tasking", func(t *testing.T) {
+	t.Run("keepalives hold the tasking until they stop", func(t *testing.T) {
 		t.Parallel()
 
-		tasks, req, _ := keepaliveTasked(t, seid)
+		tasks, req, admf := keepaliveTasked(t, seid)
 
 		// A keepalive keeps it alive: the fail-safe must not remove tasking merely
 		// because no new session happened to be established. Kept up past TIME_P2 plus
@@ -509,6 +511,14 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
 			t.Fatal("tasking was purged while the triggering function was still talking")
 		}
+
+		// And then stops, as a triggering function that restarts does. The keepalives
+		// restarted the fail-safe; they must not have disarmed it.
+		if !awaitPurge(tasks, seid, 10*time.Second) {
+			t.Error("tasking outlived a triggering function that had kept it alive and then went " +
+				"quiet: the keepalives disarmed the fail-safe instead of restarting it")
+		}
+		awaitTold(t, admf, x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged)
 	})
 
 	t.Run("silence purges the tasking and tells the ADMF", func(t *testing.T) {
@@ -517,31 +527,44 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		tasks, _, admf := keepaliveTasked(t, seid)
 
 		// The triggering function goes quiet, as a restarted one does.
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
-				break
-			}
-
-			time.Sleep(25 * time.Millisecond)
-		}
-
-		if _, _, ok := lookupTrigger(tasks, nil, seid); ok {
+		if !awaitPurge(tasks, seid, 10*time.Second) {
 			t.Error("tasking outlived the triggering function; content would keep being intercepted with nobody able to withdraw it")
 		}
 
 		// And the ADMF is told, because interception stopping must not be silent: first that
 		// keepalives stopped (fault 9050), then that the tasking was deactivated (Alert 10000).
-		for _, condition := range []string{x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged} {
-			deadline := time.Now().Add(5 * time.Second)
-			for !admf.received(condition) && time.Now().Before(deadline) {
-				time.Sleep(50 * time.Millisecond)
-			}
-			if !admf.received(condition) {
-				t.Errorf("the ADMF was not told %s", condition)
-			}
-		}
+		awaitTold(t, admf, x1.NEIssueKeepalivesMissing, x1.NEIssueTaskingPurged)
 	})
+}
+
+// awaitPurge reports whether the trigger for seid is gone from tasks within limit.
+func awaitPurge(tasks *store.Store, seid uint64, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if _, _, ok := lookupTrigger(tasks, nil, seid); !ok {
+			return true
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	_, _, ok := lookupTrigger(tasks, nil, seid)
+	return !ok
+}
+
+// awaitTold fails t unless admf receives each of conditions, each within five seconds.
+func awaitTold(t *testing.T, admf *recordingADMF, conditions ...string) {
+	t.Helper()
+
+	for _, condition := range conditions {
+		deadline := time.Now().Add(5 * time.Second)
+		for !admf.received(condition) && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !admf.received(condition) {
+			t.Errorf("the ADMF was not told %s", condition)
+		}
+	}
 }
 
 // keepaliveTasked starts a trigger listener running the keepalive procedure at its shortest
