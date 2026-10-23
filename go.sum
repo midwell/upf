@@ -12,8 +12,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/libp2p/go-reuseport v0.4.0 h1:nR5KU7hD0WxXCJbmw7r2rhRYruNRl2koHw8fQscQm2s=
 github.com/libp2p/go-reuseport v0.4.0/go.mod h1:ZtI03j/wO5hZVDFo2jKywN6bYKWLOy8Se6DrI2E1cLU=
-github.com/midwell/util v0.0.0-20261023125629-2b329e1d455c h1:wu+msg7X0x9jH0BB5CH2Ce7rheqO7jzHBUioXcWdsh8=
-github.com/midwell/util v0.0.0-20261023125629-2b329e1d455c/go.mod h1:dqj9TrTvn1A1RH/Iw2nhOdBnuA1cAduuuzfmIjy5M1I=
+github.com/midwell/util v0.0.0-20261023180626-bc6bf3a9199a h1:T8u8pd0fhBKbSLN3AJ++2M747U+Q/KqtAj7j1pROFSA=
+github.com/midwell/util v0.0.0-20261023180626-bc6bf3a9199a/go.mod h1:dqj9TrTvn1A1RH/Iw2nhOdBnuA1cAduuuzfmIjy5M1I=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/omec-project/pfcpsim v1.5.8 h1:EGl2IFzna6BGzY9xsJzZXG27YIxbUQQkc5/s0js/JxA=
