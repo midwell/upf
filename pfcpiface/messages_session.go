@@ -5,8 +5,10 @@ package pfcpiface
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/omec-project/upf-epc/logger"
 	"github.com/wmnsk/go-pfcp/ie"
@@ -101,6 +103,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			pConn.nodeID.localIE,
 			ie.NewCause(cause),
 		)
+		seres.FailedRuleID = failedRuleID(err)
 
 		return seres, errProcess(err)
 	}
@@ -210,6 +213,21 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		addQERs = append(addQERs, q)
 	}
 
+	// URRs are measured and reported by this agent, not written to the datapath. A
+	// UPF that does not report usage ignores them, as it always has.
+	if upf.enableUsageReporting {
+		now := time.Now()
+
+		for _, cURR := range sereq.CreateURR {
+			var u urr
+			if u, _, err = parseURR(cURR, true); err != nil {
+				return errProcessReply(err, refusalCause(err))
+			}
+
+			session.CreateURR(u, now)
+		}
+	}
+
 	session.MarkSessionQer(session.qers)
 	// TODO: since PacketForwardingRules doesn't store pointers,
 	//  we must also mark session QERs in addQERs.
@@ -262,6 +280,10 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			// rule the rollback did not remove may still match it. Holding it is the
 			// cheaper failure.
 			stored = true
+
+			// It is kept for its rules, and holds no URRs: the establishment was refused,
+			// so no usage is reported for it.
+			session.urrs = nil
 
 			err = pConn.store.PutSession(session)
 			if err != nil {
@@ -389,12 +411,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		logger.PfcpLog.Errorln(err)
 
 		smres := message.NewSessionModificationResponse(0, /* MO?? <-- what's this */
-			0,                                    /* FO <-- what's this? */
-			remoteSEID,                           /* seid */
-			smreq.SequenceNumber,                 /* seq # */
-			0,                                    /* priority */
-			ie.NewCause(ie.CauseRequestRejected), /* accept it blindly for the time being */
+			0,                    /* FO <-- what's this? */
+			remoteSEID,           /* seid */
+			smreq.SequenceNumber, /* seq # */
+			0,                    /* priority */
+			ie.NewCause(refusalCause(err)),
 		)
+		smres.FailedRuleID = failedRuleID(err)
 
 		return smres, err
 	}
@@ -452,6 +475,20 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 			ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)), ErrAssocReleasing
 	}
 
+	// A query asks for usage reports in the response (clause 5.2.2.3.1), which this UPF
+	// does not send. HasQAURR reads flags it cannot read as unset, so they are read first.
+	if upf.enableUsageReporting {
+		if smreq.PFCPSMReqFlags != nil {
+			if _, err := smreq.PFCPSMReqFlags.PFCPSMReqFlags(); err != nil {
+				return sendError(fmt.Errorf("could not read PFCPSMReq-Flags: %w", err))
+			}
+		}
+
+		if len(smreq.QueryURR) > 0 || smreq.PFCPSMReqFlags != nil && smreq.PFCPSMReqFlags.HasQAURR() {
+			return sendError(errQueryNotSupported)
+		}
+	}
+
 	addPDRs := make([]pdr, 0, MaxItems)
 	addFARs := make([]far, 0, MaxItems)
 	addQERs := make([]qer, 0, MaxItems)
@@ -492,6 +529,31 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 		session.CreateQER(q)
 		addQERs = append(addQERs, q)
+	}
+
+	now := time.Now()
+
+	if upf.enableUsageReporting {
+		for _, cURR := range smreq.CreateURR {
+			u, _, err := parseURR(cURR, true)
+			if err != nil {
+				return sendError(err)
+			}
+
+			session.CreateURR(u, now)
+		}
+
+		for _, uURR := range smreq.UpdateURR {
+			u, has, err := parseURR(uURR, false)
+			if err != nil {
+				return sendError(err)
+			}
+
+			if err = session.UpdateURR(u, has, now); err != nil {
+				logger.PfcpLog.Errorln("session URR update failed", err)
+				continue
+			}
+		}
 	}
 
 	// Everything appended so far was created by this message and did not exist before
@@ -745,6 +807,21 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		delQERs = append(delQERs, *q)
 	}
 
+	if upf.enableUsageReporting {
+		for _, rURR := range smreq.RemoveURR {
+			urrID, err := rURR.URRID()
+			if err != nil {
+				return sendError(err)
+			}
+
+			if _, err = session.RemoveURR(urrID); err != nil {
+				return sendError(err)
+			}
+		}
+
+		session.stopUnfedMetering(now)
+	}
+
 	deleted := PacketForwardingRules{
 		pdrs: delPDRs,
 		fars: delFARs,
@@ -814,6 +891,15 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 	sdreq, ok := msg.(*message.SessionDeletionRequest)
 	if !ok {
 		return nil, errUnmarshal(errMsgUnexpectedType)
+	}
+
+	// A retransmission of a request this association answered: the session is gone.
+	deletion := deletionKey{localSEID: sdreq.SEID(), seq: sdreq.SequenceNumber}
+	if rsp, answered := pConn.deletions.get(deletion, time.Now()); answered {
+		logger.PfcpLog.Debugln("answering a retransmitted Session Deletion Request for session",
+			deletion.localSEID, "with its response")
+
+		return rsp, nil
 	}
 
 	// Zero until the session is found. The lookup's own refusal is answered separately
@@ -900,6 +986,8 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 		0,                                    /* priority */
 		ie.NewCause(ie.CauseRequestAccepted), /* accept it blindly for the time being */
 	)
+
+	pConn.deletions.put(deletion, smres, time.Now())
 
 	return smres, nil
 }
@@ -1062,6 +1150,39 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 		pConn.RemoveSession(sessItem)
 
 		return nil
+	}
+
+	return nil
+}
+
+// errQueryNotSupported is a query for usage reports in the Session Modification Response,
+// which this UPF does not send.
+var errQueryNotSupported = errors.New("query URR not supported by this UPF")
+
+// refusalCause is the cause a refused session message is answered with: "Rule
+// creation/modification Failure" for a URR this UPF cannot store and apply as provisioned
+// (clauses 6.3.2.3 and 6.3.3.3), "Service not supported" for a query for usage reports
+// (clause 8.2.1), "Request rejected" otherwise.
+func refusalCause(err error) uint8 {
+	var urr *urrNotActedOn
+
+	switch {
+	case errors.As(err, &urr):
+		return ie.CauseRuleCreationModificationFailure
+	case errors.Is(err, errQueryNotSupported):
+		return ie.CauseServiceNotSupported
+	default:
+		return ie.CauseRequestRejected
+	}
+}
+
+// failedRuleID names the rule a refusal with "Rule creation/modification Failure" failed
+// on, which the response then carries (Tables 7.5.3.1-1 and 7.5.5.1-1); nil for any other
+// refusal.
+func failedRuleID(err error) *ie.IE {
+	var urr *urrNotActedOn
+	if errors.As(err, &urr) {
+		return ie.NewFailedRuleID(ie.RuleIDTypeURR, urr.urrID)
 	}
 
 	return nil

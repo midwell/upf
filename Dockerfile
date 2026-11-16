@@ -139,14 +139,6 @@ RUN python3 -m venv /opt/bess/venv && \
     /opt/bess/venv/bin/pip check
 RUN ln -s /opt/bess/bessctl/bessctl /bin
 
-# UPF-specific runtime dependencies. BESS runtime packages are installed from
-# bess/env/runtime-deps.yml above, which is also used by BESS host installs.
-RUN apt-get update && apt-get install -y \
-    --no-install-recommends \
-    build-essential \
-    pkg-config && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 # NOTE: Copy the entire directory rather than individual library files because:
 # - BESS and DPDK install their runtime libraries into /usr/local/lib/x86_64-linux-gnu/
 # - The exact set of required shared objects may change between DPDK/BESS releases
@@ -183,33 +175,49 @@ ENV PYTHONPATH="/opt/bess"
 WORKDIR /opt/bess/bessctl
 ENTRYPOINT ["bessd", "-f"]
 
+# Go BESS bindings (`make pb`, committed in pfcpiface/bess_pb) come from a
+# pinned toolchain: protoc from the protoc-go stage, and protoc-gen-go and
+# protoc-gen-go-grpc from the protoc-gen stage. Changing any of these
+# versions changes the generated code; regenerate with `make pb` and commit
+# the result. CI (.github/workflows/go-pb-drift.yml) fails if the committed
+# bindings differ from what `make pb` produces.
+
 # Stage protoc-go: pinned Protocol Buffers compiler for Go binding generation.
 # BESS itself continues to build with Ubuntu's system protoc from bess-build.
 FROM ubuntu:26.04@sha256:f3d28607ddd78734bb7f71f117f3c6706c666b8b76cbff7c9ff6e5718d46ff64 AS protoc-go
+ARG TARGETARCH
 ARG PROTOC_RELEASE=33.0
 ARG PROTOC_CLI_VERSION=33.0
-ARG PROTOC_SHA256=d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f
-RUN apt-get update && \
+ARG PROTOC_SHA256_AMD64=d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f
+ARG PROTOC_SHA256_ARM64=4b96bc91f8b54d829b8c3ca2207ff1ceb774843321e4fa5a68502faece584272
+# The generated code doesn't depend on the build host's architecture, so arm64
+# hosts can run `make pb` natively with protoc's aarch_64 release.
+RUN case "${TARGETARCH:-amd64}" in \
+        amd64) protoc_arch=x86_64 protoc_sha256="${PROTOC_SHA256_AMD64}" ;; \
+        arm64) protoc_arch=aarch_64 protoc_sha256="${PROTOC_SHA256_ARM64}" ;; \
+        *) echo "unsupported architecture: ${TARGETARCH}" >&2 && exit 1 ;; \
+    esac && \
+    apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl unzip && \
     curl --fail --location --silent --show-error \
         --output /tmp/protoc.zip \
-        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_RELEASE}/protoc-${PROTOC_RELEASE}-linux-x86_64.zip" && \
-    printf '%s  %s\n' "${PROTOC_SHA256}" /tmp/protoc.zip > /tmp/protoc.sha256 && \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_RELEASE}/protoc-${PROTOC_RELEASE}-linux-${protoc_arch}.zip" && \
+    printf '%s  %s\n' "${protoc_sha256}" /tmp/protoc.zip > /tmp/protoc.sha256 && \
     sha256sum --check --strict /tmp/protoc.sha256 && \
     unzip -q /tmp/protoc.zip -d /opt/protoc && \
     test "$(/opt/protoc/bin/protoc --version)" = "libprotoc ${PROTOC_CLI_VERSION}" && \
     rm -rf /var/lib/apt/lists/* /tmp/protoc.zip /tmp/protoc.sha256
 
-# Stage protoc-gen: Go protobuf plugins. See #1227 for generated binding
-# refresh and drift-check coverage.
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS protoc-gen
+# Stage protoc-gen: pinned Go protobuf plugins.
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS protoc-gen
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10 && \
     go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
-FROM bess-build AS go-pb
+# Stage go-pb: Go bindings for the BESS protobufs. It needs only the .proto
+# files, not a BESS build, so `make pb` and the CI drift check stay fast.
+FROM protoc-gen AS go-pb
 COPY --from=protoc-go /opt/protoc /opt/protoc
-COPY --from=protoc-gen /go/bin/protoc-gen-go /bin
-COPY --from=protoc-gen /go/bin/protoc-gen-go-grpc /bin
+COPY bess/protobuf /protobuf
 
 RUN mkdir /bess_pb && \
     /opt/protoc/bin/protoc -I /opt/protoc/include -I /protobuf/ \
@@ -233,25 +241,41 @@ RUN mkdir /bess_pb && \
     --python_out=/bess_pb \
     --grpc_python_out=/bess_pb
 
-FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS pfcp-build
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS pfcp-build
 ARG GOFLAGS
 WORKDIR /pfcpiface
 
-COPY go.mod /pfcpiface/go.mod
-COPY go.sum /pfcpiface/go.sum
+COPY go.mod go.sum ./
+# Vendor mode (GOFLAGS=-mod=vendor, see docs/developer-guide.md) builds from the
+# vendor tree and may use local `replace` paths that don't exist in the image,
+# so modules must not be downloaded.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    case "$GOFLAGS" in \
+      *-mod=vendor*) ;; \
+      *) go mod download ;; \
+    esac
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN if echo "$GOFLAGS" | grep -Eq "-mod=vendor"; then go mod download; fi
-
-COPY . /pfcpiface
-RUN go mod tidy && \
-    CGO_ENABLED=0 go build $GOFLAGS -o /bin/pfcpiface ./cmd/pfcpiface
+# Only the packages cmd/pfcpiface imports, so unrelated changes (bess/, docs/,
+# tests) don't invalidate the build cache. The wildcard makes vendor/ optional.
+COPY vendor* vendor/
+COPY cmd/ cmd/
+COPY logger/ logger/
+COPY pfcpiface/ pfcpiface/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" $GOFLAGS -o /bin/pfcpiface ./cmd/pfcpiface
 
 # Stage pfcp: runtime image of pfcp agent towards SMF
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS pfcp
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS pfcp
+
+# Unprivileged user (uid 1000) available for deployments that opt in with
+# runAsUser. The image defaults to root because pfcpiface connects to unix
+# sockets that bessd (root) creates in a shared volume; those sockets are not
+# writable by other users, so the whole pod must switch users together.
+RUN addgroup -S -g 1000 aether && adduser -S -u 1000 -G aether aether
 
 COPY conf /opt/bess/bessctl/conf
-COPY --from=pfcp-build /bin/pfcpiface /bin
+COPY --chmod=755 --from=pfcp-build /bin/pfcpiface /bin
 
 # Build arguments for dynamic labels
 ARG VERSION=dev
@@ -275,7 +299,7 @@ ENTRYPOINT [ "/bin/pfcpiface" ]
 
 # Stage pb: dummy stage for collecting protobufs
 FROM scratch AS pb
-COPY --from=bess-build /protobuf /protobuf
+COPY --from=go-pb /protobuf /protobuf
 COPY --from=go-pb /bess_pb /bess_pb
 
 # Stage ptf-pb: dummy stage for collecting python protobufs

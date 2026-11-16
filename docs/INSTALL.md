@@ -21,7 +21,8 @@ Copyright 2019 Intel Corporation
 
 You need the following dependencies.
 
-* Docker CE >= 19.03
+* Docker CE >= 20.10 with BuildKit (the Makefile enables it by default via
+  `DOCKER_BUILDKIT=1`)
   - [Here](https://docs.docker.com/engine/install/ubuntu/) are the installation
     instructions on Ubuntu, or find the installation instructions for the Linux
     flavor you are using
@@ -371,7 +372,7 @@ To display the ASCII pipeline, do:
 docker exec bess ./bessctl show pipeline > pipeline.txt
 ```
 
-To observe the pipeline in GUI visit [http://[hostip]:8000](http://[hostip]:8000)
+To observe the pipeline in GUI visit `http://[hostip]:8000`
 
 To drop into BESS shell
 

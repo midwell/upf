@@ -24,7 +24,7 @@ repos:
             bess/bin/dpdk-devbind\.py
           )
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v14.0.0
+    rev: v20.1.8
     hooks:
       - id: clang-format
         types_or: [c, c++, proto]
@@ -36,6 +36,9 @@ repos:
         entry: gci write
         language: golang
         types: [go]
+        # Generated code stays as the generator wrote it (see #1227); the
+        # same files are excluded from golangci-lint's formatters.
+        exclude: \.pb\.go$
         additional_dependencies:
           - github.com/daixiang0/gci@v0.14.0
       - id: staticcheck
@@ -60,6 +63,12 @@ repos:
     rev: v0.21.0
     hooks:
       - id: yamlfmt
+  - repo: https://github.com/lycheeverse/lychee
+    rev: lychee-v0.24.2
+    hooks:
+      - id: lychee
+        files: \.md$
+        args: [-vv, --exclude, 'aether5g-project\.slack\.com', --exclude, 'trex-tgn\.cisco\.com']
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -69,6 +78,11 @@ repos:
       - id: trailing-whitespace
         args:
           - --markdown-linebreak-ext=md
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.15.1
+    hooks:
+      - id: hadolint
+        args: [--ignore, DL3008, --ignore, DL3018]
   - repo: https://codeberg.org/fsfe/reuse-tool
     rev: v6.2.0
     hooks:
