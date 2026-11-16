@@ -26,9 +26,9 @@ import (
 // matters most, because neither is mandatory and both fail unsafely.
 //
 // **Scoped to the `li` object, deliberately.** Passing DisallowUnknownFields over the whole
-// configuration would refuse upstream keys this fork does not model, which is a different and much
-// larger change: the fork tracks an upstream that adds fields, and a deployment carrying one would
-// stop starting. The property to hold is narrow — a mistyped LI key must not reach a default — and
+// configuration would refuse keys this version does not model, which is a different and much
+// larger change: configuration keys are added over time, and a deployment carrying a newer one
+// would stop starting. The property to hold is narrow — a mistyped LI key must not reach a default — and
 // so is the check.
 func strictLiBlock(jsonData []byte) error {
 	// Only the top level, so that no key outside `li` is ever presented to the strict decode.

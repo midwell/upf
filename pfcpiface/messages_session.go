@@ -1140,11 +1140,10 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 				ErrOperationFailedWithParam("delete session from datapath", "seid", seid))
 		}
 
-		// The address goes back only once the datapath has confirmed the delete, so it
-		// cannot be reissued while a PDR still matches it. It preceded the delete while
-		// this site forgot the session first; now that the record is dropped after the
-		// confirmation, the release belongs after it too -- the same order the deletion
-		// path uses.
+		// The address goes back only once the datapath has answered the delete, the same
+		// order the deletion path uses, so a refused delete does not reissue an address a
+		// PDR still matches. A delete that timed out is answered as accepted (see
+		// SendMsgToUPF), so it releases the address too.
 		upf.ippool.Release(seid)
 
 		pConn.RemoveSession(sessItem)

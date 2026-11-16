@@ -14,4 +14,3 @@ dpdk-hugepages.py
 dictionary.dic
 venv/
 ptf/log/
-CLAUDE.md

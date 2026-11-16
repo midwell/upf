@@ -423,13 +423,13 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 	}
 
 	t.Run("a key outside the li block is still tolerated", func(t *testing.T) {
-		// The scope of the check, asserted rather than assumed. This fork tracks an upstream that
-		// adds configuration keys; if strictness leaked past the li object, the next upstream
-		// field would stop every deployment carrying it from starting.
+		// The scope of the check, asserted rather than assumed. Configuration keys are added
+		// over time; if strictness leaked past the li object, a configuration written for a newer
+		// version would stop starting.
 		path := t.TempDir() + "/conf.jsonc"
 		mustWriteStringToDisk(`{
 			"mode": "dpdk",
-			"a_key_this_fork_does_not_model": 1,
+			"a_key_this_version_does_not_model": 1,
 			"li": {
 				"x3_sockaddr": "/pod-share/x3",
 				"cert": "/li/upf.crt",
@@ -442,8 +442,8 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 		}`, path)
 
 		if _, err := LoadConfigFile(path); err != nil {
-			t.Fatalf("an unmodelled key outside the li block was refused, which would stop this "+
-				"fork starting on the next upstream field: %v", err)
+			t.Fatalf("an unmodelled key outside the li block was refused, which would stop a "+
+				"configuration written for a newer version from starting: %v", err)
 		}
 	})
 

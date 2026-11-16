@@ -139,8 +139,8 @@ func TestAPDRThatCannotBeExpandedStillReportsItsResult(t *testing.T) {
 	}
 }
 
-// TestASecondBatchCannotBeOvertakenByTheFirst is the ordering half, and it is the one this fork
-// needs rather than upstream.
+// TestASecondBatchCannotBeOvertakenByTheFirst is the ordering half, which lawful interception
+// depends on.
 //
 // A tasking pass and the session path both push the same FAR. They are ordered against each other
 // by the element, and that ordering only means anything if a batch's writes have actually landed

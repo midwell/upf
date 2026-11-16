@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Forsway Scandinavia AB
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2026 Forsway Scandinavia AB
 
 package pfcpiface
 

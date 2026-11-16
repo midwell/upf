@@ -401,8 +401,8 @@ func LoadConfigFile(filepath string) (Conf, error) {
 		return Conf{}, err
 	}
 
-	// The decode above is upstream's and stays lenient — this fork must keep starting when
-	// upstream adds a key it does not model. The LI object is held to a stricter standard, on
+	// The decode above stays lenient, so a configuration carrying a key this version does not
+	// model still starts. The LI object is held to a stricter standard, on
 	// its own, because a key dropped there lands on a default that fails unsafely and says
 	// nothing: see strictLiBlock.
 	//
