@@ -215,7 +215,7 @@ func TestAnUnconfirmedDuplicationFARIsRetriedAndReported(t *testing.T) {
 // TestAnUnconfirmedFARDoesNotChangeWhatTheJoinIsTold pins both halves of the split at the
 // level below, because they are separately revertible.
 //
-// addFAR must go on telling GRPCJoin the write succeeded -- that is upstream's contract and
+// addFAR must go on telling GRPCJoin the write succeeded -- that is the join's contract and
 // the reason an uncertain batch is not rejected -- while the batch separately records that
 // it could not be confirmed. A change that made the worker report failure instead would
 // pass the second assertion and break the first, which is precisely the regression this

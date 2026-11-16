@@ -279,10 +279,10 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		// a worker per attempt, each holding the session stores it was given.
 		enabler.stop()
 		// And clear it, or every subsequent session establishment runs applyTasking
-		// against a stopped enabler and queues requests nothing will ever serve. Benign
-		// today because the queue is bounded and the worker is gone, but the field is
-		// what tells the session path there is an interception plane to consult:
-		// leaving it set says yes when the answer is no.
+		// against a stopped enabler and asks for passes nothing will ever serve. Such a
+		// request is a counter bump with no worker behind it, but the field is what tells
+		// the session path there is an interception plane to consult: leaving it set says
+		// yes when the answer is no.
 		if u != nil {
 			u.ccEnabler = nil
 		}

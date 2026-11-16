@@ -85,7 +85,7 @@ func TestLawfulInterceptDuplicateFAR(t *testing.T) {
 	assertFARAction(t, "CC warrant active", uplinkFARID, bessForwardUAndDuplicate)
 	assertFARAction(t, "CC warrant active", downlinkFARID, bessForwardDAndDuplicate)
 	// The subscriber's own traffic must be unaffected on the wire. The downlink
-	// one is the case that mattered: an undefined PDU type here crashed the RAN.
+	// one is where it matters: the RAN reads this value as the PDU type.
 	assertFARPduType(t, "CC warrant active", uplinkFARID, bessForwardU)
 	assertFARPduType(t, "CC warrant active", downlinkFARID, bessForwardD)
 	// Duplication must not add, remove, or reshape any other session state.
@@ -143,8 +143,8 @@ func assertFARAction(t *testing.T, when string, farID uint32, want uint8) {
 
 // assertFARPduType checks that whatever the FAR is doing, the value GtpuEncap
 // turns into the GTP-U PDU Session Container PDU Type stays one of the two the
-// wire format defines. A duplication value here reaches the RAN as an undefined
-// PDU type, which crashed it.
+// wire format defines for downlink and uplink. A duplication value here would
+// reach the RAN as a PDU type that does not exist.
 func assertFARPduType(t *testing.T, when string, farID uint32, want uint8) {
 	t.Helper()
 

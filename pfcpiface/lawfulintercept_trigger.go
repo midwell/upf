@@ -91,9 +91,9 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// invisible everywhere else: a dropped copy produces no record for anybody to miss.
 		x1.WithFaultProbes(probes...),
 		// And the same knowledge at destination scope, for the triggering function that asks
-		// about one destination rather than about this element. Without it the answer was
-		// activeAndWorking unconditionally, while this element was reporting the same
-		// endpoint unreachable over ReportDestinationIssue — and a CC-POI is the element
+		// about one destination rather than about this element. Without it the answer would be
+		// activeAndWorking unconditionally, while this element reports the same endpoint
+		// unreachable over ReportDestinationIssue — and a CC-POI is the element
 		// where that matters most, since a dropped copy leaves no record anywhere else for
 		// the discrepancy to show up in.
 		x1.WithDestinationReachability(unreachable),

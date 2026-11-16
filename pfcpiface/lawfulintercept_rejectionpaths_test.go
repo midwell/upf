@@ -31,7 +31,7 @@ type liRefusingDP struct {
 	mu     sync.Mutex
 	refuse bool
 	// refuseDelete refuses only deletion batches, so a modification's write can be
-	// accepted and its deletion stage refused -- the branch upstream's rollback runs on.
+	// accepted and its deletion stage refused -- the branch the modification handler's rollback runs on.
 	refuseDelete bool
 	// unconfirmed models the third answer: the datapath applied nothing it refused, but
 	// could not say whether it applied what it accepted. Every other fake here is
@@ -39,7 +39,7 @@ type liRefusingDP struct {
 	// complete produces.
 	unconfirmed bool
 	// unfinishedDelete makes every deletion batch report that it did not finish, as one that
-	// ran out of time does: the answer upstream's establishment rollback stores the session on.
+	// ran out of time does: the answer on which the establishment rollback stores the session.
 	unfinishedDelete bool
 	methods          []upfMsgType
 	// duplicating is what this datapath believes it is duplicating, keyed by FAR ID. It is
@@ -450,6 +450,9 @@ func TestARefusedLocalDeleteKeepsItsRecord(t *testing.T) {
 	const seid = 401
 
 	sess := liStoredSession(seid, "10.250.0.13")
+	// RemoveSession reads the session's metrics, so without them a delete that ran in the
+	// wrong order would panic rather than fail.
+	sess.metrics = &metrics.Session{}
 	if err := pConn.store.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}

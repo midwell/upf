@@ -142,7 +142,7 @@ func (f *enablerFixture) putSession(t *testing.T, s PFCPSession) {
 
 // derive runs the first half of a PFCP session establishment: duplication is
 // re-derived for the session and the rules the handler is about to push are
-// programmed. The session is deliberately not stored — messages_session.go:182
+// programmed. The session is deliberately not stored — handleSessionEstablishmentRequest
 // stores it afterwards, and the interval between the two is where the
 // reproductions below act.
 func (f *enablerFixture) derive(s *PFCPSession) {
@@ -160,8 +160,8 @@ func (f *enablerFixture) derive(s *PFCPSession) {
 
 // deriveModification is the same first half for a session modification: the SMF
 // restates rules, duplication is re-derived over them, and only the changed
-// subset reaches the datapath. messages_session.go:386 orders it exactly as :182
-// does, so it leaves the same interval open — but on a session the store already
+// subset reaches the datapath. handleSessionModificationRequest orders it exactly as
+// the establishment handler does, so it leaves the same interval open — but on a session the store already
 // holds, which is the half a rule keyed on absence would miss.
 func (f *enablerFixture) deriveModification(s *PFCPSession) {
 	// A separate slice, as the handler has: it accumulates the FARs it parsed from

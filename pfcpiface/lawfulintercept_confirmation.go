@@ -31,7 +31,7 @@ import (
 // time to confirm or to keep the fault standing.
 //
 // The flag rides on the batch's own context so that the workers' `done` contract and
-// GRPCJoin stay exactly as upstream wrote them: this adds a second, out-of-band answer
+// GRPCJoin keep the contract every other caller relies on: this adds a second, out-of-band answer
 // rather than changing the one they already give.
 type batchConfirmation struct {
 	unconfirmed atomic.Bool
@@ -59,8 +59,8 @@ func noteUnconfirmed(ctx context.Context) {
 // confirmingDatapath is the optional half of the datapath contract: a datapath that can
 // distinguish a write it saw acknowledged from one it merely failed to have refused.
 //
-// Optional, and deliberately not part of the datapath interface, which stays exactly as
-// upstream defines it -- this is a lawful-interception concern and every other caller is
+// Optional, and deliberately not part of the datapath interface, which keeps the
+// contract every other caller relies on -- this is a lawful-interception concern and every other caller is
 // served by the cause alone. A datapath that does not implement it is taken at its word.
 type confirmingDatapath interface {
 	sendMsgToUPFConfirmed(

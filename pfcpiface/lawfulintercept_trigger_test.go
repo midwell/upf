@@ -949,7 +949,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 }
 
 // correlationBytes is the correlation value as it reaches the numbering context: the
-// same big-endian encoding shipPDU puts in x2x3.PDU.CorrelationID. Written once so a
+// same big-endian encoding shipperPDU puts in x2x3.PDU.CorrelationID. Written once so a
 // test cannot assert against a context the element never numbers under.
 func correlationBytes(v uint64) [x2x3.CorrelationIDLength]byte {
 	var corr [x2x3.CorrelationIDLength]byte

@@ -264,7 +264,7 @@ func (b *bess) SendMsgToUPFWithCompletion(
 // "currently unable to collect traffic but not terminating".
 //
 // So the confirmation travels beside the join rather than through it: GRPCJoin, the
-// workers' done contract and the cause logic are exactly as upstream wrote them.
+// workers' done contract and the cause logic keep the contract every other caller relies on.
 func (b *bess) sendMsgToUPFConfirmed(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) (uint8, bool) {
@@ -1675,7 +1675,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		// li: an RPC that did not complete is not a refusal, and upstream deliberately
+		// An RPC that did not complete is not a refusal, and the join deliberately
 		// reports the rule as programmed so that an uncertain result cannot reject the
 		// batch. The interception record must not inherit that -- see
 		// lawfulintercept_confirmation.go -- so it is noted beside the join, leaving what
@@ -1727,7 +1727,7 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 			return
 		}
 
-		// li: as in addFAR. A delete this element cannot confirm must not be recorded as
+		// As in addFAR: a delete this element cannot confirm must not be recorded as
 		// done either -- the duplication may still be running.
 		if err = b.processFAR(ctx, arg, upfMsgTypeDel); err != nil {
 			if refused(err) {

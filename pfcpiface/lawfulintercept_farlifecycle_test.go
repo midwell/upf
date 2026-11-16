@@ -9,7 +9,7 @@ import (
 	"github.com/omec-project/util/li/types"
 )
 
-// modifiedSession is the session with one FAR removed, as a session modification carrying a
+// withoutFAR is the session with one FAR removed, as a session modification carrying a
 // RemoveFAR leaves it.
 func withoutFAR(s PFCPSession, farID uint32) PFCPSession {
 	out := s

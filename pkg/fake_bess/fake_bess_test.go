@@ -148,7 +148,7 @@ func TestTheTablesCanBeReadWhileTheyAreBeingProgrammed(t *testing.T) {
 }
 
 // TestAFarWithTheWrongValueCountIsRefused: the datapath refuses a FAR whose value count is not
-// farLookup's, and the fake does too, so an agent writing the old six-value layout fails here
+// farLookup's, and the fake does too, so an agent writing a six-value FAR fails here
 // as it would against BESS.
 func TestAFarWithTheWrongValueCountIsRefused(t *testing.T) {
 	b := NewFakeBESS()

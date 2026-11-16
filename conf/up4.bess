@@ -295,7 +295,7 @@ gtpuEncap:0 -> gtpuEncapFail::Sink()
 # A target session's FAR carries the PFCP DUPL apply-action; the PFCP agent marks
 # that session's packets with a forward-and-duplicate action instead of a plain
 # forward. Each packet is teed: copy 0 continues to the subscriber (uplink/downlink
-# preserved), copy 1 is tagged with the F-SEID and the FAR action and pushed to a
+# preserved), copy 1 is tagged with the F-SEID and the forwarding action and pushed to a
 # userspace socket where the Go LI X3 shipper frames it per ETSI TS 103 221-2 and
 # delivers it to the MDF3. Built entirely from stock BESS modules (Replicate /
 # GenericEncap / UnixSocketPort) — no datapath C++ changes.
@@ -312,11 +312,11 @@ li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
 # bytes. Overridable so a deployment expecting heavy targets can raise it.
 LI_EGRESS_QUEUE_PACKETS = int(os.getenv('LI_EGRESS_QUEUE_PACKETS', '16384'))
 liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
-# Prepend the F-SEID (correlation) and the FAR action to each LI copy. The action
-# byte lets the Go X3 shipper tell the downlink copy (teed after GTP-U encap, so a
-# GTP-U packet toward the target) from the uplink copy (decapsulated inner packet
-# from the target) and set the X3 payload format + direction accordingly. Field
-# order is [fseid(8)][action(1)], then the packet.
+# Prepend the F-SEID (correlation) and the forwarding action (fwd_action) to each
+# LI copy. The action byte lets the Go X3 shipper tell the downlink copy (teed
+# after GTP-U encap, so a GTP-U packet toward the target) from the uplink copy
+# (decapsulated inner packet from the target) and set the X3 payload format and
+# direction accordingly. Field order is [fseid(8)][fwd_action(1)], then the packet.
 #
 # These sizes are named once and used by the encap, the subscriber-side decap and
 # nothing else, so the tag cannot come off at a different width than it went on.
@@ -331,7 +331,7 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # branch, which looks roundabout but is the point: Replicate emits the original
 # packet on gate 0 and a bess::Packet::copy() on the others, and that copy
 # duplicates only the packet data — the per-packet metadata area is not carried
-# over. A GenericEncap reading 'fseid'/'action' downstream of the tee therefore
+# over. A GenericEncap reading 'fseid'/'fwd_action' downstream of the tee therefore
 # reads an uninitialised metadata area and tags every copy with a zero
 # correlation, which is silent: interception keeps running and its product is
 # simply not joinable to the signalling. Encapping first puts the
@@ -341,6 +341,7 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # forward tail still needs it: FlowMeasure keys its per-session volume off those
 # attributes, so handing the subscriber the metadata-less copy instead would stop
 # a tasked subscriber's usage being measured correctly.
+#
 # Buffer the duplicated copies inside the datapath before handing them to the
 # userspace shipper.
 #

@@ -32,7 +32,7 @@ func TestTheLocalDeleteKeepsWhatTheDatapathStillHolds(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pool.LookupOrAllocIP(seid); err != nil {
+			if _, err = pool.LookupOrAllocIP(seid); err != nil {
 				t.Fatal(err)
 			}
 
@@ -52,7 +52,7 @@ func TestTheLocalDeleteKeepsWhatTheDatapathStillHolds(t *testing.T) {
 			}
 			sess := liStoredSession(seid, "10.250.0.14")
 			sess.metrics = &metrics.Session{}
-			if err := pConn.store.PutSession(sess); err != nil {
+			if err = pConn.store.PutSession(sess); err != nil {
 				t.Fatal(err)
 			}
 

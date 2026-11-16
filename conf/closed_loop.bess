@@ -301,31 +301,31 @@ packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
 # ====================================================
 #       Lawful Intercept content egress (X3)
 # ====================================================
-# A target session's FAR carries the PFCP DUPL apply-action; the PFCP agent
-# marks that session's packets with a forward-and-duplicate action instead of a
-# plain forward. Each packet is teed: copy 0 continues to the subscriber
-# (uplink/downlink preserved), copy 1 is tagged with the F-SEID and pushed to a
-# userspace socket where the Go LI X3 shipper frames it per ETSI TS 103 221-2
-# and delivers it to the MDF3. Built entirely from stock BESS modules
-# (Replicate / GenericEncap / UnixSocketPort) — no datapath C++ changes.
+# A target session's FAR carries the PFCP DUPL apply-action; the PFCP agent marks
+# that session's packets with a forward-and-duplicate action instead of a plain
+# forward. Each packet is teed: copy 0 continues to the subscriber (uplink/downlink
+# preserved), copy 1 is tagged with the F-SEID and the forwarding action and pushed to a
+# userspace socket where the Go LI X3 shipper frames it per ETSI TS 103 221-2 and
+# delivers it to the MDF3. Built entirely from stock BESS modules (Replicate /
+# GenericEncap / UnixSocketPort) — no datapath C++ changes.
 #
 # The tee sits at the forwarding stage, downstream of QER policing
 # (appQERLookup/sessionQERLookup run earlier), so the subscriber's traffic is
-# metered exactly once and the duplicate is not double-counted. Copy 0 is wired
-# in the downlink/uplink sections below, where it joins the very same forward
-# tail as the plain forward action — including the post-QoS FlowMeasure when
-# flow-based volume measurement is enabled — so a tasked subscriber's usage is
-# measured exactly as an untasked one's is.
+# metered exactly once and the duplicate is not double-counted. Copy 0 is wired in
+# the downlink/uplink sections below, where it joins the very same forward tail as
+# the plain forward action — including the post-QoS FlowMeasure when flow-based
+# volume measurement is enabled — so a tasked subscriber's usage is measured
+# exactly as an untasked one's is.
 li_x3_path = os.getenv('LI_X3_SOCKET_PATH', '/tmp/li_x3')
 # Depth of the in-datapath buffer in front of the egress socket. Packets, not
 # bytes. Overridable so a deployment expecting heavy targets can raise it.
 LI_EGRESS_QUEUE_PACKETS = int(os.getenv('LI_EGRESS_QUEUE_PACKETS', '16384'))
 liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
-# Prepend the F-SEID (correlation) and the FAR action to each LI copy. The action
-# byte lets the Go X3 shipper tell the downlink copy (teed after GTP-U encap, so a
-# GTP-U packet toward the target) from the uplink copy (decapsulated inner IP from
-# the target) and set the X3 payload format + direction accordingly. Field order is
-# [fseid(8)][action(1)], then the packet.
+# Prepend the F-SEID (correlation) and the forwarding action (fwd_action) to each
+# LI copy. The action byte lets the Go X3 shipper tell the downlink copy (teed
+# after GTP-U encap, so a GTP-U packet toward the target) from the uplink copy
+# (decapsulated inner packet from the target) and set the X3 payload format and
+# direction accordingly. Field order is [fseid(8)][fwd_action(1)], then the packet.
 #
 # These sizes are named once and used by the encap, the subscriber-side decap and
 # nothing else, so the tag cannot come off at a different width than it went on.
@@ -335,14 +335,22 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 LI_TAG_FSEID_BYTES = 8
 LI_TAG_ACTION_BYTES = 1
 LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
-# The tag is applied BEFORE the tee and removed again on the subscriber's branch.
-# Replicate emits the original packet on gate 0 and a bess::Packet::copy() on the
-# others, and that copy carries only packet data — the per-packet metadata area is
-# not duplicated, so a GenericEncap reading 'fseid'/'action' after the tee tags
-# every copy with a zero correlation. Encapping first puts the
-# correlation in packet data, which copy() does duplicate. The subscriber keeps
-# gate 0 (the original, metadata intact) because the forward tail still needs
-# those attributes for volume measurement.
+#
+# The tag is applied BEFORE the tee, and taken off again on the subscriber's
+# branch, which looks roundabout but is the point: Replicate emits the original
+# packet on gate 0 and a bess::Packet::copy() on the others, and that copy
+# duplicates only the packet data — the per-packet metadata area is not carried
+# over. A GenericEncap reading 'fseid'/'fwd_action' downstream of the tee therefore
+# reads an uninitialised metadata area and tags every copy with a zero
+# correlation, which is silent: interception keeps running and its product is
+# simply not joinable to the signalling. Encapping first puts the
+# correlation in packet *data*, which copy() does duplicate.
+#
+# The subscriber keeps gate 0 — the original packet, metadata intact — because the
+# forward tail still needs it: FlowMeasure keys its per-session volume off those
+# attributes, so handing the subscriber the metadata-less copy instead would stop
+# a tasked subscriber's usage being measured correctly.
+#
 # Buffer the duplicated copies inside the datapath before handing them to the
 # userspace shipper.
 #
