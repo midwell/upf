@@ -526,12 +526,25 @@ func (e *exactMatchModule) HandleRequest(cmd string, arg *anypb.Any) (err error)
 	return nil
 }
 
+// farLookupValues is the number of values farLookup declares in conf/up4.bess and
+// conf/closed_loop.bess: action, tunnel type, the tunnel's source and destination addresses,
+// its TEID and port, and fwd_action.
+const farLookupValues = 7
+
 func (e *exactMatchModule) handleAddEntry(arg *anypb.Any) error {
 	log := logger.BessLog.With("module", e.Name(), "cmd", addCmd)
 
 	em := &bess_pb.ExactMatchCommandAddArg{}
 	if err := arg.UnmarshalTo(em); err != nil {
 		return err
+	}
+
+	// BESS's ExactMatch refuses a rule whose value count is not the table's, so an agent
+	// and a pipeline that disagree on the FAR layout fail every insertion. The fake does
+	// the same, rather than storing a rule UnmarshalFar cannot read.
+	if e.Name() == farLookupModuleName && len(em.GetValues()) != farLookupValues {
+		return status.Errorf(codes.InvalidArgument,
+			"rule has incorrect number of values. Need %d, has %d", farLookupValues, len(em.GetValues()))
 	}
 
 	var existing *bess_pb.ExactMatchCommandAddArg

@@ -146,3 +146,35 @@ func TestTheTablesCanBeReadWhileTheyAreBeingProgrammed(t *testing.T) {
 		}
 	}
 }
+
+// TestAFarWithTheWrongValueCountIsRefused: the datapath refuses a FAR whose value count is not
+// farLookup's, and the fake does too, so an agent writing the old six-value layout fails here
+// as it would against BESS.
+func TestAFarWithTheWrongValueCountIsRefused(t *testing.T) {
+	b := NewFakeBESS()
+
+	add := func(em *bess_pb.ExactMatchCommandAddArg) error {
+		arg, err := anypb.New(em)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = b.service.ModuleCommand(context.Background(), &bess_pb.CommandRequest{
+			Name: farLookupModuleName, Cmd: addCmd, Arg: arg,
+		})
+
+		return err
+	}
+
+	if err := add(farAddArg(0)); err != nil {
+		t.Fatalf("a seven-value FAR was refused: %v", err)
+	}
+
+	six := farAddArg(0)
+	six.Values = six.Values[:6]
+	if err := add(six); err == nil {
+		t.Error("a six-value FAR was accepted")
+	}
+	if n := len(b.GetFarTableEntries()); n != 1 {
+		t.Errorf("%d FARs stored, want the one accepted", n)
+	}
+}
