@@ -159,9 +159,13 @@ func rejectionConnDescribed(t *testing.T) (*PFCPConn, *liRefusingDP, *ccEnabler,
 		described []string
 	)
 
-	e := newCCEnabler(tasks, confirmedPush(func(all, updated PacketForwardingRules) uint8 {
-		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
-	}), func(issueType, description string) {
+	// The enabler's own passes push through the same confirmation the handlers see, as in
+	// production. With a push that confirmed every accepted write, the pass a handler asks for
+	// recorded as duplicating a write the datapath never acknowledged, whenever it ran after
+	// the handler's own record.
+	e := newCCEnabler(tasks, func(all, updated PacketForwardingRules) (uint8, bool) {
+		return dp.sendMsgToUPFConfirmed(upfMsgTypeMod, all, updated)
+	}, func(issueType, description string) {
 		mu.Lock()
 		defer mu.Unlock()
 
