@@ -118,20 +118,20 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 // exists because without it the second of the two configuration fields is never observed
 // to reach the element at all.
 //
-// The two are carried by one call taking both, and their conditions are inverted with
-// respect to each other. So an element wired with the same field twice — the mistake that
-// call is shaped to invite — behaves correctly for bulk deactivation and ignores the
-// operator entirely for bulk removal, and every other test here passes.
+// The two are carried by one call taking both. So an element wired with the same field
+// twice — the mistake that call is shaped to invite — reads the other field's unset value
+// for bulk removal, performs the removal the operator disabled, and every other test here
+// passes.
 func TestBulkRemovalFollowsConfiguration(t *testing.T) {
-	yes := true
+	no := false
 
 	cases := []struct {
 		name        string
 		configured  *bool
 		wantRefusal bool
 	}{
-		{name: "agreed permitted", configured: &yes, wantRefusal: false},
-		{name: "no agreement in advance", configured: nil, wantRefusal: true},
+		{name: "agreed disabled", configured: &no, wantRefusal: true},
+		{name: "no agreement in advance", configured: nil, wantRefusal: false},
 	}
 
 	for _, c := range cases {
@@ -176,14 +176,14 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 
 			if !c.wantRefusal {
 				if strings.Contains(body, "errorCode") {
-					t.Fatalf("the configured permission did not reach the element: %s", body)
+					t.Fatalf("want the standard's default — bulk removal performed — got %s", body)
 				}
 
 				return
 			}
 
 			if !strings.Contains(body, "<ns1:errorCode>8020</ns1:errorCode>") {
-				t.Errorf("want the standard's default — bulk removal refused with 8020 — got %s", body)
+				t.Errorf("want the specification's 8020 for a disabled RemoveAllDestinations, got %s", body)
 			}
 		})
 	}

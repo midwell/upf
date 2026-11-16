@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/libp2p/go-reuseport v0.4.0
 	github.com/omec-project/pfcpsim v1.5.9
-	github.com/omec-project/util v1.9.2
+	github.com/omec-project/util v1.10.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/wmnsk/go-pfcp v0.0.24
@@ -28,5 +28,3 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e // indirect
 )
-
-replace github.com/omec-project/util => github.com/midwell/util v0.0.0-20261023180626-bc6bf3a9199a

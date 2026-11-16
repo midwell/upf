@@ -147,8 +147,8 @@ type LiConfig struct {
 	// removal of all its destinations.
 	//
 	// Both are tri-state. Unset — the pointer is nil — is "no agreement in advance",
-	// the standard's own phrase, and yields the standard's own defaults: bulk
-	// deactivation performed, bulk destination removal refused. They are pointers
+	// the standard's own phrase, and yields the standard's own default for both: the
+	// bulk operation is performed (TS 103 221-1 clauses 6.2.4 and 6.3.4). They are pointers
 	// rather than plain bools so that "the operator said false" is a state distinct
 	// from "the operator said nothing".
 	//
