@@ -62,7 +62,8 @@ func portFilter(t *testing.T) copyFilter {
 	return f
 }
 
-// TestEveryFragmentOfAnAuthorisedDatagramIsDelivered is the finding.
+// TestEveryFragmentOfAnAuthorisedDatagramIsDelivered: a selected datagram is copied whole, not
+// only its first fragment.
 //
 // A fragmented IPv4 datagram carries its transport header in the first fragment only, so
 // every fragment after the first had no ports to read: the copy was dropped. An agency

@@ -90,14 +90,13 @@ func TestAnUnconfirmedDatapathWriteIsNotCountedAsProgrammed(t *testing.T) {
 	}
 }
 
-// TestAnAcceptedDatapathWriteStaysAccepted is 1.4, the non-LI regression guard: the
+// TestAnAcceptedDatapathWriteStaysAccepted is the regression guard outside LI: the
 // success path must return exactly what it returned before, because the session
 // handlers consume this value to decide whether to answer the SMF with a refusal.
 //
 // An empty batch is the one shape that reaches the success path without a datapath:
 // no calls are made, so nothing can fail, and the value returned is the initialised
-// one. That is what makes it the right guard — it pins that the change did not move
-// the default.
+// one. That is what makes it the right guard — it pins the default.
 func TestAnAcceptedDatapathWriteStaysAccepted(t *testing.T) {
 	b := bessWithNoDatapath(t)
 

@@ -98,7 +98,7 @@ type liPuntMonitor struct {
 }
 
 // startLIPuntMonitor begins comparing the LI egress accounting. It is silent when
-// no reporting channel is configured, because the finding it produces has nowhere
+// no reporting channel is configured, because what it detects has nowhere
 // else it may legitimately go — a general log is exactly where it must not appear.
 func startLIPuntMonitor(client bessCounters, reporter neIssueReporter) {
 	if client == nil || reporter == nil {

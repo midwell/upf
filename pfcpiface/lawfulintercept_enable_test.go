@@ -347,7 +347,7 @@ func TestEnablementDoesNotTouchOtherSubscribers(t *testing.T) {
 	}
 }
 
-// TestDuplicationSurvivesSessionModification is the R22 failure mode. The SMF owns
+// TestDuplicationSurvivesSessionModification: a modification must not end duplication. The SMF owns
 // PFCP session state and its modifications carry its own view of each FAR, which
 // does not include duplication it never asked for. Losing the flip there ends the
 // interception mid-session, with nothing logged and the triggering function never

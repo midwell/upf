@@ -207,7 +207,7 @@ func programmedFor(e *ccEnabler, seid uint64, farID uint32) (bool, bool) {
 // TestARefusedModificationRecordsWhatItPushed drives the real handler rather than calling
 // the recorder directly.
 //
-// That distinction is the finding. The existing coverage called the recorder by hand, so it passes
+// That distinction matters. The earlier coverage called the recorder by hand, so it passes
 // with three of the four call sites missing — which is exactly what happened: the remedy was added
 // to the deletion stage, with a comment explaining why, and the branch that reaches the datapath
 // first was never given it.
@@ -520,7 +520,7 @@ func TestAbandonedDuplicationIsReportedOnlyWhenSomethingWasDuplicating(t *testin
 // failure with the rest of the batch still in flight. The warrant is withdrawn. Duplication must
 // stop.
 //
-// Before this change the element could reach a state where it never stopped: the refusal left the
+// The element could once reach a state where it never stopped: the refusal left the
 // record saying "not duplicating" while the datapath duplicated, and `transact` skips any FAR
 // whose record already equals what the tasking implies. The element computed "nothing should
 // duplicate", saw its record agreeing, and did nothing — for ever. `everDuplicated` bounds that,

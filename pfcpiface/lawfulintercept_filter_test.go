@@ -478,7 +478,7 @@ func shipperOver(f *enablerFixture, rec *recordingReporter) *liShipper {
 	}
 }
 
-// TestFilteredCopyIsNotAFault is the distinction group 5 exists for. A copy the
+// TestFilteredCopyIsNotAFault separates a filtered copy from lost content. A copy the
 // criteria do not select was never authorised to be taken, so discarding it is
 // correct behaviour — not lost content. Reporting it would manufacture delivery
 // faults out of every narrow warrant, and would bury the reports that mean

@@ -189,7 +189,7 @@ func TestPuntMonitorNeedsAReportingChannel(t *testing.T) {
 	startLIPuntMonitor(nil, &recordingReporter{})
 }
 
-// TestPuntMonitorSeesTheQueuesOwnDiscards is the finding: the monitor was blind to the one
+// TestPuntMonitorSeesTheQueuesOwnDiscards: the monitor was once blind to the one
 // condition it exists to detect.
 //
 // It compared what the module upstream of the egress port handed on against what the port

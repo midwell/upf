@@ -211,7 +211,7 @@ else:
 # values only because farForwardDAction=0 and farForwardUAction=1 happen to equal
 # the two valid PDU types. Routing duplication through that same attribute put 5
 # and 6 on the wire as PDU types that do not exist, and the RAN segfaulted parsing
-# them (review R30). 'action' therefore keeps the stock 0-4 values that GtpuEncap
+# them. 'action' therefore keeps the stock 0-4 values that GtpuEncap
 # needs, and duplication is signalled out of band on 'fwd_action'.
 executeFAR::Split(size=1, attribute='fwd_action')
 _in = executeFAR
@@ -334,14 +334,13 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # over. A GenericEncap reading 'fseid'/'action' downstream of the tee therefore
 # reads an uninitialised metadata area and tags every copy with a zero
 # correlation, which is silent: interception keeps running and its product is
-# simply not joinable to the signalling (review R28). Encapping first puts the
+# simply not joinable to the signalling. Encapping first puts the
 # correlation in packet *data*, which copy() does duplicate.
 #
 # The subscriber keeps gate 0 — the original packet, metadata intact — because the
 # forward tail still needs it: FlowMeasure keys its per-session volume off those
 # attributes, so handing the subscriber the metadata-less copy instead would stop
-# a tasked subscriber's usage being measured correctly. That is the same class of
-# fault as R24 and equally detectable.
+# a tasked subscriber's usage being measured correctly.
 # Buffer the duplicated copies inside the datapath before handing them to the
 # userspace shipper.
 #
@@ -350,7 +349,7 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # holds net.unix.max_dgram_qlen datagrams — 10 by default — and no reader can be
 # scheduled part-way through a batch, so any batch arriving on a non-empty queue
 # loses packets by arithmetic. What is lost is intercept product, and nothing
-# downstream can recover or even see it (review R36).
+# downstream can recover or even see it.
 #
 # A Queue turns that into elastic buffering with its own drain task, and its
 # overflow is counted where a failed socket write is not. Sized for a burst rather

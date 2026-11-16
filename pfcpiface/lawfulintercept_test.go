@@ -95,8 +95,8 @@ func TestParseFARDuplicateIsSilent(t *testing.T) {
 //
 // BESS's GtpuEncap reuses "action" as the GTP-U PDU Session Container PDU Type,
 // where only 0 (downlink) and 1 (uplink) exist. Putting a duplication value there
-// shipped an undefined PDU type to the RAN, which segfaulted parsing it (review
-// type). The duplication variants therefore belong on fwd_action alone, and the
+// shipped an undefined PDU type to the RAN, which segfaulted parsing it. The
+// duplication variants therefore belong on fwd_action alone, and the
 // second half of this table is the regression guard for that.
 func TestSetFwdActionValueDuplicate(t *testing.T) {
 	b := &bess{}

@@ -100,10 +100,9 @@ func TestAConfirmedWriteIsNotRewritten(t *testing.T) {
 	}
 }
 
-// The protection that must survive the change above. A rule this element ever turned on is
-// never trusted-to-be-off again, whatever the record says — that is what keeps a subscriber
-// from being copied under no authority, and recording an unconfirmed write as "off" must
-// not have weakened it.
+// A rule this element ever turned on is never trusted-to-be-off again, whatever the record
+// says — that is what keeps a subscriber from being copied under no authority, and recording
+// an unconfirmed write as "off" must not have weakened it.
 func TestAnEverDuplicatedFARIsStillTurnedOffWhateverTheRecordSays(t *testing.T) {
 	f := newEnablerFixture(t)
 	sess := unmarkedSession(102, "10.250.0.11")
@@ -196,7 +195,7 @@ func TestAnUnconfirmedWriteWithoutDuplicationIsNotReported(t *testing.T) {
 	}
 }
 
-// The over-collection protection this change must not have weakened. Recording an
+// The over-collection protection. Recording an
 // unconfirmed write as "off" is only safe because everDuplicated still carries what was
 // *intended* — that set is what makes transact distrust a record claiming "off" for a rule
 // this element once turned on, and it is the reason the datapath cannot be left duplicating
@@ -256,7 +255,7 @@ func TestAnUnconfirmedWriteIsVisibleToAnInterrogation(t *testing.T) {
 	faults := f.e.taskFaults("W1")
 	if len(faults) == 0 {
 		t.Fatal("the element answered that the task is faultless after a write it could not " +
-			"confirm — which is the false-health answer the whole change exists to remove")
+			"confirm — which is a false-health answer")
 	}
 	if got := faults[0].ErrorDescription; !strings.HasPrefix(got, x1.TaskIssueDuplicationNotProgrammed+":") {
 		t.Errorf("fault = %q, want one scoped %q", got, x1.TaskIssueDuplicationNotProgrammed)

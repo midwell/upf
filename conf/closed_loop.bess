@@ -214,7 +214,7 @@ else:
 # values only because farForwardDAction=0 and farForwardUAction=1 happen to equal
 # the two valid PDU types. Routing duplication through that same attribute put 5
 # and 6 on the wire as PDU types that do not exist, and the RAN segfaulted parsing
-# them (review R30). 'action' therefore keeps the stock 0-4 values that GtpuEncap
+# them. 'action' therefore keeps the stock 0-4 values that GtpuEncap
 # needs, and duplication is signalled out of band on 'fwd_action'.
 executeFAR::Split(size=1, attribute='fwd_action')
 _in = executeFAR
@@ -339,7 +339,7 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # Replicate emits the original packet on gate 0 and a bess::Packet::copy() on the
 # others, and that copy carries only packet data — the per-packet metadata area is
 # not duplicated, so a GenericEncap reading 'fseid'/'action' after the tee tags
-# every copy with a zero correlation (review R28). Encapping first puts the
+# every copy with a zero correlation. Encapping first puts the
 # correlation in packet data, which copy() does duplicate. The subscriber keeps
 # gate 0 (the original, metadata intact) because the forward tail still needs
 # those attributes for volume measurement.
@@ -351,7 +351,7 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # holds net.unix.max_dgram_qlen datagrams — 10 by default — and no reader can be
 # scheduled part-way through a batch, so any batch arriving on a non-empty queue
 # loses packets by arithmetic. What is lost is intercept product, and nothing
-# downstream can recover or even see it (review R36).
+# downstream can recover or even see it.
 #
 # A Queue turns that into elastic buffering with its own drain task, and its
 # overflow is counted where a failed socket write is not. Sized for a burst rather

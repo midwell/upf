@@ -151,8 +151,8 @@ func TestAPassDoesNotReAddAFARTheSMFRemoved(t *testing.T) {
 	}
 }
 
-// TestDuplicationPushedBeforeAFailedRemovalIsStillWithdrawable is the second failure 13.2
-// names, and it is over-collection.
+// TestDuplicationPushedBeforeAFailedRemovalIsStillWithdrawable covers a refused modification
+// that leaves duplication running, which is over-collection.
 //
 // The modification handler pushes its created and updated rules to the datapath first and
 // processes the removals second. A failure in that removal stage returns a rejection — before

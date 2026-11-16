@@ -226,7 +226,8 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 		"the shipper's clients are not running the configured mechanism", n)
 }
 
-// TestAnUnusableLIBlockDoesNotStopTheUserPlane is B1 on this element.
+// TestAnUnusableLIBlockDoesNotStopTheUserPlane: a mistake in the `li` block must not stop the
+// user plane.
 //
 // validateConf used to refuse every unusable `li` field, and its error reaches
 // logger.InitLog.Fatalln in cmd/pfcpiface/main.go — so a mistyped optional LI value
