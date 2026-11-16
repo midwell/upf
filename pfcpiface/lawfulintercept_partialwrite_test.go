@@ -24,9 +24,9 @@ import (
 // unreachability: a healthy mediation function reported unreachable would have the watcher
 // raise a fault about a working peer and retract it on the next send.
 //
-// This element wired both of its hooks — the delivery one and the keepalive's — as a bare
-// nudge, so the error was discarded and the watcher then sampled a destination it correctly
-// considered reachable. The loss was reported by nothing at all.
+// If both hooks — the delivery one and the keepalive's — were a bare nudge, the error would be
+// discarded and the watcher would sample a destination it correctly considers reachable. The
+// loss would be reported by nothing at all.
 //
 // The transport that produces the error is tested where it lives, in li/x2x3's partial-write
 // suite, which drives a real socket. What this element does with it is this hook.

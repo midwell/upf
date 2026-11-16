@@ -73,7 +73,7 @@ type confirmingDatapath interface {
 //
 // Only the BESS datapath can tell the two apart. Any other -- the test fakes, and any
 // datapath added later -- is taken at its word, so an accepted batch counts as confirmed
-// and every caller keeps the behaviour it had before this existed.
+// and every caller behaves as it would with SendMsgToUPF alone.
 func (u *upf) sendDuplicationWrite(
 	method upfMsgType, all, updated PacketForwardingRules,
 ) (uint8, bool) {

@@ -40,15 +40,16 @@ import (
 // of failing closed here is that this is not discoverable from the outside.
 // Nothing is logged — that this NE can be tasked at all must not appear in a
 // general operator log.
-// probes are the conditions this element can be asked about — the shipper's, since the
-// knowledge is the shipper's. They are passed in rather than built here because this
-// function owns the interface and not the delivery.
+//
+// The probes are the conditions this element can be asked about. They are the
+// shipper's, since the knowledge is the shipper's, and are passed in rather than
+// built here because this function owns the interface and not the delivery.
 func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssueReporter,
 	enabler *ccEnabler, ids *x2x3.Identity, onTasking func(),
 	unreachable func(addr string) bool, probes ...x1.FaultProbe,
 ) (*store.Store, error) {
-	// Parse the keepalive timers before anything is bound. Doing it afterwards left
-	// a listener accepting and applying tasking into a store this function had
+	// Parse the keepalive timers before anything is bound. Doing it afterwards would
+	// leave a listener accepting and applying tasking into a store this function had
 	// already abandoned by returning an error — an element that looks un-tasked to
 	// its operator while quietly holding warrants.
 	keepalive, err := keepaliveProcedure(cfg)
@@ -105,8 +106,8 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// removal all change what this datapath must duplicate, and all of them are
 		// answered the same way — by re-deriving duplication from the tasking that
 		// remains. The triggering function may also change a task's products or its
-		// criteria without touching its targets, which the previous pair of hooks
-		// could not express and so did not report at all.
+		// criteria without touching its targets, and that change arrives through
+		// this hook too.
 		x1.OnTaskChange(func(prev, next *types.InterceptTask) {
 			// Whatever duplication the tasking requires now, and only that.
 			//
@@ -142,7 +143,7 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			}
 			// A removal runs before the purge report below, and interception stopping
 			// is the outcome being reported — so it must actually have stopped.
-			// Re-derivation happens on the enabler's worker now, so asking is not
+			// Re-derivation happens on the enabler's worker, so asking is not
 			// stopping: this waits for the pass it asked for, or the report would be a
 			// lie in exactly the window it matters.
 			enabler.retaskAndWait()
@@ -153,11 +154,11 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 			// IRI-POI. The triggering function allocates one task per (warrant, session,
 			// UPF) and gives them all the warrant's ProductID, which is what travels on
 			// the wire as the XID, so several live tasks share it. Releasing by XID when
-			// one PDU session ends therefore restarts the numbering of every other
-			// session that warrant is still intercepting at this element — measured as a
-			// sibling session's next xCC numbered 0 where it should have been 3.
+			// one PDU session ends would therefore restart the numbering of every other
+			// session that warrant is still intercepting at this element — a sibling
+			// session's next xCC numbered 0 where it should be 3.
 			//
-			// That is worse than the leak it was written to prevent. A sequence number is
+			// That would be worse than the leak releasing prevents. A sequence number is
 			// how a mediation function detects loss, so numbering that resets under a
 			// live context makes this element emit a sequence the receiver must read as
 			// duplication or as a gap: the loss signal forged by the state that governs
@@ -193,9 +194,8 @@ func startTriggerListener(cfg *LiConfig, serverTLS *tls.Config, reporter neIssue
 		// refusal by holding the triggering interface open for the duration of a POST
 		// to a peer that may itself be unreachable turns a refused request into a
 		// stalled X1 channel, and makes this element's response time depend on whether
-		// the ADMF is up. The AMF and SMF have honoured this contract since it was
-		// written; this element did not, which is what NotifyAsync now settles in one
-		// place for all three.
+		// the ADMF is up. NotifyAsync keeps that contract in one place for the AMF,
+		// the SMF and this element.
 		x1.OnAuthFailure(func(code int) {
 			if reporter != nil {
 				reporter.NotifyAsync(x1.NEIssueX1AuthFailed,

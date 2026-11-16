@@ -56,13 +56,13 @@ type bessCounters interface {
 // port, in preference order.
 //
 // Whichever is *adjacent* to the port is the right one to compare against. A pipeline that
-// buffers copies has the queue there; one that does not has the merge. Accepting both means
-// the accounting keeps working when the datapath configuration and this binary are not
-// upgraded in lockstep — which is not hypothetical, since they ship in different images.
+// buffers copies has the queue there; one that does not has the merge. The shipped
+// configurations buffer, and accepting the merge as well keeps the accounting working for a
+// pipeline that leaves the queue out.
 //
 // **The comparison is sound for a merge and structurally blind for a queue**, and the
-// preference order puts the queue first, so it was blind in the configuration this element
-// actually runs. The reasoning it rested on — packets between the stage and the port "are
+// preference order puts the queue first, so on its own it is blind in the shipped
+// configurations. The reasoning it would rest on — packets between the stage and the port "are
 // either sent or discarded, never in flight" — is true of a merge and false of a queue: a
 // queue discards on *enqueue*, and its output-gate accounting counts packets *dequeued*
 // toward the port. So during sustained overflow the two counters agree exactly and the
@@ -127,9 +127,9 @@ func (m *liPuntMonitor) check() {
 	m.checkQueueDrops()
 
 	// **Downstream first.** The two reads are not atomic, so traffic passing between them
-	// lands on whichever side is read second. Reading the port last made a busy egress
-	// legitimately report sent > handed, which the branch below then took for a datapath
-	// restart and used to clear the loss baseline — turning ordinary traffic into a reason to
+	// lands on whichever side is read second. Reading the port last would make a busy egress
+	// legitimately report sent > handed, which the branch below would take for a datapath
+	// restart and clear the loss baseline — turning ordinary traffic into a reason to
 	// forget a real gap. Read in this order the same traffic makes the comparison
 	// conservative: `handed` is at least as current as `sent`, so the difference errs toward
 	// under-reporting rather than toward a false restart.
@@ -146,7 +146,7 @@ func (m *liPuntMonitor) check() {
 	// The port cannot have sent more than it was given; if it appears to have, the
 	// counters were read across a datapath restart and the comparison is
 	// meaningless rather than reassuring. With the reads in the order above, ordinary
-	// traffic no longer produces this.
+	// traffic does not produce this.
 	if sent > handed {
 		m.lost = 0
 

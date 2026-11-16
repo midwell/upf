@@ -164,10 +164,10 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		return err
 	}
 
-	// The reporter is built before anything that can fail needs it. It used to be
-	// built after the datapath socket was dialled, which meant the step most likely
-	// to fail — the one thing here that depends on another container having got
-	// there first — was the one step with nowhere to report its failure.
+	// The reporter is built before anything that can fail needs it, and in particular
+	// before the datapath socket is dialled: that is the step most likely to fail —
+	// the one thing here that depends on another container having got there first —
+	// and it needs somewhere to report its failure.
 	var reporter *x1.Reporter
 	if cfg.AdmfURL != "" {
 		reporter = x1.NewReporter(cfg.AdmfURL, cfg.AdmfID, cfg.NEID, mat.ClientTLS())
@@ -183,9 +183,10 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	}
 
 	// The configuration is checked here, and not in validateConf, because a refusal
-	// there took the user plane down and named the offending LI field in the general
+	// there would take the user plane down and name the offending LI field in the general
 	// operator log. Here it stops interception, tells the ADMF, and leaves the datapath
 	// forwarding — the same policy the AMF and SMF apply to their own LI block.
+	//
 	// The refused `li` object, first, because it is the reason the rest cannot be trusted: the
 	// keys that did decode are not a trustworthy set, and one of the ones that did not may be
 	// a keepalive timer or the fault endpoint.
@@ -291,9 +292,9 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	s.tasks = tasks
 
 	// One owner for both edges of a destination's reachability: that it failed, and
-	// that it recovered. The delivery and keepalive paths used to report the first
-	// and nothing reported the second, so an ADMF told a destination was unreachable
-	// was never told it came back. A nil stop channel runs for as long as this
+	// that it recovered. If the delivery and keepalive paths reported the first,
+	// nothing would report the second, and an ADMF told a destination was unreachable
+	// would never be told it came back. A nil stop channel runs for as long as this
 	// element can hold tasking, which is the right lifetime.
 	//
 	// Before the delivery workers start, so a fault seen by the first copy shipped
@@ -307,12 +308,12 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		go s.frameLoop()
 	}
 
-	// shipLoop establishes the egress itself, retrying until the datapath answers.
-	// It used to be dialled here, once, and a failure abandoned interception for the
-	// life of the process — with no X1 channel yet built to say so. The two
-	// containers start concurrently with no readiness gate between them, so "the
-	// socket is not there yet" is the ordinary case rather than the exotic one, and
-	// every other peer this element depends on is already retried without limit.
+	// shipLoop establishes the egress itself, retrying until the datapath answers,
+	// rather than dialling it here once: a single failed dial would abandon
+	// interception for the life of the process. The two containers start
+	// concurrently with no readiness gate between them, so "the socket is not there
+	// yet" is the ordinary case rather than the exotic one, and every other peer this
+	// element depends on is already retried without limit.
 	go s.shipLoop()
 
 	// Loss between the datapath and this shipper is invisible from here — a copy
@@ -332,8 +333,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 // net.unix.max_dgram_qlen *datagrams*, which defaults to 10 and is not affected by
 // the buffer size at all. The byte budget only starts to bind after that queue
 // limit is raised, which is a deployment matter — the sysctl is per network
-// namespace, so the pod needs it set before this socket is created. Measured
-// effect of raising it from 10 to 4096: egress loss under burst fell by about half.
+// namespace, so the pod needs it set before this socket is created.
 func setPuntReadBuffer(sock net.Conn, size int) {
 	if size <= 0 {
 		return
@@ -384,10 +384,10 @@ func (s *liShipper) faultProbes() []x1.FaultProbe {
 // to deliver has not found an MDF3 unreachable, it has not looked.
 //
 // Only destinations still under trigger, and here that matters more than anywhere else: a
-// UPF's triggers are withdrawn as sessions end, several times an hour, and a client is never
-// forgotten. A destination whose last delivery failed and whose trigger was then removed can
-// never be delivered to again, so nothing would ever clear it and this element would report
-// itself faulty for the life of the process — while holding no tasking at all.
+// UPF's triggers are withdrawn as sessions end, several times an hour. A destination whose last
+// delivery failed and whose trigger was then removed can never be delivered to again, so if it
+// were counted nothing would ever clear it and this element would report itself faulty for the
+// life of the process — while holding no tasking at all.
 func (s *liShipper) unreachableDestinations() (unreachable, inUse int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -432,9 +432,9 @@ func (s *liShipper) destinationsInUse() []string {
 // reclaimUnreferencedSenders closes and drops the delivery client for every address no
 // trigger this element holds still names.
 //
-// **`senders` was append-only.** A destination is created on first use and never removed, so
+// **Without this `senders` is append-only.** A destination is created on first use, so
 // destination churn — a warrant relabelled to a new MDF3, an agency's endpoint moved, a
-// triggering function that re-provisions after its own restart — accumulated a delivery
+// triggering function that re-provisions after its own restart — would accumulate a delivery
 // worker, a TLS connection and a keepalive timer per address for the life of the process. On
 // an element that also keepalives each of them, that is a growing set of connections to
 // mediation functions this element no longer answers for, and the keepalives on them are
@@ -471,9 +471,9 @@ func (s *liShipper) reclaimUnreferencedSenders() {
 // close tears the shipper down: every delivery client it holds, whether or not a trigger
 // still names it.
 //
-// It exists because there was no teardown path at all — the shipper's senders lived as long
-// as the process, so a reconfiguration or a shutdown left workers running and connections
-// open to mediation functions with nothing left to send them.
+// Without it the shipper's senders would live as long as the process, so a reconfiguration or
+// a shutdown would leave workers running and connections open to mediation functions with
+// nothing left to send them.
 func (s *liShipper) close() {
 	s.mu.Lock()
 	senders := s.senders
@@ -536,8 +536,8 @@ func (s *liShipper) addressUnreachable(addr string) bool {
 // reports copies dropped from its queue. All of them are driven by packet rate, in
 // front of a datagram queue whose whole invariant is that everything done before
 // returning to Read is time that queue spends filling — so a synchronous mTLS POST
-// here made the report that says copies were dropped the reason the next several
-// hundred were. NotifyAsync takes the throttle decision here (a mutex, no I/O) and
+// here would make the report that says copies were dropped the reason the next
+// several hundred are. NotifyAsync takes the throttle decision here (a mutex, no I/O) and
 // spawns only for a report that is actually going out, which is why this is safe at
 // packet rate and plain `go` would not be.
 func (s *liShipper) report(issueType, description string) {
@@ -706,11 +706,10 @@ func (s *liShipper) ship(tagged []byte) {
 // network functions that run it.
 //
 // An unusable value is **reported and then discarded in favour of those defaults**,
-// which is what the AMF and SMF already do and what this element used to refuse over.
-// Refusing was the wrong instrument twice: the specification supplies these two
-// defaults normatively, so there is something correct to fall back to, and the refusal
-// reached Fatalln — stopping the user plane over a timer, and naming the LI field in
-// the general operator log while doing it.
+// which is what the AMF and SMF do. Refusing would be the wrong instrument twice: the
+// specification supplies these two defaults normatively, so there is something correct
+// to fall back to, and a refusal would reach Fatalln — stopping the user plane over a
+// timer, and naming the LI field in the general operator log while doing it.
 func keepaliveConfig(cfg LiConfig, reporter neIssueReporter) x2x3.KeepaliveConfig {
 	ka := x2x3.KeepaliveConfig{
 		Disabled: cfg.X2X3KeepaliveEnabled != nil && !*cfg.X2X3KeepaliveEnabled,
@@ -773,8 +772,8 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 		return nil, errNoDeliveryCredentials
 	}
 
-	// Neither the keepalive nor a delivery failure reports here any more, and the
-	// reason is not that the condition stopped mattering.
+	// Neither the keepalive nor a delivery failure reports here, although the
+	// condition matters.
 	//
 	// Both establish that this destination is unreachable, which is a condition the
 	// element can *re-observe* — the sender knows it, which is what
@@ -785,12 +784,11 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 	// reports the failure naming the destination it concerns and the recovery when it
 	// comes.
 	//
-	// The callbacks stay wired and now nudge the watcher instead of reporting. The
+	// The callbacks are wired to nudge the watcher instead of reporting. The
 	// sender marks itself unreachable independently of them — sendBytes and the
 	// keepalive expiry both store it before the callback runs — so what the nudge
 	// buys is not the observation but its promptness: without it the ADMF would learn
-	// of a failed destination one sampling interval after this element did, which
-	// would be a regression dressed up as a refactor.
+	// of a failed destination one sampling interval after this element did.
 	keepalive := s.keepalive
 	keepalive.OnFault = s.reportDeliveryError
 
@@ -815,9 +813,9 @@ func (s *liShipper) senderFor(addr string) (x2x3.Sender, error) {
 // working and one content copy of it was lost — a unit the write stopped inside, which the
 // library resends whole on a fresh connection and reports as dropped only where that resend
 // did not land either. The library deliberately refuses to call that unreachability, because
-// a healthy mediation function must not be reported unreachable over one truncated write; these
-// hooks discarded the error, so the loss was reported by nothing while the watcher went on
-// sampling a destination it correctly considered reachable. Content missing from an agency's
+// a healthy mediation function must not be reported unreachable over one truncated write; if
+// these hooks discarded the error, the loss would be reported by nothing while the watcher goes
+// on sampling a destination it correctly considers reachable. Content missing from an agency's
 // record with every channel that could have said so reporting normality.
 //
 // Reported as x3DeliveryLost, the same condition a full delivery queue raises: from the
@@ -906,16 +904,14 @@ func (s *liShipper) reconnect() {
 
 // establish dials the datapath egress and does not give up.
 //
-// Split out of reconnect so the *first* dial uses it too. It used to be a single
-// attempt made during initialisation, and a failure there disabled content
-// interception for the life of the process — while reconnect, three lines away,
-// already retried the identical dial without limit once it had succeeded once. The
-// two containers involved start concurrently with no readiness gate, so the first
-// attempt is the one most likely to fail.
+// Separate from reconnect so the *first* dial retries too: a single attempt during
+// initialisation that failed would disable content interception for the life of the
+// process. The two containers involved start concurrently with no readiness gate, so
+// the first attempt is the one most likely to fail.
 //
-// It tries before it sleeps, which is the difference from the loop it was carved
-// out of: a redial after a failure should back off first, but an initial dial
-// against a datapath that is already up should not pay 100ms for the privilege.
+// It tries before it sleeps: a redial after a failure should back off first, but an
+// initial dial against a datapath that is already up should not pay 100ms for the
+// privilege.
 //
 // Called only from the shipping loop, which is the sole reader and writer of sock.
 func (s *liShipper) establish() {

@@ -21,7 +21,7 @@ import (
 // the one carrying the transport header: that is a second mechanism on the one path in this
 // element whose cost is per packet, in front of a datagram queue that holds ten by default,
 // and it is reachable by a peer who can choose fragment order — a denial-of-service surface
-// introduced to recover the rarest arrival order. IPv4 fragments of one datagram normally
+// added to recover the rarest arrival order. IPv4 fragments of one datagram normally
 // arrive in order over a GTP-U path, so classify-on-first recovers nearly all of the loss for
 // a fraction of the mechanism. The limit is declared rather than discovered: a fragment
 // arriving before its datagram's first is discarded and reported as content loss.

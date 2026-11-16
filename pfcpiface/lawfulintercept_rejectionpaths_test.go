@@ -207,10 +207,9 @@ func programmedFor(e *ccEnabler, seid uint64, farID uint32) (bool, bool) {
 // TestARefusedModificationRecordsWhatItPushed drives the real handler rather than calling
 // the recorder directly.
 //
-// That distinction matters. The earlier coverage called the recorder by hand, so it passes
-// with three of the four call sites missing — which is exactly what happened: the remedy was added
-// to the deletion stage, with a comment explaining why, and the branch that reaches the datapath
-// first was never given it.
+// That distinction matters. A test that calls the recorder by hand passes with three of the four
+// call sites missing — the remedy present at the deletion stage, say, and absent from the branch
+// that reaches the datapath first.
 //
 // Without the record, a later re-derivation computes "nothing should duplicate", finds no entry,
 // reads that as "not duplicating", and concludes there is nothing to turn off. The copies continue
@@ -251,7 +250,7 @@ func TestARefusedModificationRecordsWhatItPushed(t *testing.T) {
 
 // TestARefusedEstablishmentDoesNotStrandDuplication drives the establishment handler.
 //
-// This branch cannot be fixed by recording: NewPFCPSession does not store the session and, when
+// This path cannot be fixed by recording: NewPFCPSession does not store the session and, when
 // the rollback finishes, the branch abandons it before PutSession, so no re-derivation will ever
 // walk it and no record written here could be read again. Removing the rules from the datapath is the only remedy, and
 // the absence of that push is what leaves a PDR matching the UE address and a FAR duplicating for
@@ -435,8 +434,8 @@ func TestARefusedEstablishmentWhoseRollbackDidNotFinishIsRecorded(t *testing.T) 
 	}
 }
 
-// TestARefusedLocalDeleteKeepsItsRecord covers the session-report-response path, which deleted the
-// record before it knew whether the datapath had accepted the removal.
+// TestARefusedLocalDeleteKeepsItsRecord covers the session-report-response path, which must not
+// delete the record before it knows whether the datapath accepted the removal.
 //
 // The record's entries go with the session, so dropping them first means a refused delete strands
 // rules that no later re-derivation can find — it walks the sessions this element holds, and this
@@ -520,15 +519,14 @@ func TestAbandonedDuplicationIsReportedOnlyWhenSomethingWasDuplicating(t *testin
 // failure with the rest of the batch still in flight. The warrant is withdrawn. Duplication must
 // stop.
 //
-// The element could once reach a state where it never stopped: the refusal left the
-// record saying "not duplicating" while the datapath duplicated, and `transact` skips any FAR
-// whose record already equals what the tasking implies. The element computed "nothing should
-// duplicate", saw its record agreeing, and did nothing — for ever. `everDuplicated` bounds that,
-// but only for a FAR the element successfully recorded as duplicating in the first place, which is
-// exactly what a refusal used to prevent.
+// The state to avoid is one where it never stops: the refusal leaves the record saying "not
+// duplicating" while the datapath duplicates, and `transact` skips any FAR whose record already
+// equals what the tasking implies. The element computes "nothing should duplicate", sees its
+// record agreeing, and does nothing — for ever. `everDuplicated` bounds that, but only for a FAR
+// the element recorded as duplicating in the first place, which a refusal must therefore not
+// prevent.
 //
-// The fixture's all-or-nothing mode cannot reach this state at all, which is why it went unnoticed:
-// with `partial` off, a refused push programs nothing and the record and the datapath never
+// The fixture's all-or-nothing mode cannot reach this state at all: with `partial` off, a refused push programs nothing and the record and the datapath never
 // disagree. See enablerFixture.partial.
 func TestAPartiallyProgrammedRefusalIsStillWithdrawn(t *testing.T) {
 	f := newEnablerFixture(t)
@@ -568,17 +566,16 @@ func TestAPartiallyProgrammedRefusalIsStillWithdrawn(t *testing.T) {
 // TestEverDuplicatedIsReclaimedWithItsSessions pins the second record against the same requirement
 // as the first.
 //
-// `A point of interception's record of what it programmed stays bounded` binds every record of
-// what was programmed, and this set is one. It was written as monotone-for-ever, justified by a
-// SEID-reuse hazard that does not exist in this element — NewPFCPSession allocates from a 64-bit
-// random source — so every entry whose session had ended was unreachable garbage: transact
-// consults the set only inside its walk of live sessions' FARs.
+// Every record of what was programmed must stay bounded, and this set is one. Keeping an entry
+// after its session ends buys nothing: transact consults the set only inside its walk of live
+// sessions' FARs, and a later session cannot inherit the entry by reusing the SEID, because
+// NewPFCPSession allocates from a 64-bit random source.
 //
-// "A handful" was the other half of that justification, and it holds only for narrow criteria. A
-// task keyed by network instance or tunnel direction selects every session on the element, so
-// under ordinary subscriber churn the set grows with every session that has ever existed while the
-// task was held. Interception stays correct the whole time, which is what makes it invisible —
-// until the process dies and takes every warrant with it.
+// Nor is the set small. A task keyed by network instance or tunnel direction selects every
+// session on the element, so under ordinary subscriber churn an unpruned set would grow with
+// every session that has ever existed while the task was held. Interception would stay correct
+// the whole time, which is what makes it invisible — until the process dies and takes every
+// warrant with it.
 //
 // sessionForgotten is called directly here because the churn is what is under test; its production
 // call site is RemoveSession, which the rejection-path tests in this file drive.
@@ -623,10 +620,10 @@ func TestEverDuplicatedIsReclaimedWithItsSessions(t *testing.T) {
 // Comparing to the mark answers "was this forgotten after the pass began", which also discards an
 // entry written *after* the forgetting — and a FAR re-created under the same identifier is exactly
 // that. A path switch does it routinely: the modification removes FAR n, stamping it forgotten,
-// then re-creates FAR n and records it duplicating. Both stamps are past the mark, so the sweep
-// dropped a record describing a live, duplicating rule.
+// then re-creates FAR n and records it duplicating. Both stamps are past the mark, so a sweep
+// against the mark would drop a record describing a live, duplicating rule.
 //
-// A missing entry reads as "not duplicating", so until the next pass this element answers
+// A missing entry reads as "not duplicating", so until the next pass this element would answer
 // TaskIssueDuplicationNotProgrammed for a warrant it is in fact serving — a wrong answer rather
 // than lost interception, and the answer the triggering function acts on.
 func TestAFARRecreatedUnderTheSameIDKeepsItsRecord(t *testing.T) {
@@ -759,8 +756,8 @@ func TestConcurrentMissesShareOneFragmentMemo(t *testing.T) {
 	}
 }
 
-// countingStore reports how many times the sessions were walked, which is the cost taskFaults used
-// to pay on the X1 request goroutine.
+// countingStore reports how many times the sessions were walked, which is the cost taskFaults must
+// not pay on the X1 request goroutine for an answer nothing has invalidated.
 type countingStore struct {
 	SessionsStore
 
@@ -786,14 +783,14 @@ func (c *countingStore) count() int {
 // TestTaskFaultsDoesNotWalkEverySessionPerRequest pins the cost off the X1 request goroutine.
 //
 // li/x1 asks this once per task on *every* response that carries tasks — an activation, a
-// modification, a deactivation, a status query alike. Answering it resolved every criterion
-// against every session this element holds, so an element with twenty thousand sessions and ten
-// tasks resolved two hundred thousand criterion sets to answer one provisioning message, on the
-// goroutine answering it.
+// modification, a deactivation, a status query alike. Answering it from scratch resolves every
+// criterion against every session this element holds, so an element with twenty thousand sessions
+// and ten tasks would resolve two hundred thousand criterion sets to answer one provisioning
+// message, on the goroutine answering it.
 //
 // That is exactly the cost the enabler's worker exists to keep off the request path — its own
 // doc-comment says "an X1 request's latency would become a function of session count on the
-// element holding the most sessions". The remedy for one path had reintroduced it on another.
+// element holding the most sessions".
 //
 // The answer is still determined when asked rather than pushed: the memo is stamped with the
 // tasking epoch and the record's write counter, and every event that could change the answer moves

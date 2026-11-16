@@ -22,13 +22,11 @@ import (
 // bessWithNoDatapath is a real bess talking real gRPC to nothing.
 //
 // **Deliberately not a fake push.** The remedy this exercises — record what the
-// datapath accepted, and retry what it refused — was written, tested and shipped
-// while its refusal branch was unreachable, because SendMsgToUPF initialised its
-// cause to accepted and never assigned it again, and because addFAR signalled
-// success to GRPCJoin whatever the datapath answered. Both tests of it drove a
-// stubbed `push`, so both passed against a path production does not take. The only
-// test that can tell the difference is one that goes through SendMsgToUPF with the
-// gRPC call actually failing.
+// datapath accepted, and retry what it refused — depends on its refusal branch being
+// reachable: on SendMsgToUPF assigning the cause the datapath answered, and on addFAR
+// signalling the datapath's answer to GRPCJoin. A test that drives a stubbed `push`
+// passes whether or not either holds. The only test that can tell the difference is
+// one that goes through SendMsgToUPF with the gRPC call actually failing.
 //
 // A dead address rather than a hand-written client: it is one line, and what is
 // under test is precisely how a genuine gRPC failure travels.
@@ -56,13 +54,13 @@ func bessWithNoDatapath(t *testing.T) *bess {
 }
 
 // TestAnUnconfirmedDatapathWriteIsNotCountedAsProgrammed is the property the datapath
-// owes an interception, now that the two answers are separate.
+// owes an interception, given that the PFCP cause and the confirmation are separate answers.
 //
 // A write whose RPC never completed says nothing about what the datapath did, and
 // SendMsgToUPF answers it as **accepted** on purpose: rejecting an uncertain result would
 // have the caller tear down a session whose rules may still be installed, and the context
 // these calls carry expires before GRPCJoin's own timer, so a merely slow datapath reaches
-// this branch routinely.
+// this path routinely.
 //
 // The interception record cannot take that answer. ETSI TS 103 221-1 clause 5.3 makes an
 // issue that loses traffic a fault rather than a warning, and clause 6.5.2.2 names the

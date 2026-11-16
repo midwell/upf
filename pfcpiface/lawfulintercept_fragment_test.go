@@ -66,9 +66,9 @@ func portFilter(t *testing.T) copyFilter {
 // only its first fragment.
 //
 // A fragmented IPv4 datagram carries its transport header in the first fragment only, so
-// every fragment after the first had no ports to read: the copy was dropped. An agency
-// received the head of each datagram and nothing else — and downstream that is invisible,
-// because the dropped copies never reached framing, so the X3 sequence has no gap in it to
+// every fragment after the first has no ports to read. Dropping those copies would give an
+// agency the head of each datagram and nothing else — and downstream that is invisible,
+// because the dropped copies never reach framing, so the X3 sequence has no gap in it to
 // notice.
 func TestEveryFragmentOfAnAuthorisedDatagramIsDelivered(t *testing.T) {
 	f := portFilter(t)

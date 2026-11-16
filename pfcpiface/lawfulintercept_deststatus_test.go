@@ -18,7 +18,7 @@ import (
 // What this element has to get right is supplying it — and a CC-POI is where answering
 // activeAndWorking wrongly costs the most, because a dropped content copy leaves no record
 // anywhere else. The triggering function's interrogation is the only thing that can reveal it,
-// and it was hard-coded to say everything was fine.
+// so its answer must come from the shipper rather than say everything is fine.
 //
 // It goes through startTriggerListener, which is what Init calls, so the assertion covers the
 // option actually being passed rather than the option existing.

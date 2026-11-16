@@ -139,15 +139,15 @@ func parseCriterion(t types.TargetIdentifier) (criterion, error) {
 		//
 		// A PDR ID and a QER ID are allocated *per PFCP session* and reused across sessions
 		// from a low number, and matchPDR compares them against every session this element
-		// holds. So a task naming PDR 2 duplicates, attributes and delivers the traffic of
+		// holds. So a task naming PDR 2 would duplicate, attribute and deliver the traffic of
 		// every subscriber whose session happens to hold a PDR of that number — under that
 		// warrant, indistinguishable downstream from the traffic it did name. That is
 		// interception of subjects the warrant does not name, which is the one failure this
 		// plane may never have.
 		//
-		// The library's own type documentation already said so: these identifiers "are
-		// scoped to a PFCP session, so a criterion using one is only unambiguous alongside
-		// the session it belongs to". The hazard was written down and then implemented.
+		// The library's own type documentation says so: these identifiers "are scoped to
+		// a PFCP session, so a criterion using one is only unambiguous alongside the
+		// session it belongs to".
 		//
 		// **Each criterion is judged alone here.** A task's criteria are conjunctive, so an
 		// F-SEID beside the rule ID would scope it to one session — but this function sees
@@ -273,7 +273,7 @@ func parsePDRCriterion(value string) (*pdr, error) {
 		// it was not in the criterion, so the rule can never compare equal and the
 		// interception is acknowledged and produces nothing.
 		//
-		// Two remedies were legitimate — refuse it, as the UE-address case above already
+		// Two answers are legitimate — refuse it, as the UE-address case above
 		// is, or normalise the element-assigned fields out of sameRule as the
 		// session-assigned ones already are. **Refusal is the decision**, recorded here
 		// because it is a choice and not a derivation: a criterion that says "the tunnel the
@@ -480,14 +480,12 @@ func (c criterion) matchPort(p pdr) coverage {
 	// **Coverage is computed from every dimension the criterion constrains, as a
 	// conjunction, rather than returned early from the first one checked.**
 	//
-	// A transport-port criterion constrains two things: the protocol and the port. The
-	// protocol was used only to *exclude* — a rule pinning a different protocol matched
-	// nothing — and never to widen, so a rule that pinned the port exactly and left the
-	// protocol unconstrained returned coverExact. Exact means the copy is delivered without
-	// inspection, so a TCP-port criterion delivered the UDP traffic on that port too:
-	// traffic the warrant does not name, under the warrant's own identifier. The `default:`
-	// branch below already noticed the interaction — "and the proto may be unconstrained
-	// too" — one case away from where it mattered.
+	// A transport-port criterion constrains two things: the protocol and the port. If the
+	// protocol were used only to *exclude* — a rule pinning a different protocol matches
+	// nothing — and never to widen, a rule that pinned the port exactly and left the
+	// protocol unconstrained would return coverExact. Exact means the copy is delivered
+	// without inspection, so a TCP-port criterion would deliver the UDP traffic on that port
+	// too: traffic the warrant does not name, under the warrant's own identifier.
 	//
 	// Written as a conjunction so that a dimension added later cannot silently reintroduce
 	// an exact match that is not exact: each dimension reports whether the rule pins it, and

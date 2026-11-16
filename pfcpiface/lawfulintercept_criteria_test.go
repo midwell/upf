@@ -160,13 +160,9 @@ func TestResolveCriteria(t *testing.T) {
 			id:   types.TargetIdentifier{Type: types.TargetUEIPv4, Value: "10.250.0.99"},
 			want: nil,
 		},
-		// The three cases that used to sit here asserted that a PDR ID selects "that rule
-		// in every session holding it" and that a QER ID selects every PDR it polices
-		// across three different sessions. That is the defect written down as expected
-		// behaviour: those identifiers are allocated per PFCP session and reused, so what
-		// the tests pinned was the interception of subjects the warrant never named. They
-		// are gone, and the refusal is asserted in TestParseCriterionRefusals — replaced
-		// rather than added to, so nothing is left asserting the old reading.
+		// No case here selects by PDR ID or QER ID. Those identifiers are allocated per
+		// PFCP session and reused, so selecting by one alone would intercept subjects the
+		// warrant never named; the refusal is asserted in TestParseCriterionRefusals.
 		{
 			name: "network instance spans every session on the DNN",
 			id:   types.TargetIdentifier{Type: types.TargetNetworkInstance, Value: niHex},
@@ -611,15 +607,12 @@ func TestPDRCriterionRefusals(t *testing.T) {
 // TestAPortCriterionDoesNotDeliverTheOtherProtocol is *coverage is a property of every
 // dimension, not the first one checked*.
 //
-// A transport-port criterion constrains two things: the protocol and the port. The protocol
-// was used only to exclude — a rule pinning a different protocol matched nothing — and never
-// to widen, so a rule that pinned the port exactly and left the protocol unconstrained
-// returned coverExact. Exact means the copy is delivered without inspection, so a TCP-port
-// criterion delivered the UDP traffic on that port too: traffic the warrant does not name,
+// A transport-port criterion constrains two things: the protocol and the port. If the protocol
+// were used only to exclude — a rule pinning a different protocol matches nothing — and never
+// to widen, a rule that pinned the port exactly and left the protocol unconstrained would
+// return coverExact. Exact means the copy is delivered without inspection, so a TCP-port
+// criterion would deliver the UDP traffic on that port too: traffic the warrant does not name,
 // under the warrant's own identifier, indistinguishable downstream from the traffic it did.
-//
-// The `default:` branch of the same switch already noticed the interaction — "and the proto
-// may be unconstrained too" — one case away from where it mattered.
 func TestAPortCriterionDoesNotDeliverTheOtherProtocol(t *testing.T) {
 	const port = 443
 

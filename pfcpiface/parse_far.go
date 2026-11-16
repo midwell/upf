@@ -51,8 +51,8 @@ type far struct {
 	// SMF's own instruction:
 	//
 	//   - An SMF session modification carries the SMF's view of applyAction, which
-	//     knows nothing of this tasking. Folding the two together let a modification
-	//     clear the interception silently, mid-session, with nothing logged and the
+	//     knows nothing of this tasking. Folding the two together would let a
+	//     modification clear the interception silently, mid-session, with nothing logged and the
 	//     triggering function never told.
 	//   - Withdrawing the tasking must not clear duplication the SMF still wants.
 	//
@@ -146,14 +146,6 @@ func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error
 			}
 		}
 	}
-
-	// Lawful Interception: a FAR carrying the DUPL apply-action must have its
-	// user-plane traffic copied to the LI Function. The apply-action bit alone
-	// (read via Duplicates() in setActionValue) drives the datapath tee and the X3
-	// shipper; the Duplicating Parameters' destination/outer-header are not
-	// consumed here because the CC-POI ships X3 natively. Nothing about a DUPL FAR
-	// is parsed-and-logged or otherwise signalled — a tasked subscriber must be
-	// indistinguishable from any other (undetectability).
 
 	return nil
 }

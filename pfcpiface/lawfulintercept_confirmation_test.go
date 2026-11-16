@@ -9,8 +9,7 @@ import (
 
 // confirmedPush adapts a cause-only push to the confirmation-aware contract, for the tests
 // whose subject is the cause rather than the confirmation: whatever they answer as accepted
-// counts as confirmed, which is exactly what they asserted before an unconfirmed write was
-// a state of its own.
+// counts as confirmed, so an unconfirmed write never arises in them.
 func confirmedPush(
 	push func(all, updated PacketForwardingRules) uint8,
 ) func(all, updated PacketForwardingRules) (uint8, bool) {

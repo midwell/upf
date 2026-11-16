@@ -12,8 +12,7 @@ package pfcpiface
 // on its own account, so an assertion that a second delivery destination costs no extra
 // allocation is measuring the instrumentation rather than the code once -race is on.
 //
-// This is not hypothetical: `make test` runs with -race, and
-// TestSecondDestinationCostsOnlyItsDelivery has been failing there — 14 allocations
-// against 15 — since it was written, identically at every commit. The assertion is
+// `make test` runs with -race, and under it TestSecondDestinationCostsOnlyItsDelivery
+// is off by one allocation that the detector makes, not the code. The assertion is
 // sound without the detector and cannot be made sound with it.
 const raceEnabled = false

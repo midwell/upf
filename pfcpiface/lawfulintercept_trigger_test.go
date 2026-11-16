@@ -212,7 +212,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	// The same trigger naming a destination this POI has never heard of must be
 	// refused rather than acknowledged. Accepting it would duplicate a subject's
 	// traffic and discard every copy while the triggering function believed
-	// interception was running — which is what a POI restart used to cause.
+	// interception was running — which is what a POI restart would otherwise cause.
 	unknown := trigger
 	unknown.XID = "99999999-9999-4999-8999-999999999999"
 	unknown.SEID = seid + 7
@@ -361,7 +361,7 @@ func TestShipDropsContentWithoutATask(t *testing.T) {
 			reporter: rec,
 			senders:  make(map[string]x2x3.Sender),
 			// A shipper never runs without one — startLIShipper refuses to start
-			// without an element identifier — and the framing now happens before the
+			// without an element identifier — and the framing happens before the
 			// per-destination sender lookup, since one PDU is built and shared.
 			ids: x2x3.NewIdentity(testNEID, upfInterceptionPoint),
 		}
@@ -542,7 +542,7 @@ func TestTriggerKeepaliveFailSafePurgesTasking(t *testing.T) {
 		// The real ADMF is alive and answers the 9050 report OK. Over LI_T3 the triggering
 		// function, not this ADMF, plays the ADMF (TS 33.128 clause 5.2.6): its answer says
 		// nothing about the function that installed the trigger, so it must not start the two
-		// hours of TIME_P3 — the e2e run found an orphan still intercepting long after that.
+		// hours of TIME_P3, which would leave an orphan intercepting for that long.
 		tasks, _, admf := keepaliveTaskedReportingTo(t, seid, newAnsweringADMF(t))
 
 		if !awaitPurge(tasks, seid, 10*time.Second) {
@@ -875,10 +875,10 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	_ = ln.Close()
 }
 
-// TestOrdinaryWithdrawalIsNotReportedAsAPurge: this element used to report every
-// removal of tasking as a fail-safe purge — "the triggering function went quiet" —
-// including the withdrawals the triggering function itself ordered. One captured
-// run contains 179 of them. The channel that says a controlling function has
+// TestOrdinaryWithdrawalIsNotReportedAsAPurge: only the fail-safe purge — "the
+// triggering function went quiet" — is reported as one, not the withdrawals the
+// triggering function itself ordered, which happen on every session end. The
+// channel that says a controlling function has
 // stopped answering is the channel the durability of withdrawal depends on, and an
 // operator who sees it on every normal deactivation learns to ignore it.
 func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
@@ -994,8 +994,8 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 		t.Fatalf("CreateDestination: %v", err)
 	}
 
-	// **One ProductID for both.** They used to carry two different ones, which is the
-	// one arrangement in which the defect this test now also covers cannot appear: this
+	// **One ProductID for both.** Two different ones are the one arrangement in which
+	// releasing numbering by XID cannot go wrong, so they would hide that defect: this
 	// element's triggering function allocates a task per (warrant, session, UPF) and
 	// gives them all the warrant's ProductID, so two live tasks sharing a delivery XID
 	// is the *ordinary* case here rather than an exotic one. With two XIDs, releasing
@@ -1048,8 +1048,8 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 	// rather than an omission here: x1.purgeAllTasking is the one implementation behind
 	// both the bulk deactivation above and the keepalive lapse, differing only in the
 	// PurgeReason it reports, and it calls notifyRemoved per task — so the release is per
-	// task in both. What could have differed is exactly what this now checks: that
-	// releasing per context still empties the state when every task goes.
+	// task in both. What could differ is exactly what this checks: that releasing
+	// per context still empties the state when every task goes.
 }
 
 // nextSequenceNumber is the number the identity would put on the next PDU of a
@@ -1310,12 +1310,12 @@ func TestTriggerKeepaliveHasAFloor(t *testing.T) {
 
 // TestASenderNoTriggerReferencesIsClosed is the reclamation half of the delivery pool.
 //
-// `senders` was append-only: a delivery client is created on first use and was never
-// removed, so destination churn — a warrant relabelled to a new MDF3, an agency's endpoint
-// moved, a triggering function re-provisioning after its own restart — accumulated a
-// delivery worker, a TLS connection and a keepalive timer per address for the life of the
-// process. Worse than a leak: this element keepalives each of them, and a keepalive is
-// indistinguishable at the far end from an element that is still delivering, so it holds off
+// A delivery client is created on first use, so without reclamation destination churn — a
+// warrant relabelled to a new MDF3, an agency's endpoint moved, a triggering function
+// re-provisioning after its own restart — would accumulate a delivery worker, a TLS
+// connection and a keepalive timer per address for the life of the process. Worse than a
+// leak: this element keepalives each of them, and a keepalive is
+// indistinguishable at the far end from an element that is still delivering, so it would hold off
 // the fail-safe of a mediation function it has nothing left to send.
 func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 	dir := t.TempDir()
@@ -1392,7 +1392,7 @@ func TestASenderNoTriggerReferencesIsClosed(t *testing.T) {
 		t.Errorf("holding %d senders after reclamation, want 1", held)
 	}
 
-	// And the teardown takes the rest, which there was no path for at all.
+	// And the teardown takes the rest.
 	s.close()
 
 	s.mu.Lock()

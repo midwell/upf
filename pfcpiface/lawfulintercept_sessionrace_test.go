@@ -20,9 +20,9 @@ import (
 // cap(MaxItems) and nothing ever grows past it, so append never reallocates and a
 // stored session's array is the same array every reader holds. A session built from
 // slice literals — which is how every other test here builds one — has cap == len, so
-// the first append reallocates and the sharing quietly stops being total. That is
-// exactly why -race never saw this: the tests were not reproducing the memory layout
-// the store produces.
+// the first append reallocates and the sharing quietly stops being total, so -race
+// would not see a race on the shared array: such a test does not reproduce the memory
+// layout the store produces.
 func liStoredSession(seid uint64, ue string) PFCPSession {
 	addr := ip2int(net.ParseIP(ue))
 	s := PFCPSession{

@@ -189,18 +189,18 @@ func TestPuntMonitorNeedsAReportingChannel(t *testing.T) {
 	startLIPuntMonitor(nil, &recordingReporter{})
 }
 
-// TestPuntMonitorSeesTheQueuesOwnDiscards: the monitor was once blind to the one
-// condition it exists to detect.
+// TestPuntMonitorSeesTheQueuesOwnDiscards: the counter comparison alone is blind to the one
+// condition the monitor exists to detect.
 //
-// It compared what the module upstream of the egress port handed on against what the port
+// It compares what the module upstream of the egress port handed on against what the port
 // sent, and where that module is `liQueue` — which it prefers — the comparison is
 // structurally incapable of seeing the loss: a queue discards on *enqueue*, when it is full,
 // and its output-gate accounting counts packets *dequeued* toward the port. So during
 // sustained overflow both sides of the comparison exclude the dropped packets equally and the
 // difference stays exactly zero while content is being lost.
 //
-// The module's own comment reasoned that packets between it and the port "are either sent or
-// discarded, never in flight", which is true of a merge and false of a queue.
+// Packets between the module and the port "are either sent or discarded, never in flight" is
+// true of a merge and false of a queue.
 func TestPuntMonitorSeesTheQueuesOwnDiscards(t *testing.T) {
 	// The overflow case, stated exactly: everything the queue dequeued reached the port, so
 	// the comparison sees nothing, and the queue's own counter says content was dropped.
@@ -235,9 +235,9 @@ func TestPuntMonitorSeesTheQueuesOwnDiscards(t *testing.T) {
 
 // TestPuntMonitorDoesNotMistakeTrafficForARestart is the sampling-order half.
 //
-// The two reads are not atomic. Read upstream-first, traffic passing between them landed on
-// the *downstream* side, so a busy egress legitimately reported sent > handed — which the
-// monitor took for a datapath restart and used to clear its loss baseline, turning ordinary
+// The two reads are not atomic. Read upstream-first, traffic passing between them would land
+// on the *downstream* side, so a busy egress would legitimately report sent > handed — which
+// the monitor would take for a datapath restart and clear its loss baseline, turning ordinary
 // traffic into a reason to forget a real gap. Read downstream-first the same traffic makes
 // the comparison conservative instead.
 func TestPuntMonitorDoesNotMistakeTrafficForARestart(t *testing.T) {

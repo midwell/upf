@@ -21,16 +21,14 @@ import (
 
 // TestX2X3KeepaliveConfigDefaultsWhenUnusable.
 //
-// **This asserted the opposite until 2026-08-17**, and the policy it pinned was the
-// defect. An unusable timer was refused by validateConf, whose error reaches
-// logger.InitLog.Fatalln in cmd/pfcpiface/main.go: the UPF exited over a keepalive
-// timer, taking the user plane with it, and printed the LI field name into the general
+// An unusable timer is not refused by validateConf, because its error reaches
+// logger.InitLog.Fatalln in cmd/pfcpiface/main.go: the UPF would exit over a keepalive
+// timer, taking the user plane with it, and print the LI field name into the general
 // operator log on the way out. Two things an LI value may not do.
 //
 // The specification supplies both defaults normatively (60s and 180s), so there is
-// something correct to fall back to — which is what the AMF and SMF have always done
-// with the same two settings. An unusable value is now reported to the ADMF and the
-// defaults are used.
+// something correct to fall back to — which is what the AMF and SMF do with the same
+// two settings. An unusable value is reported to the ADMF and the defaults are used.
 //
 // The pair worth the test is TIME_P2 below TIME_P1: both parse, both look reasonable in
 // a file, and together they disconnect every X3 connection before the keepalive that
@@ -63,7 +61,7 @@ func TestX2X3KeepaliveConfigDefaultsWhenUnusable(t *testing.T) {
 			}
 
 			// Whatever the timers say, the configuration must not stop the process:
-			// validateConf no longer looks at the li block at all.
+			// validateConf does not look at the li block at all.
 			if err := validateConf(Conf{Mode: testModeSim, RespTimeout: "2s", ReadTimeout: 15, MaxReqRetries: 5, Li: li}); err != nil {
 				t.Errorf("validateConf() error = %v; an LI timer must not stop the user plane", err)
 			}
@@ -229,15 +227,14 @@ func TestX2X3KeepaliveReachesTheShippersClients(t *testing.T) {
 // TestAnUnusableLIBlockDoesNotStopTheUserPlane: a mistake in the `li` block must not stop the
 // user plane.
 //
-// validateConf used to refuse every unusable `li` field, and its error reaches
-// logger.InitLog.Fatalln in cmd/pfcpiface/main.go — so a mistyped optional LI value
-// exited the process, taking the **user plane** with it, after printing
-// `invalid argument 'li.trigger_keepalive'=30 (…)` into the general operator log. An LI
-// typo causing a network outage, and an LI-attributable line in a log far more widely
-// readable than the config file it describes. bess.go's own handling of a shipper
-// failure is deliberately vague for exactly that reason, so this contradicted it.
+// validateConf's error reaches logger.InitLog.Fatalln in cmd/pfcpiface/main.go, so if it
+// refused an unusable `li` field a mistyped optional LI value would exit the process,
+// taking the **user plane** with it, after printing the field name and value into the
+// general operator log. An LI typo causing a network outage, and an LI-attributable line in
+// a log far more widely readable than the config file it describes. bess.go's own handling
+// of a shipper failure is deliberately vague for exactly that reason.
 //
-// Loading must now succeed for every one of these, and the shipper must refuse them.
+// Loading must succeed for every one of these, and the shipper must refuse them.
 func TestAnUnusableLIBlockDoesNotStopTheUserPlane(t *testing.T) {
 	complete := func() *LiConfig {
 		return &LiConfig{
@@ -283,7 +280,7 @@ func TestAnUnusableLIBlockDoesNotStopTheUserPlane(t *testing.T) {
 
 // TestAnUnusableLIBlockNamesNoFieldInTheGeneralLog is the disclosure half. The refusal
 // travels as an error to startLIShipper's caller, which logs it non-attributably; what
-// must not happen is the field name reaching a general sink, as the Fatalln path did.
+// must not happen is the field name reaching a general sink, as it would through Fatalln.
 func TestAnUnusableLIBlockNamesNoFieldInTheGeneralLog(t *testing.T) {
 	var logged bytes.Buffer
 

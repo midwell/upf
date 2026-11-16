@@ -212,9 +212,9 @@ else:
 # GTP-U PDU Session Container PDU Type (core/modules/gtpu_encap.cc:
 # AddMetadataAttr("action", ...) -> psch->pdu_type), which works for the stock
 # values only because farForwardDAction=0 and farForwardUAction=1 happen to equal
-# the two valid PDU types. Routing duplication through that same attribute put 5
-# and 6 on the wire as PDU types that do not exist, and the RAN segfaulted parsing
-# them. 'action' therefore keeps the stock 0-4 values that GtpuEncap
+# the two valid PDU types. Routing duplication through that same attribute would
+# put 5 and 6 on the wire, and a GTP-U PDU type that does not exist reaches the
+# RAN. 'action' therefore keeps the stock 0-4 values that GtpuEncap
 # needs, and duplication is signalled out of band on 'fwd_action'.
 executeFAR::Split(size=1, attribute='fwd_action')
 _in = executeFAR

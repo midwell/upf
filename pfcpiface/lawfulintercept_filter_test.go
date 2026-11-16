@@ -144,12 +144,11 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			wantTrivial: true, wantUplink: true, wantDownlink: true,
 		},
 		{
-			// A QER ID used to appear here, covering the whole session because both its
-			// PDRs are policed by the QER. It is gone with the criterion: a rule identifier
-			// is allocated per PFCP session and reused, so it selected the rule of that
-			// number in every session this element holds, and the criterion is now refused.
-			// The network instance above covers the same shape — a criterion broad enough
-			// to make the filter trivial — without encoding the defect.
+			// The same shape as above — a criterion broad enough to make the filter
+			// trivial — on the wildcard session. A QER ID would express it too, but a rule
+			// identifier is allocated per PFCP session and reused, so it would select the
+			// rule of that number in every session this element holds, and the criterion
+			// is refused.
 			name:        "network instance again, on the wildcard session",
 			session:     wildcardSession(),
 			ids:         []types.TargetIdentifier{{Type: types.TargetNetworkInstance, Value: niHex}},
@@ -181,10 +180,9 @@ func TestFilterDecidesEachCriterion(t *testing.T) {
 			wantTrivial: false, wantUplink: false, wantDownlink: true,
 		},
 		{
-			// A PDR ID used to appear here, selecting the direction of that rule. Gone with
-			// the criterion, for the reason above; the outbound-direction case immediately
-			// preceding it asserts the same one-direction property with a criterion that
-			// selects one subject's traffic.
+			// A PDR ID would select the direction of that rule, but it is refused for the
+			// reason above; this asserts the same one-direction property with a criterion
+			// that is accepted.
 			name:    "outbound direction again, on the shared-FAR session",
 			session: sharedFARSession(),
 			ids: []types.TargetIdentifier{
@@ -410,8 +408,7 @@ func TestFilterWalksGTPUExtensionHeaders(t *testing.T) {
 }
 
 // TestFilterAllocatesNothingPerCopy checks that deciding a copy allocates nothing
-// sized from the packet — the exposure the vendored ASN.1 decoder had, where an
-// off-the-wire length drove an allocation. A filter that allocated per copy would
+// sized from the packet — an off-the-wire length driving an allocation. A filter that allocated per copy would
 // also put the interception path at the mercy of the offered rate.
 func TestFilterAllocatesNothingPerCopy(t *testing.T) {
 	f := filterFor(taskWith(types.TargetIdentifier{Type: types.TargetTCPPort, Value: "443"}),

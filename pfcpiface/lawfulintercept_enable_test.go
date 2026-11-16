@@ -93,8 +93,8 @@ func newEnablerFixture(t *testing.T) *enablerFixture {
 	return f
 }
 
-// recordSizes is how many entries each record of what was programmed holds. Both are bound by the
-// same requirement, and the second was exempt from it until it was not.
+// recordSizes is how many entries each record of what was programmed holds. Both must stay
+// bounded.
 func (f *enablerFixture) recordSizes() (programmed, everDuplicated int) {
 	f.e.mu.Lock()
 	defer f.e.mu.Unlock()
@@ -635,13 +635,12 @@ func TestRetaskSkipsUnchangedSessions(t *testing.T) {
 }
 
 // TestConcurrentTaskingChangesDoNotLoseAnUpdate is the lost update, which only
-// appears under interleaving and so was worth nothing as a fix until it had been
-// observed.
+// appears under interleaving, so the test forces the interleaving.
 //
-// Two provisioning requests arrive at once. When only the individual reads and
+// Two provisioning requests arrive at once. If only the individual reads and
 // writes were protected, the pass that began earlier could program and publish
-// last: it derived duplication from a task set that no longer existed, cleared it
-// for a task that was still active, and nothing re-derived until some unrelated
+// last: it would derive duplication from a task set that no longer existed, clear it
+// for a task that was still active, and nothing would re-derive until some unrelated
 // event happened to trigger another pass. Nothing downstream could notice — a
 // dropped copy produces no record for anybody to miss — so it could hold for the
 // life of the warrant.
@@ -905,11 +904,11 @@ func TestDuplicationStopsForAStoredSessionBroughtWithinTheTasking(t *testing.T) 
 // the other direction, and it is the sharper failure of the two.
 //
 // A re-derivation compares its conclusion against the record as it stands at the
-// moment it compares, not as it stood when it read the sessions. While the record
-// was written before the session was stored, a modification bringing a session
-// within a criterion gave a pass holding the pre-modification copy a *newer* value
-// to disagree with — so the pass did not merely forget, it pushed the FAR off,
-// ending an interception the tasking still required. No withdrawal is needed for
+// moment it compares, not as it stood when it read the sessions. If the record
+// were written before the session was stored, a modification bringing a session
+// within a criterion would give a pass holding the pre-modification copy a *newer*
+// value to disagree with — so the pass would not merely forget, it would push the FAR
+// off, ending an interception the tasking still required. No withdrawal is needed for
 // this one, and nothing downstream can see it: the triggering function was told
 // the task was applied, and the product that would be missing was never made.
 //
@@ -941,10 +940,9 @@ func TestAStalePassDoesNotEndAnInterceptionTheTaskingRequires(t *testing.T) {
 	}
 }
 
-// TestDepartedSessionsDropOutOfTheRecord is the property the wholesale replace
-// existed for, and the one carrying entries over could quietly cost. The old code
-// could not leak because it discarded everything each pass; this asserts the
-// comparison that replaces that guarantee gets the other direction right.
+// TestDepartedSessionsDropOutOfTheRecord is the property carrying entries over
+// could quietly cost. Discarding everything each pass could not leak; this asserts
+// that the comparison deciding what to carry over gets the other direction right.
 func TestDepartedSessionsDropOutOfTheRecord(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))
@@ -1338,10 +1336,10 @@ func (f *enablerFixture) removeSession(t *testing.T, s PFCPSession) {
 // produces it: LI configured, tasking that does not change, and ordinary
 // subscribers attaching and detaching.
 //
-// Every session writes an entry per FAR, but a pass over the sessions — which is
-// the only thing that used to shrink the record — is requested only when a FAR is
-// duplicating or has just stopped. For a session no task covers that is never, so
-// nothing ever asked, and nothing was ever reclaimed. Note there is no tasking
+// Every session writes an entry per FAR, but a pass over the sessions is requested
+// only when a FAR is duplicating or has just stopped. For a session no task covers
+// that is never, so the record must be reclaimed at teardown, not by a pass. Note
+// there is no tasking
 // change anywhere in this test: adding one would hide the defect by triggering
 // the very pass whose absence is the point.
 func TestUntaskedChurnDoesNotAccumulate(t *testing.T) {
@@ -1460,11 +1458,11 @@ func TestForgettingASessionLeavesTheCarryOverIntact(t *testing.T) {
 
 // ── The per-copy attribution answer, and what invalidates it ──
 //
-// tasksCovering used to recompute from scratch for every duplicated packet: a full
+// Computing tasksCovering from scratch for every duplicated packet would take a full
 // store snapshot with a deep clone of every task, then a parse of every criterion of
 // every task, then a resolve over every PDR, then filterFor parsing the same criteria
 // a second time. For a PDR criterion that is an IE parse and a throwaway address pool
-// per packet. It is memoised now, which is only safe if every event that can change
+// per packet. It is memoised, which is only safe if every event that can change
 // the answer invalidates it — so these test the invalidation rather than the cache.
 
 // TestAttributionFollowsATaskingChange: the memo must not answer from tasking that has
@@ -1582,12 +1580,11 @@ func TestAttributionDoesNotMemoiseAVanishedSession(t *testing.T) {
 
 // TestPerCopyAttributionDoesNotParseCriteria is the cost half.
 //
-// The claim the old comment made — "a map lookup and a handful of integer comparisons
-// … small beside the framing and delivery each copy costs anyway" — was the wrong way
-// round: framing is one allocation and a memcpy, delivery amortises across a 32-PDU
-// batch, and this walked and parsed the whole task set per packet. The property that
-// replaces the claim is checkable: repeated attribution of one session allocates
-// nothing that scales with the tasking.
+// Attribution is not small beside the framing and delivery each copy costs anyway:
+// framing is one allocation and a memcpy, delivery amortises across a 32-PDU batch,
+// and attribution from scratch walks and parses the whole task set per packet. The
+// property is checkable: repeated attribution of one session allocates nothing that
+// scales with the tasking.
 func TestPerCopyAttributionDoesNotParseCriteria(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))

@@ -30,10 +30,9 @@ func TestAWorkingTaskReportsNoFault(t *testing.T) {
 
 // TestATaskTheDatapathIsNotDuplicatingReportsAFault is the condition this supplier exists for.
 //
-// The datapath refuses the write, so nothing is duplicated and no copy is made — and until now
-// the only account of that was an element-scoped report saying something at this point of
-// interception was refused. A triggering function holding several warrants could not tell which
-// of them had stopped producing.
+// The datapath refuses the write, so nothing is duplicated and no copy is made. An element-scoped
+// report saying something at this point of interception was refused is not enough: a triggering
+// function holding several warrants could not tell which of them had stopped producing.
 func TestATaskTheDatapathIsNotDuplicatingReportsAFault(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))
@@ -65,8 +64,8 @@ func TestATaskTheDatapathIsNotDuplicatingReportsAFault(t *testing.T) {
 }
 
 // TestATaskFaultIsAttributedToOneWarrant: two warrants, one session each, and only one of them
-// refused. An answer that named both would be no more useful to a triggering function than the
-// element-scoped report it already had.
+// refused. An answer that named both would be no more useful to a triggering function than an
+// element-scoped report.
 func TestATaskFaultIsAttributedToOneWarrant(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))

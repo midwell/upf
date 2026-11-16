@@ -49,10 +49,10 @@ const (
 	farDrop     = 0x2
 	farNotify   = 0x4
 	// Lawful Interception forward-and-duplicate actions: forward the subscriber's
-	// packet as usual AND tee a copy to the LI X3 egress. The BESS pipeline's
-	// executeFAR Split routes these action values to the LI Replicate tee (see
-	// conf). Downlink and uplink are distinct so the subscriber copy keeps its
-	// direction.
+	// packet as usual AND tee a copy to the LI X3 egress. They are written to the
+	// FAR's fwd_action value, on which the BESS pipeline's executeFAR Split routes
+	// them to the LI Replicate tee (see conf). Downlink and uplink are distinct so
+	// the subscriber copy keeps its direction.
 	farForwardDAndDuplicate = 0x5
 	farForwardUAndDuplicate = 0x6
 	// Bit Rates.

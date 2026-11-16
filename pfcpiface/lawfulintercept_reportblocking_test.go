@@ -47,10 +47,10 @@ func unansweringADMF(t *testing.T) string {
 // The read loop sits in front of an AF_UNIX SEQPACKET queue whose invariant its own
 // comment states: everything done before returning to Read is time that queue spends
 // filling, and what it overflows with is intercept product nobody can recover. A
-// synchronous report on that path made the remedy amplify the fault — the report that
-// says copies were dropped before framing was what dropped the next several hundred —
-// and it did so for as long as the ADMF took to answer, which is up to the client's
-// full 10s timeout when it never answers at all.
+// synchronous report on that path would make the remedy amplify the fault — the report
+// that says copies were dropped before framing would drop the next several hundred —
+// for as long as the ADMF took to answer, which is up to the client's full 10s timeout
+// when it never answers at all.
 //
 // The framing side is deliberately absent, so the punt queue fills immediately and
 // every subsequent datagram takes the x3FramingLost branch. With the report issued on
@@ -156,17 +156,16 @@ func (r *slowFormReporter) counts() (syncCalls, asyncCalls int) {
 // provisioning-direction half of the rule the read-loop test covers for the data plane.
 //
 // OnAuthFailure runs synchronously on the X1 request goroutine and its own contract says
-// it must not block. This element reported from it with the blocking form, so a refusal
-// held the triggering interface open for as long as the ADMF took to answer — up to the
-// reporter's full 10s timeout when it never answers at all. That makes this element's
-// response time a function of whether its ADMF is up, measurable by whoever is probing the
-// interface, and it does it on the path that refuses unauthorised tasking: precisely where
-// an element should be quickest. The AMF and SMF had honoured that contract since it was
-// written; this element had not.
+// it must not block. Reporting from it with the blocking form would hold the triggering
+// interface open for as long as the ADMF took to answer — up to the reporter's full 10s
+// timeout when it never answers at all. That would make this element's response time a
+// function of whether its ADMF is up, measurable by whoever is probing the interface, on
+// the path that refuses unauthorised tasking: precisely where an element should be
+// quickest.
 //
-// **The callback is asserted to have run.** The first version of this test refused a
-// request that never reached OnAuthFailure at all, so its timing assertion passed against
-// the blocking form — measuring a path that does not report. OnPurge uses the same form
+// **The callback is asserted to have run.** A refused request that never reached
+// OnAuthFailure would pass the timing assertion against the blocking form too —
+// measuring a path that does not report. OnPurge uses the same form
 // for the same reason (a bulk deactivation reaches it on this goroutine) and is not driven
 // separately, because producing a keepalive lapse means waiting one out.
 func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
@@ -205,8 +204,8 @@ func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 		CorrelationID: 7,
 		SEID:          0x2632898145f4d191,
 		// A destination, or the requester refuses this client-side and the request never
-		// reaches the element at all — which is how the first version of this test came
-		// to measure a validation error instead of a refusal.
+		// reaches the element at all, and the test would measure a validation error
+		// instead of a refusal.
 		DIDs: []string{testXIDTertiary},
 	})
 	elapsed := time.Since(start)

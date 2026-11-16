@@ -195,8 +195,8 @@ func (col PfcpNodeCollector) Collect(ch chan<- prometheus.Metric) {
 // confirmed by the datapath, against the deadline GRPCJoin gives the whole batch.
 //
 // A batch that exceeds that deadline leaves this element unable to say whether its
-// rules were applied, and nothing until now recorded how close ordinary batches
-// come to it — so the exposure could be argued about but not measured.
+// rules were applied, and this records how close ordinary batches come to it, so
+// the exposure can be measured rather than argued about.
 //
 // Carries no session, rule or subscriber identity, only the PFCP procedure that
 // issued the batch. That is deliberate: this is a general operator metric, and one

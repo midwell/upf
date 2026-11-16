@@ -95,9 +95,8 @@ func TestParseFARDuplicateIsSilent(t *testing.T) {
 //
 // BESS's GtpuEncap reuses "action" as the GTP-U PDU Session Container PDU Type,
 // where only 0 (downlink) and 1 (uplink) exist. Putting a duplication value there
-// shipped an undefined PDU type to the RAN, which segfaulted parsing it. The
-// duplication variants therefore belong on fwd_action alone, and the
-// second half of this table is the regression guard for that.
+// would ship an undefined PDU type to the RAN. The duplication variants therefore
+// belong on fwd_action alone, and the second half of this table guards that.
 func TestSetFwdActionValueDuplicate(t *testing.T) {
 	b := &bess{}
 
@@ -183,7 +182,7 @@ func TestShipperPDU(t *testing.T) {
 		t.Errorf("uplink: format=%d direction=%d, want IPv4/FromTarget", ul.PayloadFormat, ul.Direction)
 	}
 	// The correlation identifier is the task's, big-endian, so it matches the value
-	// the SMF put on that session's X2 xIRI. It is no longer derived from the
+	// the SMF put on that session's X2 xIRI. It is not derived from the
 	// datapath tag — the tag only selects the task.
 	wantCorr := []byte{0x26, 0x32, 0x89, 0x81, 0x45, 0xf4, 0xd1, 0x91}
 	if !bytes.Equal(ul.CorrelationID[:], wantCorr) || !bytes.Equal(ul.Payload, inner) {
@@ -581,7 +580,7 @@ func TestTheTwoShipperFaultsAreIndependent(t *testing.T) {
 
 // TestAWithdrawnTriggersDestinationStopsCounting is the probe-stuck-on failure this element
 // is most exposed to, because its triggers are withdrawn as sessions end — several times an
-// hour on a busy UPF — and a delivery client is never forgotten.
+// hour on a busy UPF.
 //
 // A destination whose last delivery failed and whose trigger has since gone can never be
 // delivered to again. Nothing would clear it, so counting it would leave the element
@@ -843,9 +842,9 @@ func x3AttrsOf(pdu *x2x3.PDU) map[uint16][]byte {
 // TestShipperPDUCarriesTheRequiredAttributes covers the four conditional attributes
 // TS 33.128 table 5.3.3-2 requires of an xCC, and the two it does not.
 //
-// Every xCC this project has ever delivered carried none of them: the mechanism was
-// implemented in li/x2x3 and populated by nobody, which is invisible to
-// interoperability testing because neither side sent one.
+// li/x2x3 implements the mechanism but populates nothing itself, and an xCC carrying
+// none of them is invisible to interoperability testing when neither side sends one,
+// so the shipper's own PDU is asserted here.
 func TestShipperPDUCarriesTheRequiredAttributes(t *testing.T) {
 	task := types.InterceptTask{
 		ProductID:     testXIDSEIDShaped,
@@ -989,11 +988,9 @@ func triggerToDID(xid, addr, did string) types.InterceptTask {
 // TestTheWatcherSeesWhatTheRetiredSitesReported guards the most likely way routing these
 // reports through the watcher could make something worse.
 //
-// Two sites used to report an unreachable MDF3 the moment they noticed — the
-// delivery-failure hook and the keepalive one. Both now nudge the watcher instead.
-// If the watcher's own view does not cover what they saw, a fault that used to be
-// reported is now reported by nobody, and retiring the sites as a batch is how that
-// happens without anyone noticing.
+// Two sites notice an unreachable MDF3 first — the delivery-failure hook and the
+// keepalive one — and both nudge the watcher rather than reporting. If the watcher's own
+// view does not cover what they saw, that fault is reported by nobody.
 func TestTheWatcherSeesWhatTheRetiredSitesReported(t *testing.T) {
 	s := &liShipper{senders: make(map[string]x2x3.Sender), tasks: store.New()}
 
@@ -1051,10 +1048,9 @@ func TestAnUntriedDestinationIsNotReportedUnreachable(t *testing.T) {
 //
 // `bess` and `pfcp-agent` are ordinary containers in one pod, started concurrently
 // with no readiness gate between them, so the datapath's egress socket may simply
-// not exist when the agent reaches it. That was a single dial: it failed, the
-// CC-POI was absent for the life of the process, and the only trace was a
-// deliberately vague line on the BESS log — because the dial happened *before* the
-// X1 reporter was built, so there was nowhere to report it to.
+// not exist when the agent reaches it. A single dial would fail, the CC-POI would
+// be absent for the life of the process, and the only trace would be a deliberately
+// vague line on the BESS log.
 //
 // What must hold instead: the shipping loop keeps trying, and everything that does
 // not depend on the datapath is up in the meantime — the element can be tasked and

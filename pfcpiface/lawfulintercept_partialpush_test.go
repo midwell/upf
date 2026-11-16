@@ -130,16 +130,15 @@ func TestARuleLeftUnpushedIsStillProgrammedOffWhenTheDatapathRecovers(t *testing
 //
 // The record is the element's only memory of what the datapath holds, and the re-derivation
 // skips any FAR whose recorded value already equals what the tasking implies. So a record that
-// says "not duplicating" while the datapath *is* used to be unrecoverable: the element computed
-// "nothing should duplicate", saw its record agreeing, and did nothing — while a subscriber's
-// traffic went on being copied under no authority. Invisible from both ends, because the
-// element's own account said duplication was off and the copies were dropped as unattributable
-// rather than delivered.
+// says "not duplicating" while the datapath *is* would, without everDuplicated, be unrecoverable:
+// the element computes "nothing should duplicate", sees its record agreeing, and does nothing —
+// while a subscriber's traffic goes on being copied under no authority. Invisible from both ends,
+// because the element's own account says duplication is off and the copies are dropped as
+// unattributable rather than delivered.
 //
-// **This state was reached on a live deployment and the path that produced it is not known.** It
-// did not reproduce in seven consecutive runs of the section that exposed it against a freshly
-// started pod. So this test does not reproduce a cause: it corrupts the record directly, which
-// is the state whatever the cause, and asserts the element recovers on the next pass.
+// **This test does not reproduce a cause.** More than one path can leave the record diverged, so
+// it corrupts the record directly, which is the state whatever the cause, and asserts the
+// element recovers on the next pass.
 func TestADivergentRecordDoesNotMakeOverCollectionPermanent(t *testing.T) {
 	f := newEnablerFixture(t)
 	f.putSession(t, unmarkedSession(100, testUEIPv4))
@@ -207,18 +206,15 @@ func TestAFARNeverTurnedOnIsNotPushedRepeatedly(t *testing.T) {
 	}
 }
 
-// There is no test here for a divergence noticed *without* a tasking change, and that is a gap
-// rather than an oversight. Making the trigger distrust the record — so a session event alone
-// brings the remedy — was written, tested and then withdrawn: it asks for a re-derivation on
-// every session event touching an ever-intercepted FAR, and section 11's "re-provisioning
-// restores content interception" failed once in six runs against it where the build without it
-// passed five for five. Not proof, and not dismissible either. See sessionProgrammed.
-
+// TestADivergenceIsNoticedWithoutATaskingChange completes the previous test.
+//
+// That one withdraws the warrant, which is a tasking change and therefore asks for a
+// re-derivation by itself. This one changes no tasking at all: it corrupts the record while no
 // warrant covers the session, and then does nothing but a session event.
 //
 // It matters because the remedy lives in the re-derivation, and in the diverged state both the
 // record and the session's own flag read false — so the test that decides whether to *ask* for a
-// re-derivation saw nothing notable and never asked. Distrusting the record when deciding what to
+// re-derivation would see nothing notable and never ask. Distrusting the record when deciding what to
 // do, while trusting it when deciding whether to look, leaves the datapath duplicating until some
 // unrelated event happens along.
 func TestADivergenceIsNoticedWithoutATaskingChange(t *testing.T) {

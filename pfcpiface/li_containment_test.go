@@ -10,15 +10,14 @@ import (
 	"testing"
 )
 
-// TestStrictLiBlockDoesNotFailTheConfigurationLoad is a source-level assertion, and it exists
-// because this element already learned the lesson once and then repeated it one layer up.
+// TestStrictLiBlockDoesNotFailTheConfigurationLoad is a source-level assertion that the strict
+// `li` decode in `LoadConfigFile` does not fail the load.
 //
-// `startLIShipper` carries the record of it: *"The configuration is checked here, and not in
-// validateConf, because a refusal there took the user plane down and named the offending LI field
-// in the general operator log."* The strict `li` decode then did exactly that again from
-// `LoadConfigFile`, whose only caller answers an error with `Fatalln` — so one mistyped LI key
-// crash-looped the element carrying every subscriber's traffic, and echoed the offending key into
-// the operator log four lines above the comment forbidding it.
+// The LI block is checked in `startLIShipper`, not in validateConf, because a refusal there would
+// take the user plane down and name the offending LI field in the general operator log. The strict
+// decode is one layer further up and has the same hazard: `LoadConfigFile`'s only caller answers
+// an error with `Fatalln`, so returning it would let one mistyped LI key crash-loop the element
+// carrying every subscriber's traffic, and echo the offending key into the operator log.
 //
 // This is the worst of the three network functions to get wrong. The AMF and SMF stop signalling;
 // this one stops forwarding. And a user plane that will not start is the loudest possible

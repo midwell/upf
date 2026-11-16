@@ -395,13 +395,12 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 			mustWriteStringToDisk(li(`,
 				"`+typo+`": "5m"`), path)
 
-			// **Both halves, and the second is the one a previous round lost.** The key must be
-			// refused, *and* the user plane must still come up: a configuration load that fails
-			// reaches cmd/pfcpiface's Fatalln, so a typo in an optional subsystem crash-loops
-			// the element carrying every subscriber's traffic — and a user plane that will not
-			// start is the loudest way there is to disclose that this element is LI-provisioned.
-			// startLIShipper's own comment records this lesson for validateConf; the strict
-			// decode repeated it one layer up. Asserting only the refusal is what let it through.
+			// **Both halves.** The key must be refused, *and* the user plane must still come
+			// up: a configuration load that fails reaches cmd/pfcpiface's Fatalln, so a typo in
+			// an optional subsystem would crash-loop the element carrying every subscriber's
+			// traffic — and a user plane that will not start is the loudest way there is to
+			// disclose that this element is LI-provisioned. Asserting only the refusal would
+			// pass against exactly that.
 			conf, err := LoadConfigFile(path)
 			if err != nil {
 				t.Fatalf("a misspelled LI key stopped the whole configuration load, which "+

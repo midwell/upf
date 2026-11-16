@@ -36,7 +36,7 @@ func TestARefusedModificationIsRewrittenByTheNextPass(t *testing.T) {
 	}
 
 	// The handler re-derives over the modification and pushes the changed subset. The
-	// datapath refuses and — on this branch — nothing lands, so f.record is not called.
+	// datapath refuses and — on this path — nothing lands, so f.record is not called.
 	modified := sess
 	modified.fars = append([]far(nil), sess.fars...)
 	updated := PacketForwardingRules{fars: append([]far(nil), modified.fars...)}
@@ -233,11 +233,9 @@ func TestAnUnconfirmedDuplicationWriteIsSilentOnTheOperatorLog(t *testing.T) {
 	}
 }
 
-// The interrogation half, and the reason it is asserted rather than reasoned about: this
-// element's conformance disposition states that a task interrogation answers
+// The interrogation half, asserted rather than reasoned about: a task interrogation answers
 // duplicationNotProgrammed after an unconfirmed write instead of claiming the task is
-// faultless. That claim was derived by reading taskFaults, and a claim published in a
-// conformance document needs a test behind it.
+// faultless. Reading taskFaults suggests it does; this test is what shows it.
 func TestAnUnconfirmedWriteIsVisibleToAnInterrogation(t *testing.T) {
 	f := newEnablerFixture(t)
 	sess := unmarkedSession(107, "10.250.0.14")

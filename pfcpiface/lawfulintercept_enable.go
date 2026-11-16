@@ -28,8 +28,8 @@ import (
 // Duplication is an apply-action on a FAR, and several PDRs may forward through
 // one, so enabling it can copy more traffic than the criteria identify. That is
 // accepted here and corrected downstream by filtering: the alternative — cloning a
-// FAR and repointing a PDR at it — mutates the subscriber's own forwarding, which
-// is the area two visible-to-the-target defects came from.
+// FAR and repointing a PDR at it — mutates the subscriber's own forwarding, where
+// any mistake is visible to the target.
 //
 // The tasking is the single source of truth. Nothing here remembers which FARs it
 // enabled: every point that could change the answer re-derives it from the live
@@ -111,12 +111,11 @@ type ccEnabler struct {
 	// can see it — the element's own account says duplication is off, and the copies are dropped
 	// as unattributable rather than delivered, so no agency sees them either.
 	//
-	// That state was reached on a live deployment. What produced it is *not* established: it did
-	// not reproduce in seven consecutive runs of the section that exposed it against a freshly
-	// started pod, and this set is deliberately not a fix for any particular path. It is a fix
-	// for the *permanence*, which is the part that makes the harm unbounded — with it, the
-	// element tells the datapath "off" for every FAR it has ever turned on, whatever it believes,
-	// so a divergence lasts until the next re-derivation instead of until the pod restarts.
+	// That state has been observed on a deployment and what produced it is not established, so
+	// this set is deliberately not a fix for any particular path. It is a fix for the *permanence*, which is the part that makes the
+	// harm unbounded — with it, the element tells the datapath "off" for every FAR it has ever
+	// turned on, whatever it believes, so a divergence lasts until the next re-derivation
+	// instead of until the pod restarts.
 	//
 	// **Monotone within a session's life, on purpose.** The bug class is an entry being wrongly
 	// overwritten to false, and a set that only grows has no such path. Nothing removes an entry
@@ -125,16 +124,15 @@ type ccEnabler struct {
 	// **It is reclaimed with that FAR, though**, in sessionForgotten and farsRemoved, and the
 	// reason is that it cannot be read afterwards: transact consults this set only inside its
 	// walk of live sessions' FARs, so an entry whose session or FAR is gone is unreachable and
-	// retaining it buys nothing. An earlier version of this comment justified never pruning by
-	// saying a later session could be allocated the same SEID and inherit a stale rule — that
-	// route does not exist here, because NewPFCPSession allocates from a 64-bit random source.
+	// retaining it buys nothing. A later session cannot inherit a stale entry by being allocated
+	// the same SEID, because NewPFCPSession allocates from a 64-bit random source.
 	//
-	// Retaining them was not free, either. `A point of interception's record of what it
-	// programmed stays bounded` binds every record of what was programmed, and this is one: a
-	// task keyed by network instance or tunnel direction selects *every* session, so under
-	// ordinary subscriber churn an unpruned set grows with every session that has ever existed
-	// while the task was held. The element keeps intercepting correctly the whole time, which is
-	// what makes it invisible until the process dies and takes every warrant with it.
+	// Retaining them would not be free, either. Every record of what was programmed must stay
+	// bounded, and this is one: a task keyed by network instance or tunnel direction selects
+	// *every* session, so under ordinary subscriber churn an unpruned set would grow with every
+	// session that has ever existed while the task was held. The element would keep intercepting
+	// correctly the whole time, which is what would make it invisible until the process dies and
+	// takes every warrant with it.
 	everDuplicated map[farRef]bool
 	// faultsMemo answers taskFaults without re-walking every session, stamped with the two
 	// things the answer depends on: the tasking epoch, and the record's write counter — which
@@ -261,14 +259,14 @@ func newCCEnabler(
 // run performs re-derivations, one at a time and never concurrently with another.
 //
 // A single worker is what makes the transaction atomic with respect to itself.
-// Provisioning requests arrive concurrently, and when only the individual reads and
+// Provisioning requests arrive concurrently, and if only the individual reads and
 // writes were protected the pass that began earlier could program and publish last
 // — clearing duplication for a task that is still active, with nothing re-deriving
 // until some unrelated event happened to trigger another pass. That loss is silent
 // by nature: a dropped copy produces no record for any downstream function to miss,
 // so it could persist for the life of the warrant.
 //
-// The alternative was a mutex around the transaction, which is simpler and wrong
+// The alternative is a mutex around the transaction, which is simpler and wrong
 // here: the transaction walks every session of every source, so an X1 request's
 // latency would become a function of session count on the element holding the most
 // sessions.
@@ -596,12 +594,11 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // "this pass cannot have seen the session", which is what transact's carry-over
 // relies on.
 //
-// The same ordering is why transact no longer sees a value the session path wrote
-// mid-flight. It used to, and the consequence was the sharper half of the defect
-// this closes: the pass compared its own stale conclusion against the newer record,
-// found a difference, and pushed the FAR *off* — ending an interception the tasking
-// still required, with nothing logged and the triggering function still believing it
-// was running.
+// The same ordering is why transact never acts on a value the session path wrote
+// mid-flight. If it did, the pass would compare its own stale conclusion against the
+// newer record, find a difference, and push the FAR *off* — ending an interception
+// the tasking still required, with nothing logged and the triggering function still
+// believing it was running.
 //
 // The re-derivation is asked for here rather than by the pass that lost the race,
 // because here is the only place ordered after PutSession. It is gated so that an
@@ -609,15 +606,15 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // changed, and the walk of every session that a request implies does not happen.
 //
 // **pushed is the rules the caller actually sent to the datapath, and it is an argument
-// because the caller is the only party that knows.** This used to walk the session's whole FAR
-// list, which is right for an establishment — everything the session has was just pushed — and
+// because the caller is the only party that knows.** Walking the session's whole FAR list
+// would be right for an establishment — everything the session has was just pushed — and
 // wrong for a modification, which pushes only the rules the SMF restated. For every other FAR
-// in that session the record was then rewritten from what this element *intends*, not from what
-// the datapath was last told, and the two are only the same when nothing has gone wrong.
+// in that session the record would be rewritten from what this element *intends*, not from
+// what the datapath was last told, and the two are only the same when nothing has gone wrong.
 //
-// The direction of the error is what makes it worth a signature change. A FAR the datapath
+// The direction of that error is why this is an argument. A FAR the datapath
 // refused, or one whose push was lost, is duplicating what it was duplicating before — and the
-// record would now claim the tasking's intended value for it. Where the intent is "not
+// record would then claim the tasking's intended value for it. Where the intent is "not
 // duplicating", the next pass compares the record against the tasking, finds them equal, and
 // concludes there is nothing to do: copies keep being made for a session no warrant covers,
 // nothing in the element can turn them off, and the element's own account says duplication is
@@ -662,25 +659,16 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far, confirmed bo
 	// still be one whose answer this modification changed.
 	// **And a FAR this element has ever turned on is notable whatever the record says.**
 	//
-	// Same reason the pass no longer trusts the record in the "off" direction: in the diverged
+	// Same reason the pass does not trust the record in the "off" direction: in the diverged
 	// state both the record and the session's own flag read false, so neither of the two tests
 	// below fires, no pass is requested, and the remedy in transact never gets the chance to run.
 	// Distrusting the record when deciding what to *do* while trusting it when deciding whether
 	// to *look* leaves the fix half-wired — it works only when some other event happens to ask
 	// for a pass.
 	//
-	// **Withdrawn once, on 2026-08-21, and reinstated the next day on better evidence.** It was
-	// withdrawn because section 11's "re-provisioning restores content interception" failed once
-	// in six runs with it and passed five for five without — at a one-in-six rate that is four
-	// chances in ten of being coincidence, and no mechanism was found by reading. The asymmetry
-	// decided it: an unexplained risk of *losing* interception outweighed a bounded risk of
-	// copying too much.
-	//
-	// Both halves of that reasoning have since changed. The condition this guards is no longer
-	// unexplained — it reproduces on demand by freezing the datapath so a withdrawal's push times
-	// out (see find-li-cc-record-datapath-divergence), and the state it leaves is a subscriber
-	// copied under no authority until some unrelated event happens along. And the evidence
-	// against it was one failure in six; section 11 now runs green repeatedly with this in.
+	// The diverged state is reached by freezing the datapath so a withdrawal's push times out,
+	// and without this the subscriber stays copied under no authority until some unrelated
+	// event happens along.
 	//
 	// Bounded by the same small set: one pass request per session event touching a FAR that has
 	// ever been intercepted, which is what a re-derivation is cheap enough for.
@@ -731,9 +719,9 @@ func (e *ccEnabler) sessionProgrammed(s *PFCPSession, pushed []far, confirmed bo
 // **It moves the write counter, and that is what makes the deletion visible to a pass
 // already running.** A pass takes `mark` from `writes` at its start, rebuilds `fresh` from
 // the sessions it walked, and at the end carries over any entry stamped past the mark. A
-// deletion that did not move the counter was therefore invisible to the carry-over: the
-// pass's own `fresh` map still held the entries it had planned from the session before it
-// went, `e.programmed = fresh` put them back, and the push could re-add the FAR to the
+// deletion that did not move the counter would be invisible to the carry-over: the
+// pass's own `fresh` map would still hold the entries it had planned from the session before
+// it went, `e.programmed = fresh` would put them back, and the push could re-add the FAR to the
 // datapath *after* the delete — duplication reinstated on a session that has been torn
 // down, recorded as programmed, with nothing left to turn it off.
 func (e *ccEnabler) sessionForgotten(s *PFCPSession) {
@@ -853,8 +841,8 @@ func (e *ccEnabler) reportAbandoned(seid uint64, fars []far, what, why string) {
 // **The session's own liDuplicate is not enough to answer it.** That flag is what the session
 // path last derived, and the re-derivation deliberately writes the record, not the session
 // store: a warrant activated after the UE attached is turned on by a pass, so the datapath is
-// duplicating while every stored FAR still says it is not. Gating on the flag alone made a
-// refused teardown delete of exactly that session — the ordinary operational case — silent.
+// duplicating while every stored FAR still says it is not. Gating on the flag alone would make
+// a refused teardown delete of exactly that session — the ordinary operational case — silent.
 //
 // So the record answers too, and everDuplicated rather than the current record value, for the
 // reason everDuplicated exists: a record that wrongly says "off" is the unrecoverable direction.
@@ -911,9 +899,8 @@ func (e *ccEnabler) farsAttempted(seid uint64, fars []far) {
 // no representation anywhere.
 //
 // Raised here rather than in the handler so that a path added later inherits it by calling
-// farsAttempted, instead of having to remember to report as well as record. That is the
-// sibling-paths lesson: a remedy placed on one path is a remedy whose presence depends on
-// which path runs.
+// farsAttempted, instead of having to remember to report as well as record: a remedy placed
+// on one path is a remedy whose presence depends on which path runs.
 //
 // Only where duplication is involved. An ordinary rule this element could not confirm is
 // the datapath's business; it becomes the ADMF's only when a warrant depends on it.
@@ -969,8 +956,8 @@ func (e *ccEnabler) recordFARs(seid uint64, fars []far, confirmed bool) {
 //
 // The work happens on the enabler's worker, so this does not block an X1 request
 // behind a walk of every session. Where the caller's own report depends on the
-// datapath having actually been reprogrammed, use retaskAndWait: with the worker,
-// this returning no longer means the datapath is programmed.
+// datapath having actually been reprogrammed, use retaskAndWait: this returning
+// does not mean the datapath is programmed.
 func (e *ccEnabler) retask() {
 	if e == nil {
 		return
@@ -1193,7 +1180,7 @@ func (e *ccEnabler) transact() {
 					// rewrites the rule, and taskFaults counts it as not duplicating so
 					// an interrogation answers with a fault rather than claiming the
 					// warrant is being served. everDuplicated is untouched, so the
-					// over-collection direction keeps the same protection it had.
+					// over-collection direction keeps its protection.
 					//
 					// The same trade farsAttempted documents: one redundant write per
 					// pass where the rules did land, against an accepted warrant silently
@@ -1285,8 +1272,8 @@ func (e *ccEnabler) transact() {
 	// serial, so no pass with an older mark can still be running.
 	//
 	// Reclaimed at all because a map that grows with every released session and is never
-	// emptied is precisely the leak sessionForgotten exists to prevent, reintroduced by its
-	// own bookkeeping.
+	// emptied would be precisely the leak sessionForgotten exists to prevent, reintroduced by
+	// its own bookkeeping.
 	for seid, gone := range e.forgotten {
 		if gone <= mark {
 			delete(e.forgotten, seid)
@@ -1352,8 +1339,7 @@ type coveredTask struct {
 // tasksCovering returns the active tasks whose detection criteria select traffic in
 // the session the datapath tagged a copy with, in XID order.
 //
-// **The answer is memoised per session, and the objection this used to carry is the
-// reason it is stamped rather than indexed.** An index maintained incrementally has to
+// **The answer is memoised per session, and stamped rather than indexed.** An index maintained incrementally has to
 // be invalidated at every site that changes tasking or session rules, and a site that
 // forgets goes stale silently — product attributed to the wrong warrant, or dropped as
 // untasked, neither visible from outside this element. An entry stamped with the
@@ -1365,14 +1351,13 @@ type coveredTask struct {
 // A change in one session's own rules, or that session going away, drops that session's
 // entry — reparse would be the wrong instrument there, since the tasking has not moved.
 //
-// What this replaced, and why the previous comment's cost estimate was the wrong way
-// round. Per copy it did: a full store snapshot with a deep clone of every task's four
-// slices, then a parse of every criterion of every task, then a resolve over every PDR,
-// then filterFor parsing the same criteria a second time — and for a PDR criterion an
-// IE parse and a throwaway address pool. Measured at about 95 allocations per copy for
-// three warrants against one session, where framing is one allocation and a memcpy and
-// delivery amortises across a 32-PDU batch. This is the one path in this element whose
-// cost is per packet, in front of a socket queue holding ten datagrams by default whose
+// Why memoise at all: computing the answer from scratch takes a full store snapshot
+// with a deep clone of every task's four slices, a parse of every criterion of every
+// task, a resolve over every PDR, then filterFor parsing the same criteria a second
+// time — and for a PDR criterion an IE parse and a throwaway address pool. That is
+// about 95 allocations per copy for three warrants against one session, where framing
+// is one allocation and a memcpy and delivery amortises across a 32-PDU batch. This is
+// the one path in this element whose cost is per packet, in front of a socket queue holding ten datagrams by default whose
 // overflow is intercept product nothing downstream can recover.
 func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	if e == nil || e.tasks == nil {
@@ -1512,13 +1497,13 @@ type faultEntry struct {
 // **Memoised, because the X1 request goroutine is not where a walk of every session belongs.**
 // li/x1 calls this once per task on *every* response that carries tasks — an activation, a
 // modification, a deactivation, a status query alike — and the computation resolves every
-// criterion against every session this element holds. An element with twenty thousand sessions and
-// ten tasks resolved two hundred thousand criterion sets to answer one provisioning message, on
-// the goroutine answering it.
+// criterion against every session this element holds. Unmemoised, an element with twenty thousand
+// sessions and ten tasks would resolve two hundred thousand criterion sets to answer one
+// provisioning message, on the goroutine answering it.
 //
 // That is precisely the cost `run()`'s own doc-comment says the worker exists to keep off the
 // request path: "an X1 request's latency would become a function of session count on the element
-// holding the most sessions". The remedy for one path reintroduced it on another.
+// holding the most sessions".
 //
 // The answer is still *determined when asked* rather than pushed or accumulated: the stamps are
 // the tasking epoch and the record's write counter, and every event that could change the answer

@@ -57,8 +57,8 @@ type Conf struct {
 }
 
 // LiConfig configures the Lawful Interception CC-POI (X3 shipper). It is opt-in:
-// when absent, the LI content-of-communication egress is inactive and the UPF
-// behaves exactly as before. The X3 socket is the userspace UnixSocketPort the
+// when absent, the LI content-of-communication egress is inactive and the agent
+// starts no interception subsystem. The X3 socket is the userspace UnixSocketPort the
 // BESS pipeline tees duplicated packets to (see conf).
 type LiConfig struct {
 	// blockErr, when non-nil, is why this `li` object was refused by the strict decode — an
@@ -304,12 +304,12 @@ func validateTimeouts(conf Conf) error {
 	//
 	// A validateConf error reaches logger.InitLog.Fatalln("error reading conf file:",
 	// err) in cmd/pfcpiface/main.go, and these errors are built by
-	// ErrInvalidArgumentWithReason — so a mistyped optional LI value printed
-	// `invalid argument 'li.trigger_keepalive'=30 (…)` into the general operator log
-	// and then took the **user plane** down. Two violations at once: an LI typo causing
-	// a network outage, and an LI-attributable line in a log far more widely readable
+	// ErrInvalidArgumentWithReason — so validating here would let a mistyped optional
+	// LI value print the field name and value into the general operator log and then
+	// take the **user plane** down. Two violations at once: an LI typo causing a
+	// network outage, and an LI-attributable line in a log far more widely readable
 	// than the config file it describes. bess.go's own handling of a startLIShipper
-	// failure is deliberately vague for exactly that reason, so this contradicted it.
+	// failure is deliberately vague for exactly that reason.
 	//
 	// The checks live in startLIShipper instead, where the fault reporter exists and a
 	// refusal stops interception and nothing else.
@@ -406,12 +406,11 @@ func LoadConfigFile(filepath string) (Conf, error) {
 	// its own, because a key dropped there lands on a default that fails unsafely and says
 	// nothing: see strictLiBlock.
 	//
-	// **Recorded, not returned.** Returning it failed the whole configuration load, and
+	// **Recorded, not returned.** Returning it would fail the whole configuration load, and
 	// cmd/pfcpiface's only caller answers that with Fatalln — so a single mistyped LI key
-	// crash-looped the user plane, carrying every subscriber's traffic with it, and echoed the
-	// offending LI field into the general operator log four lines above the comment forbidding
-	// exactly that. startLIShipper's own comment records this lesson, learned once for
-	// validateConf and repeated here one layer up.
+	// would crash-loop the user plane, carrying every subscriber's traffic with it, and echo
+	// the offending LI field into the general operator log. The same reasoning keeps the li
+	// block out of validateConf.
 	//
 	// The refusal is carried on the LI object instead and acted on by the LI subsystem, which
 	// declines to intercept and tells the ADMF, at a point where the reporting channel exists.
