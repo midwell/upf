@@ -326,6 +326,47 @@ func TestTheMemoIsBounded(t *testing.T) {
 	}
 }
 
+// TestAFullMemoStillReplacesAnExistingClassification: the ceiling refuses a datagram that
+// needs a new slot, not one whose key is already held.
+//
+// The identification field is the sender's to reuse, so a new first fragment can arrive with
+// the key of a datagram classified moments earlier. Refusing it at the ceiling would leave the
+// earlier verdict in place: a stale match delivers the new datagram's fragments outside the
+// task's criteria, and a stale non-match drops them without a report.
+func TestAFullMemoStillReplacesAnExistingClassification(t *testing.T) {
+	m := newFragmentMemo(nil)
+
+	now := time.Now()
+	m.now = func() time.Time { return now }
+
+	for i := range fragmentMemoMax {
+		m.classify(fragKey{ident: uint16(i % 65535), proto: protoTCP, src: uint32(i)}, true)
+	}
+
+	existing := fragKey{ident: 7, proto: protoTCP, src: 7}
+	m.classify(existing, false)
+
+	if matched, known := m.decision(existing); matched || !known {
+		t.Errorf("a full memo kept a reused key's earlier verdict: decision = (%v, %v), want "+
+			"(false, true) — the new datagram's fragments follow the old one's classification",
+			matched, known)
+	}
+
+	fresh := fragKey{ident: 1, proto: protoTCP, src: fragmentMemoMax + 1}
+	m.classify(fresh, true)
+	if _, known := m.decision(fresh); known {
+		t.Error("a full memo recorded a new key: the ceiling no longer bounds it")
+	}
+
+	m.mu.Lock()
+	held := len(m.decided)
+	m.mu.Unlock()
+
+	if held != fragmentMemoMax {
+		t.Errorf("the memo holds %d classifications, want the ceiling of %d", held, fragmentMemoMax)
+	}
+}
+
 // TestTheFragmentMemoIsConcurrent: framing runs four workers deep and they share the cached
 // filter, so they share the memo. Run under -race.
 func TestTheFragmentMemoIsConcurrent(t *testing.T) {

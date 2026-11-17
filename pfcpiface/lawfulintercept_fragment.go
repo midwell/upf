@@ -126,12 +126,15 @@ func (m *fragmentMemo) classify(k fragKey, matched bool) {
 		}
 	}
 
-	if len(m.decided) >= fragmentMemoMax {
+	if _, exists := m.decided[k]; len(m.decided) >= fragmentMemoMax && !exists {
 		// The ceiling. Rather than evicting an arbitrary entry — which would drop a
 		// classification still in use — the new datagram is simply not recorded, and nothing
 		// is reported yet: no fragment has been discarded. Its later fragments will find
 		// nothing, be dropped, and be reported at that point, which is where the loss
 		// actually is; a datagram with no later fragment loses nothing.
+		//
+		// A key already held needs no new slot, so it is replaced rather than refused:
+		// keeping it would apply an earlier datagram's verdict to this one's fragments.
 		return
 	}
 
