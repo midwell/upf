@@ -348,8 +348,8 @@ func bulkRequest(msgType, tfID, neID string) []byte {
 }
 
 // TestLiBlockRefusesUnknownKeys covers the whole load path, not strictLiBlock alone: the property
-// is that a mistyped LI key stops the user plane from starting on a configuration whose settings
-// it silently ignored, and that is only true if LoadConfigFile calls the check.
+// is that a mistyped LI key is refused, recorded for the LI subsystem, and does not fail the
+// configuration load, and that is only true if LoadConfigFile calls the check.
 //
 // The two keys below are chosen because their defaults are not what the operator asked for and
 // neither is mandatory, so validateLiConfig cannot see them go missing. A dropped
@@ -357,11 +357,8 @@ func bulkRequest(msgType, tfID, neID string) []byte {
 // `admf_url` leaves the fault channel a no-op, so nothing
 // this element is required to report — that one included — reaches the ADMF.
 //
-// This refusal is a load-time one, which is a deliberate exception to the rule the test above
-// states: an LI value must not stop this network function. Nothing is intercepting yet at load
-// time, so refusing costs no interception and no traffic; and the alternative is a deployment that
-// carries a setting no part of the element will ever read. Once the shipper is running, the rule
-// holds and a fault goes to the ADMF instead.
+// The refusal stops interception, not the user plane: it is carried in blockErr, and the shipper
+// declines to start on it and tells the ADMF.
 func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 	li := func(extra string) string {
 		return `{
