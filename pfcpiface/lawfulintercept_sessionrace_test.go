@@ -685,7 +685,8 @@ func awaitPush(t *testing.T, entered <-chan struct{}) {
 const handlerGrace = 250 * time.Millisecond
 
 // runAgainstHeldPush runs handler in a goroutine while a pass is held in its push, gives it
-// handlerGrace to complete, then releases the push and waits for the handler.
+// handlerGrace, asserts that it has not finished, then releases the push and waits for the
+// handler.
 func runAgainstHeldPush(t *testing.T, release func(), handler func() error) {
 	t.Helper()
 
@@ -701,6 +702,10 @@ func runAgainstHeldPush(t *testing.T, release func(), handler func() error) {
 	select {
 	case err = <-done:
 		finished = true
+
+		t.Error("the session handler finished while a pass was held in its push of the same " +
+			"session: the handler is not serialised against the push, so its write and the " +
+			"pass's can land in either order")
 	case <-time.After(handlerGrace):
 	}
 
@@ -908,5 +913,35 @@ func TestATaskingPushAndADeletionDoNotInterleave(t *testing.T) {
 
 	if held != 0 {
 		t.Errorf("the record holds %d entries for a deleted session", held)
+	}
+}
+
+// TestLockSessionsTakesASharedStripeOnce holds two sessions that share a stripe. lockSessions
+// must take that stripe once, or it waits on itself, and release it once: a second release is
+// a fatal error of the runtime, and none leaves the stripe held, which the lockSession
+// afterwards would wait on.
+func TestLockSessionsTakesASharedStripeOnce(t *testing.T) {
+	e := &ccEnabler{}
+
+	const first = uint64(1)
+
+	second := first + sessionStripes
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		unlock := e.lockSessions([]uint64{first, second})
+		unlock()
+
+		e.lockSession(first)()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lockSessions with two sessions on one stripe deadlocked, or did not release " +
+			"the stripe")
 	}
 }
