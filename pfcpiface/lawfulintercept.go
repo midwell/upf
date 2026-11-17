@@ -194,7 +194,7 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		if issueReporter != nil {
 			issueReporter.Notify(x1.NEIssueInvalidConfig,
 				"this element's interception configuration carries a setting it does not "+
-					"recognise, so the values it would fall back on cannot be trusted; "+
+					"recognise or cannot read, so the values it would fall back on cannot be trusted; "+
 					"interception has not been started")
 		}
 

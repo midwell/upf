@@ -53,7 +53,7 @@ type Conf struct {
 	EnableHBTimer            bool             `json:"enable_hbTimer"`
 	HeartBeatInterval        string           `json:"heart_beat_interval"`
 	N4Addr                   string           `json:"n4_addr"`
-	Li                       *LiConfig        `json:"li,omitempty"`
+	Li                       *LiConfig        `json:"-"` // decoded by strictLiBlock alone: see LoadConfigFile
 }
 
 // LiConfig configures the Lawful Interception CC-POI (X3 shipper). It is opt-in:
@@ -62,7 +62,8 @@ type Conf struct {
 // BESS pipeline tees duplicated packets to (see conf).
 type LiConfig struct {
 	// blockErr, when non-nil, is why this `li` object was refused by the strict decode — an
-	// unrecognised key, most likely a misspelling of one this element does model.
+	// unrecognised key, most likely a misspelling of one this element does model, or a value
+	// of the wrong type.
 	//
 	// Unexported so no configuration file can set it, and carried rather than returned from
 	// LoadConfigFile because refusing a configuration is not the same as refusing to run. This
@@ -402,20 +403,23 @@ func LoadConfigFile(filepath string) (Conf, error) {
 	}
 
 	// The decode above stays lenient, so a configuration carrying a key this version does not
-	// model still starts. The LI object is held to a stricter standard, on
-	// its own, because a key dropped there lands on a default that fails unsafely and says
-	// nothing: see strictLiBlock.
+	// model still starts, and it does not read the `li` object at all (Conf.Li is tagged "-").
+	// The LI object is decoded here, on its own and to a stricter standard, because a key
+	// dropped there lands on a default that fails unsafely and says nothing: see
+	// strictLiBlock.
 	//
 	// **Recorded, not returned.** Returning it would fail the whole configuration load, and
-	// cmd/pfcpiface's only caller answers that with Fatalln — so a single mistyped LI key
-	// would crash-loop the user plane, carrying every subscriber's traffic with it, and echo
-	// the offending LI field into the general operator log. The same reasoning keeps the li
-	// block out of validateConf.
+	// cmd/pfcpiface's only caller answers that with Fatalln — so a single mistyped LI key or
+	// value would crash-loop the user plane, carrying every subscriber's traffic with it, and
+	// echo the offending LI field into the general operator log. The same reasoning keeps
+	// the li block out of validateConf, and the li object out of the decode above, where a
+	// value of the wrong type would fail the load before this point.
 	//
 	// The refusal is carried on the LI object instead and acted on by the LI subsystem, which
 	// declines to intercept and tells the ADMF, at a point where the reporting channel exists.
-	if liErr := strictLiBlock([]byte(jsonData)); liErr != nil && conf.Li != nil {
-		conf.Li.blockErr = liErr
+	if li, liErr := strictLiBlock([]byte(jsonData)); li != nil {
+		li.blockErr = liErr
+		conf.Li = li
 	}
 
 	// Set defaults, when missing.

@@ -111,6 +111,118 @@ func TestStrictLiBlockDoesNotFailTheConfigurationLoad(t *testing.T) {
 			"nothing downstream can act on it. Record it and let startLIShipper refuse "+
 			"interception on it, where the ADMF can be told.", file)
 	}
+
+	// The other way the load can fail on the `li` object: the decode of the whole document
+	// reading it. That decode returns on a value of the wrong type, before strictLiBlock is
+	// reached, so the li object must not be visible to it at all.
+	if tag := confFieldTag(t, parsed, "Li"); tag != "`json:\"-\"`" {
+		t.Errorf("%s: Conf.Li carries the tag %s, so the decode of the whole document reads the "+
+			"`li` object and a value of the wrong type there fails the load — and reaches "+
+			"Fatalln — before strictLiBlock can contain it. Tag it `json:\"-\"` and leave the "+
+			"decoding to strictLiBlock.", file, tag)
+	}
+}
+
+// confFieldTag returns the raw struct tag of one field of Conf.
+func confFieldTag(t *testing.T, parsed *ast.File, field string) string {
+	t.Helper()
+
+	var tag string
+
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		spec, isSpec := n.(*ast.TypeSpec)
+		if !isSpec || spec.Name.Name != "Conf" {
+			return true
+		}
+
+		st, isStruct := spec.Type.(*ast.StructType)
+		if !isStruct {
+			return false
+		}
+
+		for _, f := range st.Fields.List {
+			for _, name := range f.Names {
+				if name.Name == field && f.Tag != nil {
+					tag = f.Tag.Value
+				}
+			}
+		}
+
+		return false
+	})
+
+	if tag == "" {
+		t.Fatalf("Conf has no tagged field %s; if it moved, move this guard with it", field)
+	}
+
+	return tag
+}
+
+// TestLiTypeErrorIsContainedNotFatal: a value of the wrong type in the `li` object is refused
+// the way a misspelled key is — on the LI object, where startLIShipper acts on it — and not by
+// failing the configuration load, which cmd/pfcpiface answers with Fatalln.
+//
+// A quoted number or a quoted boolean is the likeliest mistake in a hand-written file, and a
+// load that fails on it stops the user plane and prints the LI field's name in the general
+// operator log.
+func TestLiTypeErrorIsContainedNotFatal(t *testing.T) {
+	load := func(t *testing.T, body string) (Conf, error) {
+		t.Helper()
+
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(body, path)
+
+		return LoadConfigFile(path)
+	}
+
+	for _, value := range []string{`"x3_rcvbuf": "65536"`, `"keepalive_disabled": "false"`} {
+		t.Run(value, func(t *testing.T) {
+			conf, err := load(t, `{"mode": "dpdk", "li": {"x3_sockaddr": "/x3", "ne_id": "u", `+value+`}}`)
+			if err != nil {
+				t.Fatalf("a value of the wrong type in the li object failed the configuration "+
+					"load, which crash-loops the user plane and names the field in the general "+
+					"log: %v", err)
+			}
+			if conf.Li == nil {
+				t.Fatal("the li object went missing, so the refusal has nowhere to be carried " +
+					"and interception reads as off")
+			}
+			if conf.Li.blockErr == nil {
+				t.Error("a value of the wrong type was accepted rather than refused")
+			}
+			if conf.Li.NEID != "u" {
+				t.Errorf("the fields that did decode were lost: ne_id = %q, want \"u\"", conf.Li.NEID)
+			}
+		})
+	}
+
+	t.Run("an li that is not an object", func(t *testing.T) {
+		conf, err := load(t, `{"mode": "dpdk", "li": 5}`)
+		if err != nil {
+			t.Fatalf("an li that is not an object failed the configuration load: %v", err)
+		}
+		if conf.Li == nil || conf.Li.blockErr == nil {
+			t.Error("an li that is not an object was read as interception being off, so the " +
+				"refusal is never acted on")
+		}
+	})
+
+	t.Run("a null li is no li", func(t *testing.T) {
+		conf, err := load(t, `{"mode": "dpdk", "li": null}`)
+		if err != nil {
+			t.Fatalf("a null li failed the configuration load: %v", err)
+		}
+		if conf.Li != nil {
+			t.Error("a null li started the interception subsystem")
+		}
+	})
+
+	t.Run("a type error outside li still fails the load", func(t *testing.T) {
+		if _, err := load(t, `{"mode": "dpdk", "max_req_retries": "x"}`); err == nil {
+			t.Error("a value of the wrong type outside the li object was accepted; containment " +
+				"is for the li object only")
+		}
+	})
 }
 
 // TestTheStrictLiDecodeIsStillStrict guards the other direction. The containment fix is a narrow
@@ -126,7 +238,7 @@ func TestTheStrictLiDecodeIsStillStrict(t *testing.T) {
 		}
 	}`
 
-	if err := strictLiBlock([]byte(body)); err == nil {
+	if _, err := strictLiBlock([]byte(body)); err == nil {
 		t.Error("a misspelled LI key was accepted by the strict decode; the containment fix is " +
 			"about who acts on the refusal, not about whether there is one")
 	}

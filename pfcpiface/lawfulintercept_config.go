@@ -9,8 +9,10 @@ import (
 	"fmt"
 )
 
-// strictLiBlock re-decodes the `li` object on its own, refusing a key this element does not
-// model.
+// strictLiBlock decodes the `li` object on its own, refusing a key this element does not model
+// and a value of the wrong type. It returns nil when the document has no `li` object, or a null
+// one: interception is off. Otherwise it returns the object as far as it decoded, with the
+// refusal, if any, beside it.
 //
 // **A misspelled LI key is silently dropped by encoding/json, and the defaults it lands on are the
 // dangerous ones.** A typo'd `keepalive_retain_tasking` or `keepalive_timeout` leaves the X1
@@ -30,30 +32,37 @@ import (
 // larger change: configuration keys are added over time, and a deployment carrying a newer one
 // would stop starting. The property to hold is narrow — a mistyped LI key must not reach a default — and
 // so is the check.
-func strictLiBlock(jsonData []byte) error {
+//
+// **A refused object is still returned, never nil.** encoding/json records the first unknown
+// key or type mismatch and decodes the rest, so the fields that did decode — admf_url among
+// them — let startLIShipper report the refusal. An `li` that is not an object at all decodes
+// nothing, and is refused all the same: returning nil for it would read as "interception is
+// off" and the refusal would never be acted on.
+func strictLiBlock(jsonData []byte) (*LiConfig, error) {
 	// Only the top level, so that no key outside `li` is ever presented to the strict decode.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(jsonData, &top); err != nil {
 		// A document this cannot read is the real decode's to report, with its own message.
-		return nil
+		return nil, nil
 	}
 
 	raw, ok := top["li"]
-	if !ok {
+	if !ok || string(raw) == "null" {
 		// No `li` object: interception is off, and there is nothing to be strict about.
-		return nil
+		return nil, nil
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 
-	var li LiConfig
-	if err := dec.Decode(&li); err != nil {
-		return fmt.Errorf("li: %w — a key this element does not recognise is a setting that never "+
-			"reaches it, and the defaults it leaves in place are the unsafe ones: an unread "+
-			"keepalive setting leaves this CC-POI holding tasking on terms the operator did not "+
-			"choose, and an unread admf_url leaves it with no channel to report that on", err)
+	li := &LiConfig{}
+	if err := dec.Decode(li); err != nil {
+		return li, fmt.Errorf("li: %w — a key this element does not recognise, or a value it cannot "+
+			"read, is a setting that never reaches it, and the defaults it leaves in place are the "+
+			"unsafe ones: an unread keepalive setting leaves this CC-POI holding tasking on terms "+
+			"the operator did not choose, and an unread admf_url leaves it with no channel to "+
+			"report that on", err)
 	}
 
-	return nil
+	return li, nil
 }

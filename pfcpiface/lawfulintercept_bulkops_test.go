@@ -248,12 +248,20 @@ func TestBulkSwitchesInTheJSONConfig(t *testing.T) {
 		}
 	})
 
+	// Refused, not defaulted — and refused on the LI object, where startLIShipper declines to
+	// intercept and tells the ADMF, rather than by failing the load, which would stop the user
+	// plane.
 	t.Run("a value that is not a boolean is refused", func(t *testing.T) {
 		path := t.TempDir() + "/conf.jsonc"
 		mustWriteStringToDisk(li(`,
 				"deactivate_all_tasks": "false"`), path)
 
-		if _, err := LoadConfigFile(path); err == nil {
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("a value of the wrong type in the li object failed the configuration "+
+				"load, which stops the user plane: %v", err)
+		}
+		if conf.Li == nil || conf.Li.blockErr == nil {
 			t.Error("a quoted \"false\" was accepted; an unparseable value must be refused " +
 				"rather than read as unset, which is the permissive answer")
 		}
