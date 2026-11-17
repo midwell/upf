@@ -246,8 +246,13 @@ func (b *bess) SendMsgToUPFWithCompletion(
 	return cause, completed
 }
 
-// sendMsgToUPFConfirmed is SendMsgToUPF, and additionally answers whether every write in
-// the batch was acknowledged by the datapath.
+// sendMsgToUPFConfirmed is SendMsgToUPF, and additionally answers whether the batch's FAR
+// writes were acknowledged by the datapath.
+//
+// **Confirmation covers FARs only.** Only the FAR workers note an RPC that did not complete;
+// a PDR or QER write that did not complete is not reflected here. That is the scope the
+// interception plane needs: what it re-derives and re-pushes is duplication FARs, so a
+// FAR is the only write whose confirmation it can act on.
 //
 // **The two answers are not the same question, and lawful interception is why they cannot
 // be collapsed.** The cause is what the SMF is told, and an uncertain result must not
@@ -274,8 +279,8 @@ func (b *bess) sendMsgToUPFConfirmed(
 }
 
 // sendMsgToUPFBatch programs the batch and gives every answer the three functions above
-// take their part of: the cause, whether the batch completed, and whether every write in
-// it was confirmed.
+// take their part of: the cause, whether the batch completed, and whether its FAR writes
+// were confirmed.
 func (b *bess) sendMsgToUPFBatch(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) (uint8, bool, bool) {
@@ -362,9 +367,10 @@ func (b *bess) sendMsgToUPFBatch(
 		cause = ie.CauseRequestRejected
 	}
 
-	// Confirmed means every write was acknowledged: the batch finished, nothing reported a
-	// refusal, and no worker had an RPC that did not complete. The last of those is the
-	// one the cause deliberately forgives.
+	// Confirmed means the batch finished, nothing reported a refusal, and no FAR worker had
+	// an RPC that did not complete. The last of those is the one the cause deliberately
+	// forgives. A PDR or QER write that did not complete is not reflected: the
+	// interception plane re-derives FARs only.
 	return cause, completed, completed && succeeded && !batch.unconfirmed.Load()
 }
 

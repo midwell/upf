@@ -69,7 +69,7 @@ type confirmingDatapath interface {
 }
 
 // sendDuplicationWrite is SendMsgToUPF for a batch an interception depends on: the same
-// PFCP cause, and separately whether the datapath acknowledged every write in it.
+// PFCP cause, and separately whether the datapath acknowledged the FAR writes in it.
 //
 // Only the BESS datapath can tell the two apart. Any other -- the test fakes, and any
 // datapath added later -- is taken at its word, so an accepted batch counts as confirmed
