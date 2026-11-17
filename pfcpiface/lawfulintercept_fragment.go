@@ -35,8 +35,10 @@ const (
 
 	// fragmentMemoMax is how many classifications one filter may hold. Reached only by a
 	// peer fragmenting far more than a session normally does, which is also the shape of an
-	// attempt to make this element allocate — so it is a ceiling and not a target. Eviction
-	// is reported, so the bound costs visibility rather than silence.
+	// attempt to make this element allocate — so it is a ceiling and not a target. Nothing
+	// is evicted: a datagram arriving at the ceiling is not recorded, and its later fragments
+	// are dropped and reported as they are discarded, so the bound costs visibility rather
+	// than silence.
 	fragmentMemoMax = 4096
 )
 
@@ -108,6 +110,11 @@ func (m *fragmentMemo) classify(k fragKey, matched bool) {
 	// and holds nothing when traffic stops. A datagram whose classification has expired is
 	// one no receiver is still assembling.
 	//
+	// The sweep reports nothing. Nothing records that a datagram's last fragment has
+	// passed, so an expired entry is far more often a datagram delivered whole than one
+	// still arriving — and one still arriving loses nothing here: its next fragment finds
+	// no classification, is dropped, and is reported then, which is where the loss is.
+	//
 	// Swept only when the map is worth sweeping, so an ordinary session with a handful of
 	// datagrams in flight pays one comparison.
 	if len(m.decided) >= 16 {
@@ -115,25 +122,16 @@ func (m *fragmentMemo) classify(k fragKey, matched bool) {
 		for key, d := range m.decided {
 			if d.at.Before(cutoff) {
 				delete(m.decided, key)
-				// An expired *match* is a datagram whose remaining fragments will now be
-				// dropped, which is content loss. An expired non-match is not: dropping
-				// those fragments is what the criterion asked for.
-				if d.matched && m.onLoss != nil {
-					m.onLoss()
-				}
 			}
 		}
 	}
 
 	if len(m.decided) >= fragmentMemoMax {
 		// The ceiling. Rather than evicting an arbitrary entry — which would drop a
-		// classification still in use and report a loss that had not happened yet — the new
-		// datagram is simply not recorded: its later fragments will find nothing, be
-		// dropped, and be reported at that point, which is where the loss actually is.
-		if m.onLoss != nil {
-			m.onLoss()
-		}
-
+		// classification still in use — the new datagram is simply not recorded, and nothing
+		// is reported yet: no fragment has been discarded. Its later fragments will find
+		// nothing, be dropped, and be reported at that point, which is where the loss
+		// actually is; a datagram with no later fragment loses nothing.
 		return
 	}
 

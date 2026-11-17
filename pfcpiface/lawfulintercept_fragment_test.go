@@ -228,10 +228,15 @@ func TestAnIdentificationCollisionDoesNotShareAClassification(t *testing.T) {
 	})
 }
 
-// TestAnExpiredClassificationIsReportedAsLoss: a decision older than a datagram can
-// plausibly still be arriving under is dropped, and dropping a *match* means the datagram's
-// remaining fragments will now be discarded — which is content loss and is reported.
-func TestAnExpiredClassificationIsReportedAsLoss(t *testing.T) {
+// TestAnExpiredClassificationIsDroppedSilently: a decision older than a datagram can
+// plausibly still be arriving under is dropped, and dropping it reports nothing.
+//
+// Nothing records that a datagram's last fragment has passed, so an expired match is far more
+// often a datagram delivered whole than one still arriving. Reporting it would tell the ADMF
+// that every fragmented datagram this element delivered was lost. A fragment that does arrive
+// after expiry is dropped and reported when it is discarded, which
+// TestALateFragmentAfterExpiryIsDroppedAndReportedOnce pins.
+func TestAnExpiredClassificationIsDroppedSilently(t *testing.T) {
 	var losses int
 	m := newFragmentMemo(func() { losses++ })
 
@@ -247,18 +252,57 @@ func TestAnExpiredClassificationIsReportedAsLoss(t *testing.T) {
 	now = now.Add(2 * fragmentMemoTTL)
 	m.classify(fragKey{ident: 0xffff, proto: protoTCP}, true)
 
-	if losses == 0 {
-		t.Error("classifications expired and nothing was reported: the datagrams' remaining " +
-			"fragments are now dropped, which is content this element made and did not deliver")
+	if losses != 0 {
+		t.Errorf("expiring %d classifications reported %d losses, want 0: no fragment was "+
+			"discarded, and a datagram delivered whole is not content loss", 20, losses)
 	}
 	if _, known := m.decision(fragKey{ident: 0, proto: protoTCP}); known {
 		t.Error("an expired classification is still held, so the memo grows with traffic")
 	}
 }
 
+// TestALateFragmentAfterExpiryIsDroppedAndReportedOnce is the guarantee the silent expiry
+// relies on: a continuation fragment that arrives after its datagram's classification has
+// expired finds nothing, is discarded, and is reported — once, at the point it is discarded.
+func TestALateFragmentAfterExpiryIsDroppedAndReportedOnce(t *testing.T) {
+	c, err := parseCriterion(types.TargetIdentifier{Type: types.TargetTCPPort, Value: "443"})
+	if err != nil {
+		t.Fatalf("parseCriterion: %v", err)
+	}
+
+	var losses int
+	f := filterFrom([]criterion{c}, wildcardSession(), func() { losses++ })
+	if f.frags == nil {
+		t.Fatal("no fragment memo was built")
+	}
+
+	now := time.Now()
+	f.frags.now = func() time.Time { return now }
+
+	const ident = 0x2468
+
+	if !f.matches(farForwardUAndDuplicate, uplinkFragment(ident, 0, true, tcpSegment(443, 80, 60))) {
+		t.Fatal("the initial fragment of an authorised datagram was dropped")
+	}
+
+	now = now.Add(2 * fragmentMemoTTL)
+
+	if f.matches(farForwardUAndDuplicate, uplinkFragment(ident, 8, false, []byte{0x01})) {
+		t.Error("a fragment arriving after its classification expired was delivered: this " +
+			"element no longer knows whether it was authorised")
+	}
+	if losses != 1 {
+		t.Errorf("a fragment discarded after expiry was reported %d times, want 1", losses)
+	}
+}
+
 // TestTheMemoIsBounded: the ceiling is reached only by a peer fragmenting far more than a
 // session normally does — which is also the shape of an attempt to make this element
-// allocate. Passing it costs visibility rather than silence.
+// allocate.
+//
+// Refusing a classification at the ceiling reports nothing, because nothing has been
+// discarded yet: the refused datagram's later fragments are dropped and reported when they
+// arrive, and one with no later fragment loses nothing.
 func TestTheMemoIsBounded(t *testing.T) {
 	t.Parallel()
 
@@ -276,8 +320,9 @@ func TestTheMemoIsBounded(t *testing.T) {
 	if held > fragmentMemoMax {
 		t.Errorf("the memo holds %d classifications against a ceiling of %d", held, fragmentMemoMax)
 	}
-	if losses == 0 {
-		t.Error("the ceiling was reached and nothing was reported")
+	if losses != 0 {
+		t.Errorf("refusing classifications at the ceiling reported %d losses, want 0: no "+
+			"fragment was discarded, and the ones that will be are reported when they are", losses)
 	}
 }
 
