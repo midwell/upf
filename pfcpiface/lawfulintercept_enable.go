@@ -205,6 +205,67 @@ type ccEnabler struct {
 	pending *sync.Cond
 	settled *sync.Cond
 	worker  sync.WaitGroup
+
+	// sessionLocks serialise a pass's push for one session against the session handlers
+	// that write the same session's rules to the datapath. A pass holds its session's
+	// stripe from its final re-read of the record through the push and the recording of
+	// the push's answer; a handler holds it from before its first datapath write until it
+	// has stamped the record (sessionProgrammed, farsRemoved, farsAttempted,
+	// sessionForgotten, or the abandonment reports). So either the handler's stamp is in
+	// the record before the pass re-reads it and the pass leaves those FARs alone, or the
+	// pass's push reaches the datapath before the handler's does. See lockSession.
+	//
+	// Lock order: PFCPConn.sessionsMu, then a stripe, then mu. transact never takes
+	// sessionsMu, and no session handler waits on the worker, so a pass holding a stripe
+	// cannot be waiting on a handler that holds it.
+	sessionLocks [sessionStripes]sync.Mutex
+}
+
+// sessionStripes is how many locks the sessions share. Two sessions on one stripe wait
+// on each other only while a pass is pushing for one of them or a handler is writing one
+// to the datapath; a power of two keeps the modulo a mask.
+const sessionStripes = 64
+
+// lockSession takes the stripe for one session and returns its release. On a nil enabler,
+// where no interception is configured and no pass ever pushes, there is nothing to
+// serialise against and it returns a no-op.
+func (e *ccEnabler) lockSession(seid uint64) (unlock func()) {
+	if e == nil {
+		return func() {}
+	}
+
+	m := &e.sessionLocks[seid%sessionStripes]
+	m.Lock()
+
+	return m.Unlock
+}
+
+// lockSessions takes the stripes of several sessions at once, each once, in stripe order,
+// and returns their release. The fixed order is what lets two callers hold several stripes
+// without deadlocking each other; every other caller holds one stripe at a time.
+func (e *ccEnabler) lockSessions(seids []uint64) (unlock func()) {
+	if e == nil {
+		return func() {}
+	}
+
+	var held [sessionStripes]bool
+	for _, seid := range seids {
+		held[seid%sessionStripes] = true
+	}
+
+	for i := range held {
+		if held[i] {
+			e.sessionLocks[i].Lock()
+		}
+	}
+
+	return func() {
+		for i := range held {
+			if held[i] {
+				e.sessionLocks[i].Unlock()
+			}
+		}
+	}
 }
 
 // parsedTask is one content task with its criteria in the form the agent compares
@@ -1075,30 +1136,38 @@ func (e *ccEnabler) transact() {
 			}
 			e.mu.Unlock()
 
+			// Released once the push's answer is recorded in fresh; a no-op unless this
+			// session has something to push.
+			unlockSession := func() {}
+
 			if len(changed) > 0 && e.push != nil {
-				// **Re-read immediately before the push, because the plan above and the
-				// push below are not one step.** The lock is dropped between them — it
-				// has to be, since the push is a round trip to the datapath and holding
-				// e.mu across it would serialise every session handler behind one gRPC
-				// call — so the session path can complete its own read-modify-write of
-				// one of these FARs in the interval, program the datapath with the new
-				// body, and record the write. This pass would then restate the body it
-				// planned from a snapshot that has been replaced: the interception plane
-				// corrupting the subscriber's own forwarding, which is the one thing this
-				// function's own contract says it must never do.
+				// **Re-read under the session's stripe, because the plan above is not.**
+				// e.mu is dropped after planning — the push is a round trip to the
+				// datapath, and holding e.mu across it would serialise every session
+				// handler behind one gRPC call — so the session path can complete its own
+				// read-modify-write of one of these FARs after the plan: program the
+				// datapath with the new body and record the write. Pushing the planned
+				// body after that would restate the SMF's forwarding from a snapshot that
+				// has been replaced: the interception plane corrupting the subscriber's
+				// own forwarding, which is the one thing this function's contract says it
+				// must never do.
 				//
-				// The same test the plan applies, at the moment it matters: an entry
-				// written past this pass's mark belongs to a writer that has read rules
-				// this pass did not, so the last writer to PutSession wins. The
-				// carry-over at the end keeps its record; the request its write made
-				// brings a pass that has read the new rules.
-				// Set only by tests, and it exists because this interleaving is a few
-				// instructions wide: a property this consequential asserted by racing two
-				// goroutines and hoping is one that passes against the defect. See
-				// TestATaskingPassDoesNotRestateAStaleForwardingBody.
+				// The stripe makes the re-read, the push and the recording of its answer
+				// one step with respect to the session handlers, which hold the same
+				// stripe from their first datapath write until they have stamped the
+				// record. So either the handler stamped first, and the test below — the
+				// one the plan applies, an entry written past this pass's mark — drops
+				// those FARs, leaving the datapath with the handler's body; or this push
+				// reaches the datapath before the handler's does, and the handler's write
+				// lands last. The carry-over at the end keeps the handler's record; the
+				// request its write made brings a pass that has read the new rules.
+				//
+				// Sessions with nothing to push take no stripe.
 				if beforeTransactPush != nil {
 					beforeTransactPush()
 				}
+
+				unlockSession = e.lockSession(sess.localSEID)
 
 				e.mu.Lock()
 				// **The session itself, before any of its FARs.** This extends the
@@ -1113,6 +1182,7 @@ func (e *ccEnabler) transact() {
 				// comparison as "this FAR was written after this pass started".
 				if gone, deleted := e.forgotten[sess.localSEID]; deleted && gone > mark {
 					e.mu.Unlock()
+					unlockSession()
 
 					// Its entries must not be carried into the conclusion either: the
 					// deletion already removed them from e.programmed, and fresh is this
@@ -1202,6 +1272,8 @@ func (e *ccEnabler) transact() {
 					}
 				}
 			}
+
+			unlockSession()
 		}
 	}
 
@@ -1288,17 +1360,17 @@ func (e *ccEnabler) transact() {
 }
 
 // beforeTransactPush is called after a pass has planned a session's FAR bodies and
-// before it re-reads them for the push. Set only by tests; nil otherwise.
+// before it takes the session's stripe to re-read them and push. Set only by tests; nil
+// otherwise.
 //
-// **What this remedy closes and what it does not.** The re-read means a modification
-// that has completed its PutSession by this point wins: the pass drops that FAR and
-// leaves the datapath holding the SMF's body. What remains is the width of the push
-// itself — two writers whose round trips genuinely overlap reach the datapath in an
-// order neither controls — and closing that would mean serialising the interception
-// plane's pushes against the session handler's, which is a lock on the session
-// signalling path rather than a change here. The residual is stated rather than
-// implied: "last writer to PutSession wins" is the property, and it is only meaningful
-// where one of the two has finished writing.
+// It marks the last point at which a session handler can run to completion without
+// meeting the pass: from the stripe onwards, the re-read, the push and the recording of
+// its answer are one step with respect to the handlers (see sessionLocks). A handler run
+// from this hook has therefore finished — datapath write, PutSession and stamp — before
+// the pass re-reads, which is the interleaving the re-read exists for; one that starts
+// after the pass has taken the stripe waits for it, and its write reaches the datapath
+// after the pass's. See TestATaskingPassDoesNotRestateAStaleForwardingBody and
+// TestATaskingPushAndAModificationDoNotInterleave.
 var beforeTransactPush func()
 
 // lostContent reports a copy this element made and did not deliver, through the condition

@@ -126,6 +126,13 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 			ie.CauseNoResourcesAvailable)
 	}
 
+	// Lawful Interception: the session's stripe, from before the first datapath write until
+	// this handler has recorded what it programmed -- or, on a refusal, until the cleanup
+	// below has forgotten the session, which runs first because it is deferred later. See
+	// ccEnabler.sessionLocks.
+	unlockSession := upf.ccEnabler.lockSession(session.localSEID)
+	defer unlockSession()
+
 	// From here the session holds resources before it is known whether it will exist:
 	// NewPFCPSession has counted it, and parsing a CHOOSE PDR allocates the UE address
 	// (parse_pdr.go) as a side effect of reading it. A rejected establishment is not
@@ -734,6 +741,14 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// action, which knows nothing of interception tasking. Re-deriving here is what
 	// stops a routine modification from ending an interception mid-session — silently,
 	// with the triggering function still believing it is running.
+	//
+	// The session's stripe is held from here, before the first datapath write, until the
+	// record is stamped -- sessionProgrammed, farsRemoved or farsAttempted -- so a tasking
+	// pass pushing this session's FARs either sees the stamp and leaves them alone, or has
+	// pushed before this handler's writes reach the datapath. See ccEnabler.sessionLocks.
+	unlockSession := upf.ccEnabler.lockSession(localSEID)
+	defer unlockSession()
+
 	upf.ccEnabler.applyTasking(&session, &updated)
 
 	cause, confirmed := upf.sendDuplicationWrite(upfMsgTypeMod, session.PacketForwardingRules, updated)
@@ -967,6 +982,13 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 	// kept whatever the answer, and refusing would send it into a rollback whose restore
 	// the late removal could then undo. That is why this is decided here and not in
 	// SendMsgToUPF.
+	//
+	// Lawful Interception: the session's stripe until RemoveSession has stamped the deletion,
+	// so a tasking pass cannot push one of these FARs back after the delete. See
+	// ccEnabler.sessionLocks.
+	unlockSession := upf.ccEnabler.lockSession(localSEID)
+	defer unlockSession()
+
 	cause, finished := upf.SendMsgToUPFWithCompletion(
 		upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{})
 	if cause == ie.CauseRequestRejected || !finished {
@@ -1133,6 +1155,11 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 		// the delete is confirmed leaves the rules in place with nothing describing them: the
 		// entries go with the session, so a refused delete would strand duplication that no
 		// later re-derivation can find, because it walks the sessions this element holds.
+		//
+		// Under the session's stripe until RemoveSession, as in the deletion handler.
+		unlockSession := upf.ccEnabler.lockSession(seid)
+		defer unlockSession()
+
 		cause := upf.SendMsgToUPF(
 			upfMsgTypeDel, sessItem.PacketForwardingRules, PacketForwardingRules{})
 		if cause == ie.CauseRequestRejected {

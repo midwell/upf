@@ -4,10 +4,13 @@
 package pfcpiface
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/omec-project/upf-epc/pfcpiface/metrics"
 	"github.com/omec-project/util/li/store"
 	"github.com/omec-project/util/li/types"
 	"github.com/wmnsk/go-pfcp/ie"
@@ -435,8 +438,9 @@ func (d *liRecordingDP) lastFor(farID uint32) (far, bool) {
 // for the bad order: the interleaving is a few instructions wide, and a property this
 // consequential asserted by hope is one that passes against the defect. What the seam
 // arranges is precisely the case the remedy addresses — the modification completes,
-// PutSession included, between the pass's plan and the pass's push. See
-// beforeTransactPush for the residual it does not close.
+// PutSession included, between the pass's plan and the pass's push. The other order, a
+// modification starting while the pass is pushing, is
+// TestATaskingPushAndAModificationDoNotInterleave.
 func TestATaskingPassDoesNotRestateAStaleForwardingBody(t *testing.T) {
 	sessions := NewInMemoryStore()
 	sess := liStoredSession(400, "10.250.0.12")
@@ -579,5 +583,330 @@ func TestASessionDeletedDuringAPassIsNotReAddedToTheDatapath(t *testing.T) {
 	if held != 0 {
 		t.Errorf("the record holds %d entries for a deleted session: the pass's own map put "+
 			"them back over the deletion", held)
+	}
+}
+
+// liTableDP is a datapath that holds the FARs it was told about the way a table does: a
+// write puts each FAR it carries, a delete takes out each FAR it names. It answers "what
+// does the user plane hold at the end", which a record of the last write per FAR cannot
+// when the last operation was a delete.
+type liTableDP struct {
+	fakeDP
+
+	mu   sync.Mutex
+	fars map[uint32]far
+}
+
+func newTableDP() *liTableDP {
+	return &liTableDP{fars: make(map[uint32]far)}
+}
+
+func (d *liTableDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardingRules) uint8 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if method == upfMsgTypeDel {
+		for _, f := range all.fars {
+			delete(d.fars, f.farID)
+		}
+
+		return ie.CauseRequestAccepted
+	}
+
+	for _, f := range updated.fars {
+		d.fars[f.farID] = f
+	}
+
+	return ie.CauseRequestAccepted
+}
+
+func (d *liTableDP) SendMsgToUPFWithCompletion(
+	method upfMsgType, all, updated PacketForwardingRules,
+) (uint8, bool) {
+	return d.SendMsgToUPF(method, all, updated), true
+}
+
+func (d *liTableDP) holds(farID uint32) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, ok := d.fars[farID]
+
+	return ok
+}
+
+// heldPush is a tasking pass's push whose first call stops on entry, after signalling
+// entered, until release is called; it then writes through to the datapath. Later calls
+// do not stop. The pass is then inside its push with the session's stripe held, which is
+// the window a session handler must not complete its own write in.
+//
+// release is safe to call more than once, and is registered as a cleanup so a test that
+// fails before releasing does not leave the worker blocked and stop waiting for it.
+func heldPush(t *testing.T, write func(all, updated PacketForwardingRules) uint8) (
+	push func(all, updated PacketForwardingRules) (uint8, bool), entered <-chan struct{}, release func(),
+) {
+	t.Helper()
+
+	in := make(chan struct{})
+	out := make(chan struct{})
+
+	var first, released sync.Once
+
+	release = func() { released.Do(func() { close(out) }) }
+
+	push = func(all, updated PacketForwardingRules) (uint8, bool) {
+		first.Do(func() {
+			close(in)
+			<-out
+		})
+
+		cause := write(all, updated)
+
+		return cause, cause == ie.CauseRequestAccepted
+	}
+
+	return push, in, release
+}
+
+// awaitPush waits for a pass to enter its push.
+func awaitPush(t *testing.T, entered <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tasking pass pushed this session's FARs, so nothing could interleave with it")
+	}
+}
+
+// handlerGrace is how long a test lets a session handler run while a pass is held in its
+// push. A handler that is not serialised against the push completes well inside it; one
+// that is waits on the session's stripe for as long as the push is held.
+const handlerGrace = 250 * time.Millisecond
+
+// runAgainstHeldPush runs handler in a goroutine while a pass is held in its push, gives it
+// handlerGrace to complete, then releases the push and waits for the handler.
+func runAgainstHeldPush(t *testing.T, release func(), handler func() error) {
+	t.Helper()
+
+	done := make(chan error, 1)
+
+	go func() { done <- handler() }()
+
+	var (
+		err      error
+		finished bool
+	)
+
+	select {
+	case err = <-done:
+		finished = true
+	case <-time.After(handlerGrace):
+	}
+
+	release()
+
+	if !finished {
+		select {
+		case err = <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the session handler did not complete once the pass's push was released")
+		}
+	}
+
+	if err != nil {
+		t.Fatalf("the session handler failed, so nothing interleaved with the pass: %v", err)
+	}
+}
+
+// TestATaskingPushAndAModificationDoNotInterleave is the order
+// TestATaskingPassDoesNotRestateAStaleForwardingBody does not reach: the modification starts
+// after the pass has re-read the record and while its push is in flight.
+//
+// The pass's re-read passes, because the modification has not stamped anything yet. If the
+// modification could then write its body to the datapath and stamp the record while the
+// pass's push was still outstanding, the pass's body — planned from the snapshot the SMF has
+// just replaced — would land last, and the datapath would forward the subscriber's traffic
+// by the old body until the next modification. No later pass repairs it: a pass compares
+// only whether a FAR is duplicating, and both bodies say it is.
+//
+// The push is held on entry, which is inside the stripe, so the interleaving is arranged
+// rather than hoped for.
+func TestATaskingPushAndAModificationDoNotInterleave(t *testing.T) {
+	const seid = 600
+
+	sessions := NewInMemoryStore()
+	if err := sessions.PutSession(liStoredSession(seid, "10.250.0.16")); err != nil {
+		t.Fatal(err)
+	}
+
+	dp := newRecordingDP()
+
+	push, entered, release := heldPush(t, func(all, updated PacketForwardingRules) uint8 {
+		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
+	})
+
+	tasks := store.New()
+	e := newCCEnabler(tasks, push, nil)
+	t.Cleanup(e.stop)
+	t.Cleanup(release)
+	e.addSource(sessions)
+
+	pConn := &PFCPConn{Conn: nil, store: sessions, upf: &upf{datapath: dp, ccEnabler: e}}
+
+	if !tasks.Activate(ccTask("W1", ueAddr("10.250.0.16"))) {
+		t.Fatal("Activate failed")
+	}
+	e.retask()
+	awaitPush(t, entered)
+
+	// The SMF moves FAR 1's forwarding while the pass's push of the old body is in flight.
+	runAgainstHeldPush(t, release, func() error {
+		rsp, err := pConn.handleSessionModificationRequest(
+			message.NewSessionModificationRequest(0, 0, seid, 1, 0,
+				ie.NewUpdateFAR(
+					ie.NewFARID(1),
+					ie.NewApplyAction(ActionForward),
+					ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+				),
+			))
+		if err != nil {
+			return err
+		}
+
+		smres, ok := rsp.(*message.SessionModificationResponse)
+		if !ok || smres.Cause == nil {
+			return fmt.Errorf("the modification produced no cause")
+		}
+
+		if cause, err := smres.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+			return fmt.Errorf("the modification was refused (cause %d)", cause)
+		}
+
+		return nil
+	})
+
+	// The pass the modification asked for, so the assertions read a settled element.
+	e.await(e.request())
+
+	got, ok := dp.lastFor(1)
+	if !ok {
+		t.Fatal("FAR 1 was never programmed; this test asserts nothing")
+	}
+
+	if got.dstIntf != ie.DstInterfaceCore {
+		t.Errorf("the datapath was last programmed with dstIntf %d for FAR 1, want %d (the "+
+			"modification's): the pass's push of the body it planned before the modification "+
+			"landed after the modification's own, so the subscriber's traffic follows a "+
+			"forwarding body the SMF has replaced", got.dstIntf, ie.DstInterfaceCore)
+	}
+
+	if !got.liDuplicate {
+		t.Error("the datapath's FAR 1 is not duplicating although the tasking selects it")
+	}
+
+	stored, ok := sessions.GetSession(seid)
+	if !ok {
+		t.Fatal("the session is gone from the store")
+	}
+
+	for _, f := range stored.fars {
+		if f.farID == 1 && (f.dstIntf != ie.DstInterfaceCore || !f.liDuplicate) {
+			t.Errorf("the stored FAR 1 is {dstIntf %d, liDuplicate %v}, want {%d, true}: the "+
+				"session is not as the modification left it", f.dstIntf, f.liDuplicate, ie.DstInterfaceCore)
+		}
+	}
+
+	e.mu.Lock()
+	rec := e.programmed[farRef{seid: seid, farID: 1}]
+	e.mu.Unlock()
+
+	if !rec.duplicating {
+		t.Error("the record says FAR 1 is not duplicating although the datapath was last told it is")
+	}
+}
+
+// TestATaskingPushAndADeletionDoNotInterleave is the same window with a deletion in it. A
+// pass held in its push of FAR 1 has already re-read the record and found the session
+// alive; if the deletion could remove the session's rules from the datapath and forget it
+// in that window, the pass's push would land afterwards and re-create FAR 1 — a FAR the
+// datapath holds for a session nothing in this element knows of, and nothing will ever
+// remove.
+func TestATaskingPushAndADeletionDoNotInterleave(t *testing.T) {
+	const seid = 700
+
+	sess := liStoredSession(seid, "10.250.0.18")
+	// RemoveSession counts the session out of the metrics.
+	sess.metrics = metrics.NewSession(testRemoteNodeID)
+
+	sessions := NewInMemoryStore()
+	if err := sessions.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	dp := newTableDP()
+
+	push, entered, release := heldPush(t, func(all, updated PacketForwardingRules) uint8 {
+		return dp.SendMsgToUPF(upfMsgTypeMod, all, updated)
+	})
+
+	tasks := store.New()
+	e := newCCEnabler(tasks, push, nil)
+	t.Cleanup(e.stop)
+	t.Cleanup(release)
+	e.addSource(sessions)
+
+	pConn := &PFCPConn{
+		store:          sessions,
+		upf:            &upf{datapath: dp, ccEnabler: e},
+		InstrumentPFCP: noopMetrics{},
+	}
+
+	if !tasks.Activate(ccTask("W1", ueAddr("10.250.0.18"))) {
+		t.Fatal("Activate failed")
+	}
+	e.retask()
+	awaitPush(t, entered)
+
+	runAgainstHeldPush(t, release, func() error {
+		rsp, err := pConn.handleSessionDeletionRequest(
+			message.NewSessionDeletionRequest(0, 0, seid, 1, 0))
+		if err != nil {
+			return err
+		}
+
+		sdres, ok := rsp.(*message.SessionDeletionResponse)
+		if !ok || sdres.Cause == nil {
+			return fmt.Errorf("the deletion produced no cause")
+		}
+
+		if cause, err := sdres.Cause.Cause(); err != nil || cause != ie.CauseRequestAccepted {
+			return fmt.Errorf("the deletion was refused (cause %d)", cause)
+		}
+
+		return nil
+	})
+
+	e.await(e.request())
+
+	for _, f := range sess.fars {
+		if dp.holds(f.farID) {
+			t.Errorf("the datapath holds FAR %d of a session that has been deleted: the pass's "+
+				"push landed after the deletion's removal and re-created it, and nothing in this "+
+				"element names it any more", f.farID)
+		}
+	}
+
+	e.mu.Lock()
+	held := 0
+	for ref := range e.programmed {
+		if ref.seid == seid {
+			held++
+		}
+	}
+	e.mu.Unlock()
+
+	if held != 0 {
+		t.Errorf("the record holds %d entries for a deleted session", held)
 	}
 }

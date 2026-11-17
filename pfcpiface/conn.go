@@ -316,6 +316,13 @@ func (pConn *PFCPConn) executeShutdown() {
 	var unfinished []PFCPSession
 
 	for _, sess := range sessions {
+		// Lawful Interception: the session's stripe until RemoveSession has stamped the
+		// deletion, so a tasking pass cannot push one of these FARs back after the delete.
+		// See ccEnabler.sessionLocks. A session whose removal did not finish is released
+		// unstamped and retried below under its stripe again; that retry removes anything
+		// a pass pushed in between.
+		unlockSession := pConn.upf.ccEnabler.lockSession(sess.localSEID)
+
 		// A removal that ran out of time may have left rules matching the session's
 		// address, and once the session is forgotten nothing names them. So the address
 		// is released only once a removal of its rules has finished; the sessions whose
@@ -339,6 +346,9 @@ func (pConn *PFCPConn) executeShutdown() {
 
 		if !finished {
 			unfinished = append(unfinished, sess)
+
+			unlockSession()
+
 			continue
 		}
 
@@ -349,6 +359,8 @@ func (pConn *PFCPConn) executeShutdown() {
 		pConn.upf.ippool.Release(sess.localSEID)
 
 		pConn.RemoveSession(sess)
+
+		unlockSession()
 	}
 
 	pConn.retryUnfinishedRemovals(unfinished)
@@ -385,6 +397,18 @@ func (pConn *PFCPConn) executeShutdown() {
 func (pConn *PFCPConn) retryUnfinishedRemovals(sessions []PFCPSession) {
 	causes := make([]uint8, len(sessions))
 	finished := make([]bool, len(sessions))
+
+	// Lawful Interception: every retried session's stripe, from before its removal until
+	// RemoveSession below has stamped the deletion, so a tasking pass cannot push one of
+	// their FARs back in between. Taken together because the removals run concurrently and
+	// two sessions may share a stripe. See ccEnabler.sessionLocks.
+	seids := make([]uint64, len(sessions))
+	for i, s := range sessions {
+		seids[i] = s.localSEID
+	}
+
+	unlockSessions := pConn.upf.ccEnabler.lockSessions(seids)
+	defer unlockSessions()
 
 	var wg sync.WaitGroup
 
