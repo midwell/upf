@@ -514,16 +514,25 @@ func TestLiBlockKeyIgnoresCase(t *testing.T) {
 		}
 	})
 
-	t.Run("two spellings and no exact one are refused", func(t *testing.T) {
-		path := t.TempDir() + "/conf.jsonc"
-		mustWriteStringToDisk(`{"mode": "dpdk", "LI": {"tf_id": "a"}, "Li": {"tf_id": "b"}}`, path)
+	// An exact `li` beside another spelling is as ambiguous as two other spellings: taking the
+	// exact one silently ignores the other, and an exact null beside an object would leave
+	// interception off with nothing saying so.
+	for name, doc := range map[string]string{
+		"two spellings and no exact one": `{"mode": "dpdk", "LI": {"tf_id": "a"}, "Li": {"tf_id": "b"}}`,
+		"an exact li beside another":     `{"mode": "dpdk", "li": {"tf_id": "a"}, "LI": {"tf_id": "b"}}`,
+		"an exact null beside an object": `{"mode": "dpdk", "li": null, "LI": {"tf_id": "b"}}`,
+	} {
+		t.Run(name+" is refused", func(t *testing.T) {
+			path := t.TempDir() + "/conf.jsonc"
+			mustWriteStringToDisk(doc, path)
 
-		conf, err := LoadConfigFile(path)
-		if err != nil {
-			t.Fatalf("an ambiguous li key stopped the whole configuration load: %v", err)
-		}
-		if conf.Li == nil || conf.Li.blockErr == nil {
-			t.Fatal("two spellings of the li key were accepted, so one of them was picked silently")
-		}
-	})
+			conf, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatalf("an ambiguous li key stopped the whole configuration load: %v", err)
+			}
+			if conf.Li == nil || conf.Li.blockErr == nil {
+				t.Fatal("two spellings of the li key were accepted, so one of them was picked silently")
+			}
+		})
+	}
 }

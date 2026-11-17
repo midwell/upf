@@ -76,14 +76,11 @@ func strictLiBlock(jsonData []byte) (*LiConfig, error) {
 // does when it matches a key to a field: `"LI"` configures interception, as it would through a
 // struct tag, rather than leaving it off with nothing saying so.
 //
-// An exact `li` wins over any other spelling. Several other spellings and no exact one are
-// refused: encoding/json would decode each of them into the one field in document order, but
-// the map has lost that order, and picking one silently is the fault this decode exists to stop.
+// More than one spelling is refused, an exact `li` among them included: encoding/json would
+// decode each into the one field in document order, but the map has lost that order, and taking
+// one silently, or reading an exact `"li": null` and leaving interception off beside an `"LI"`
+// object, is the fault this decode exists to stop.
 func liKey(top map[string]json.RawMessage) (json.RawMessage, bool, error) {
-	if raw, ok := top["li"]; ok {
-		return raw, true, nil
-	}
-
 	var (
 		raw   json.RawMessage
 		found []string
@@ -97,8 +94,8 @@ func liKey(top map[string]json.RawMessage) (json.RawMessage, bool, error) {
 	}
 
 	if len(found) > 1 {
-		return nil, false, fmt.Errorf("li: the document has %d keys that differ from \"li\" only in case "+
-			"and none spelled \"li\", so which one configures this element is ambiguous", len(found))
+		return nil, false, fmt.Errorf("li: the document has %d keys that differ only in case from \"li\", "+
+			"so which one configures this element is ambiguous", len(found))
 	}
 
 	return raw, len(found) == 1, nil
