@@ -772,6 +772,15 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		return sendError(ErrWriteToDatapath)
 	}
 
+	// Lawful Interception: every refusal from here on runs the rollback after the push above,
+	// so it records the pushed FARs as attempted first, as the refused push does. See
+	// farsAttempted.
+	failAfterPush := func(err error) (message.Message, error) {
+		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+
+		return sendError(err)
+	}
+
 	if upf.enableEndMarker {
 		endMarkers = endMarkerList
 	}
@@ -783,12 +792,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	for _, rPDR := range smreq.RemovePDR {
 		pdrID, err := rPDR.PDRID()
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		p, err := session.RemovePDR(uint32(pdrID))
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		delPDRs = append(delPDRs, *p)
@@ -797,12 +806,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	for _, dFAR := range smreq.RemoveFAR {
 		farID, err := dFAR.FARID()
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		f, err := session.RemoveFAR(farID)
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		delFARs = append(delFARs, *f)
@@ -811,12 +820,12 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	for _, dQER := range smreq.RemoveQER {
 		qerID, err := dQER.QERID()
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		q, err := session.RemoveQER(qerID)
 		if err != nil {
-			return sendError(err)
+			return failAfterPush(err)
 		}
 
 		delQERs = append(delQERs, *q)
@@ -826,11 +835,11 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		for _, rURR := range smreq.RemoveURR {
 			urrID, err := rURR.URRID()
 			if err != nil {
-				return sendError(err)
+				return failAfterPush(err)
 			}
 
 			if _, err = session.RemoveURR(urrID); err != nil {
-				return sendError(err)
+				return failAfterPush(err)
 			}
 		}
 

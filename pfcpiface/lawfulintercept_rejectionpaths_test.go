@@ -962,3 +962,64 @@ func TestARefusedDeletionStageDoesNotClaimTheRolledBackDuplication(t *testing.T)
 			"claim agrees with the tasking, so no later re-derivation pushes it again")
 	}
 }
+
+// TestARefusedRemovalAfterThePushDoesNotClaimTheRolledBackDuplication drives a modification
+// whose write the datapath accepts and which then fails on its own content: it removes a FAR
+// the session does not hold.
+//
+// The failure comes after the push, so the handler rolls the datapath back to the session's
+// stored rules, and for a session tasked after establishment those do not duplicate. The pass
+// before the modification recorded FAR 1 as duplicating; if the handler leaves that record
+// standing, it agrees with the tasking and every later re-derivation skips the FAR while the
+// datapath copies nothing.
+func TestARefusedRemovalAfterThePushDoesNotClaimTheRolledBackDuplication(t *testing.T) {
+	pConn, dp, e, _ := rejectionConn(t)
+
+	const seid = 404
+
+	if err := pConn.store.PutSession(liStoredSession(seid, "10.250.0.16")); err != nil {
+		t.Fatal(err)
+	}
+
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      testXIDSecondary,
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr("10.250.0.16")},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+	e.retaskAndWait()
+
+	if duplicating, _ := programmedFor(e, seid, 1); !duplicating {
+		t.Fatal("the tasking pass did not record FAR 1 as duplicating, so this test is not " +
+			"exercising the state it is about")
+	}
+
+	if _, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0,
+			ie.NewUpdateFAR(
+				ie.NewFARID(1),
+				ie.NewApplyAction(ActionForward),
+				ie.NewUpdateForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceCore)),
+			),
+			ie.NewRemoveFAR(ie.NewFARID(99)),
+		)); err == nil {
+		t.Fatal("a modification removing a FAR the session does not hold was reported as succeeding")
+	}
+
+	dp.mu.Lock()
+	restored := !dp.duplicating[1]
+	dp.mu.Unlock()
+
+	if !restored {
+		t.Fatal("the rollback did not restore FAR 1 to the session's own, non-duplicating " +
+			"version, so this test is not exercising the state it is about")
+	}
+
+	if duplicating, _ := programmedFor(e, seid, 1); duplicating {
+		t.Error("the record claims FAR 1 is duplicating after the rollback turned it off: the " +
+			"claim agrees with the tasking, so no later re-derivation pushes it again")
+	}
+}
