@@ -209,11 +209,12 @@ type ccEnabler struct {
 	// sessionLocks serialise a pass's push for one session against the session handlers
 	// that write the same session's rules to the datapath. A pass holds its session's
 	// stripe from its final re-read of the record through the push and the recording of
-	// the push's answer; a handler holds it from before its first datapath write until it
-	// has stamped the record (sessionProgrammed, farsRemoved, farsAttempted,
-	// sessionForgotten, or the abandonment reports). So either the handler's stamp is in
-	// the record before the pass re-reads it and the pass leaves those FARs alone, or the
-	// pass's push reaches the datapath before the handler's does. See lockSession.
+	// the push's answer; a session handler holds it from before its first datapath write
+	// until the handler returns, so whatever it records of those writes (sessionProgrammed,
+	// farsRemoved, farsAttempted, sessionForgotten, or the abandonment reports) is recorded
+	// under it. So either the handler's stamp is in the record before the pass re-reads it
+	// and the pass leaves those FARs alone, or the pass's push reaches the datapath before
+	// the handler's does. See lockSession.
 	//
 	// Lock order: PFCPConn.sessionsMu, then a stripe, then mu. transact never takes
 	// sessionsMu, and no session handler waits on the worker, so a pass holding a stripe
@@ -688,7 +689,7 @@ func (e *ccEnabler) applyTasking(s *PFCPSession, updated *PacketForwardingRules)
 // one FAR can change what a criterion matches for the session's others — a UE address moves, a
 // PDR is replaced — so a pass is wanted whenever the session's FARs and the record disagree,
 // including for FARs this call did not push.
-// confirmed says whether the datapath acknowledged the writes. When it did not, the rules
+// confirmed says whether the datapath acknowledged the FAR writes. When it did not, the rules
 // are recorded as *not* duplicating whatever this element meant to write -- the same rule
 // farsAttempted follows, and for the same reason: a record that agrees with the tasking is
 // one every later pass skips, so an unearned record is what turns an uncertain write into
@@ -1154,9 +1155,9 @@ func (e *ccEnabler) transact() {
 				//
 				// The stripe makes the re-read, the push and the recording of its answer
 				// one step with respect to the session handlers, which hold the same
-				// stripe from their first datapath write until they have stamped the
-				// record. So either the handler stamped first, and the test below — the
-				// one the plan applies, an entry written past this pass's mark — drops
+				// stripe from before their first datapath write until they return. So
+				// either the handler stamped first, and the test below — the one the
+				// plan applies, an entry written past this pass's mark — drops
 				// those FARs, leaving the datapath with the handler's body; or this push
 				// reaches the datapath before the handler's does, and the handler's write
 				// lands last. The carry-over at the end keeps the handler's record; the

@@ -127,9 +127,8 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 	}
 
 	// Lawful Interception: the session's stripe, from before the first datapath write until
-	// this handler has recorded what it programmed -- or, on a refusal, until the cleanup
-	// below has forgotten the session, which runs first because it is deferred later. See
-	// ccEnabler.sessionLocks.
+	// this handler returns -- after the cleanup below on a refusal, which runs first because
+	// it is deferred later. See ccEnabler.sessionLocks.
 	unlockSession := upf.ccEnabler.lockSession(session.localSEID)
 	defer unlockSession()
 
@@ -742,10 +741,11 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 	// stops a routine modification from ending an interception mid-session — silently,
 	// with the triggering function still believing it is running.
 	//
-	// The session's stripe is held from here, before the first datapath write, until the
-	// record is stamped -- sessionProgrammed, farsRemoved or farsAttempted -- so a tasking
-	// pass pushing this session's FARs either sees the stamp and leaves them alone, or has
-	// pushed before this handler's writes reach the datapath. See ccEnabler.sessionLocks.
+	// The session's stripe is held from here, before the first datapath write, until this
+	// handler returns, so a tasking pass pushing this session's FARs either sees whatever
+	// stamp the handler made -- sessionProgrammed, farsRemoved or farsAttempted -- and leaves
+	// them alone, or has pushed before this handler's writes reach the datapath. See
+	// ccEnabler.sessionLocks.
 	unlockSession := upf.ccEnabler.lockSession(localSEID)
 	defer unlockSession()
 
@@ -992,9 +992,9 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 	// the late removal could then undo. That is why this is decided here and not in
 	// SendMsgToUPF.
 	//
-	// Lawful Interception: the session's stripe until RemoveSession has stamped the deletion,
-	// so a tasking pass cannot push one of these FARs back after the delete. See
-	// ccEnabler.sessionLocks.
+	// Lawful Interception: the session's stripe, from before the datapath delete until this
+	// handler returns, so a tasking pass cannot push one of these FARs back after the delete.
+	// See ccEnabler.sessionLocks.
 	unlockSession := upf.ccEnabler.lockSession(localSEID)
 	defer unlockSession()
 
@@ -1165,7 +1165,8 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 		// entries go with the session, so a refused delete would strand duplication that no
 		// later re-derivation can find, because it walks the sessions this element holds.
 		//
-		// Under the session's stripe until RemoveSession, as in the deletion handler.
+		// Under the session's stripe from before the delete until this handler returns, as in
+		// the deletion handler.
 		unlockSession := upf.ccEnabler.lockSession(seid)
 		defer unlockSession()
 

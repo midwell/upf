@@ -11,7 +11,7 @@ import (
 )
 
 // A batch of datapath writes has two outcomes that must not be collapsed into one: the
-// PFCP cause the SMF is told, and whether this element can say the writes were applied.
+// PFCP cause the SMF is told, and whether this element can say the FAR writes were applied.
 //
 // They differ on exactly one case, and it is the common one. A worker whose RPC did not
 // complete -- bessd down, or a context deadline reached before GRPCJoin's own timer --
@@ -47,7 +47,7 @@ func withBatchConfirmation(ctx context.Context) (context.Context, *batchConfirma
 	return context.WithValue(ctx, batchConfirmationKey{}, batch), batch
 }
 
-// noteUnconfirmed records that one write in this batch was neither accepted nor refused.
+// noteUnconfirmed records that one FAR write in this batch was neither accepted nor refused.
 // Silent when the context carries no confirmation, so a caller that builds its own
 // context -- clearState, the slice-meter setup -- needs no change.
 func noteUnconfirmed(ctx context.Context) {

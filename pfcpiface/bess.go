@@ -250,7 +250,7 @@ func (b *bess) SendMsgToUPFWithCompletion(
 // writes were acknowledged by the datapath.
 //
 // **Confirmation covers FARs only.** Only the FAR workers note an RPC that did not complete;
-// a PDR or QER write that did not complete is not reflected here. That is the scope the
+// a PDR or QER write that fails without a refusal is not reflected here. That is the scope the
 // interception plane needs: what it re-derives and re-pushes is duplication FARs, so a
 // FAR is the only write whose confirmation it can act on.
 //
@@ -369,7 +369,7 @@ func (b *bess) sendMsgToUPFBatch(
 
 	// Confirmed means the batch finished, nothing reported a refusal, and no FAR worker had
 	// an RPC that did not complete. The last of those is the one the cause deliberately
-	// forgives. A PDR or QER write that did not complete is not reflected: the
+	// forgives. A PDR or QER write that fails without a refusal is not reflected: the
 	// interception plane re-derives FARs only.
 	return cause, completed, completed && succeeded && !batch.unconfirmed.Load()
 }

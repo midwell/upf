@@ -61,8 +61,9 @@ type liPuntMonitor struct {
 	client   bessCounters
 	reporter neIssueReporter
 	// lost is the egress port's cumulative discard count as last read. Only growth is
-	// reported: the absolute figure includes anything lost before this monitor started,
-	// and a steady figure is one fault, not a fault per poll.
+	// reported, because a steady figure is one fault, not a fault per poll. It starts at
+	// zero, so the first poll reports any discards already counted as growth -- including
+	// ones from before this agent started, when the agent restarted and bessd did not.
 	lost uint64
 	// dropped is the buffering stage's own cumulative discard count, tracked the same way
 	// and for the same reason. It is a separate figure rather than added to lost, because

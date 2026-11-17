@@ -399,8 +399,8 @@ func (pConn *PFCPConn) retryUnfinishedRemovals(sessions []PFCPSession) {
 	finished := make([]bool, len(sessions))
 
 	// Lawful Interception: every retried session's stripe, from before its removal until
-	// RemoveSession below has stamped the deletion, so a tasking pass cannot push one of
-	// their FARs back in between. Taken together because the removals run concurrently and
+	// this function returns, after RemoveSession below has stamped the deletion, so a
+	// tasking pass cannot push one of their FARs back in between. Taken together because the removals run concurrently and
 	// two sessions may share a stripe. See ccEnabler.sessionLocks.
 	seids := make([]uint64, len(sessions))
 	for i, s := range sessions {
