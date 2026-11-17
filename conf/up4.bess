@@ -352,8 +352,8 @@ LI_TAG_BYTES = LI_TAG_FSEID_BYTES + LI_TAG_ACTION_BYTES
 # loses packets by arithmetic. What is lost is intercept product, and nothing
 # downstream can recover or even see it.
 #
-# A Queue turns that into elastic buffering with its own drain task, and its
-# overflow is counted where a failed socket write is not. Sized for a burst rather
+# A Queue turns that into elastic buffering with its own drain task, and counts its
+# overflow, as the port counts a failed socket write. Sized for a burst rather
 # than for sustained overload: if the shipper cannot keep up on average, no queue
 # depth saves it and the fault is reported instead.
 liQueue::Queue(size=LI_EGRESS_QUEUE_PACKETS)
