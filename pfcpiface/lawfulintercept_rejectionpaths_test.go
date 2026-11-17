@@ -972,6 +972,9 @@ func TestARefusedDeletionStageDoesNotClaimTheRolledBackDuplication(t *testing.T)
 // before the modification recorded FAR 1 as duplicating; if the handler leaves that record
 // standing, it agrees with the tasking and every later re-derivation skips the FAR while the
 // datapath copies nothing.
+//
+// FAR 2 is the case that is easy to miss: the message does not name it, but the rollback
+// re-writes every FAR the session held, so it is turned off too and its record must say so.
 func TestARefusedRemovalAfterThePushDoesNotClaimTheRolledBackDuplication(t *testing.T) {
 	pConn, dp, e, _ := rejectionConn(t)
 
@@ -992,9 +995,11 @@ func TestARefusedRemovalAfterThePushDoesNotClaimTheRolledBackDuplication(t *test
 	e.reparse()
 	e.retaskAndWait()
 
-	if duplicating, _ := programmedFor(e, seid, 1); !duplicating {
-		t.Fatal("the tasking pass did not record FAR 1 as duplicating, so this test is not " +
-			"exercising the state it is about")
+	for _, id := range []uint32{1, 2} {
+		if duplicating, _ := programmedFor(e, seid, id); !duplicating {
+			t.Fatalf("the tasking pass did not record FAR %d as duplicating, so this test is not "+
+				"exercising the state it is about", id)
+		}
 	}
 
 	if _, err := pConn.handleSessionModificationRequest(
@@ -1009,17 +1014,19 @@ func TestARefusedRemovalAfterThePushDoesNotClaimTheRolledBackDuplication(t *test
 		t.Fatal("a modification removing a FAR the session does not hold was reported as succeeding")
 	}
 
-	dp.mu.Lock()
-	restored := !dp.duplicating[1]
-	dp.mu.Unlock()
+	for _, id := range []uint32{1, 2} {
+		dp.mu.Lock()
+		restored := !dp.duplicating[id]
+		dp.mu.Unlock()
 
-	if !restored {
-		t.Fatal("the rollback did not restore FAR 1 to the session's own, non-duplicating " +
-			"version, so this test is not exercising the state it is about")
-	}
+		if !restored {
+			t.Fatalf("the rollback did not restore FAR %d to the session's own, non-duplicating "+
+				"version, so this test is not exercising the state it is about", id)
+		}
 
-	if duplicating, _ := programmedFor(e, seid, 1); duplicating {
-		t.Error("the record claims FAR 1 is duplicating after the rollback turned it off: the " +
-			"claim agrees with the tasking, so no later re-derivation pushes it again")
+		if duplicating, _ := programmedFor(e, seid, id); duplicating {
+			t.Errorf("the record claims FAR %d is duplicating after the rollback turned it off: the "+
+				"claim agrees with the tasking, so no later re-derivation pushes it again", id)
+		}
 	}
 }

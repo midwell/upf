@@ -751,6 +751,18 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 
 	upf.ccEnabler.applyTasking(&session, &updated)
 
+	// Lawful Interception: every refusal below runs sendError, and with it the rollback, which
+	// re-writes every FAR the session held before this message as the store describes it. A
+	// re-derivation records duplication without writing the store, so that copy can turn
+	// duplication off on FARs this message never named. Both sets are recorded as *attempted*:
+	// the pushed FARs, whose outcome is unknown, and the restored ones, which the rollback may
+	// have turned off. A record claiming either still duplicates would agree with the tasking,
+	// and a later pass would skip it. See farsAttempted.
+	recordRolledBack := func() {
+		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+		upf.ccEnabler.farsAttempted(localSEID, before.fars)
+	}
+
 	cause, confirmed := upf.sendDuplicationWrite(upfMsgTypeMod, session.PacketForwardingRules, updated)
 	if cause == ie.CauseRequestRejected {
 		// **A refusal does not mean the datapath is untouched**, so the rules this element was
@@ -766,17 +778,15 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// Recorded as *attempted*, not pushed. The outcome is unknown on this path, and a
 		// record claiming the rules are duplicating would agree with the tasking — which is
 		// what makes a later pass skip them, permanently, leaving an accepted warrant
-		// producing nothing. See farsAttempted.
-		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+		// producing nothing. See recordRolledBack.
+		recordRolledBack()
 
 		return sendError(ErrWriteToDatapath)
 	}
 
-	// Lawful Interception: every refusal from here on runs the rollback after the push above,
-	// so it records the pushed FARs as attempted first, as the refused push does. See
-	// farsAttempted.
+	// Every refusal from here on runs the rollback after the push above. See recordRolledBack.
 	failAfterPush := func(err error) (message.Message, error) {
-		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+		recordRolledBack()
 
 		return sendError(err)
 	}
@@ -865,8 +875,8 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// rules, so the datapath no longer holds what was pushed -- and the restore is
 		// itself unconfirmed. Recording the push would claim duplication the rollback may
 		// have turned off, and a claim that agrees with the tasking is one every later pass
-		// skips. See farsAttempted.
-		upf.ccEnabler.farsAttempted(localSEID, updated.fars)
+		// skips. See recordRolledBack.
+		recordRolledBack()
 
 		return sendError(ErrWriteToDatapath)
 	}
