@@ -460,3 +460,70 @@ func TestLiBlockRefusesUnknownKeys(t *testing.T) {
 		}
 	})
 }
+
+// TestLiBlockKeyIgnoresCase covers the spelling of the `li` key itself. encoding/json matches a
+// key to a struct field ignoring case, so `"LI"` configured interception while the field was
+// decoded through its tag. The strict decode reads the key out of the document by hand, and an
+// exact lookup would leave such a configuration with interception off and nothing saying so.
+func TestLiBlockKeyIgnoresCase(t *testing.T) {
+	li := func(key, extra string) string {
+		return `{
+			"mode": "dpdk",
+			"` + key + `": {
+				"x3_sockaddr": "/pod-share/x3",
+				"cert": "/li/upf.crt",
+				"key": "/li/upf.key",
+				"ca_cert": "/li/ca.crt",
+				"x1_listen": ":8443",
+				"tf_id": "smf-1",
+				"ne_id": "upf-1"` + extra + `
+			}
+		}`
+	}
+
+	t.Run("LI configures interception", func(t *testing.T) {
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(li("LI", ""), path)
+
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("an LI block was refused: %v", err)
+		}
+		if conf.Li == nil {
+			t.Fatal("an LI block spelled in capitals left interception off with nothing saying so")
+		}
+		if conf.Li.blockErr != nil {
+			t.Errorf("a conformant LI block left a refusal recorded: %v", conf.Li.blockErr)
+		}
+		if conf.Li.TFID != "smf-1" {
+			t.Errorf("the LI block was not decoded: tf_id %q", conf.Li.TFID)
+		}
+	})
+
+	t.Run("Li with a misspelled key is refused", func(t *testing.T) {
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(li("Li", `,
+				"admf_uri": "https://admf:9443"`), path)
+
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("a misspelled LI key stopped the whole configuration load: %v", err)
+		}
+		if conf.Li == nil || conf.Li.blockErr == nil {
+			t.Fatal("a misspelled key in a Li block was not refused through blockErr")
+		}
+	})
+
+	t.Run("two spellings and no exact one are refused", func(t *testing.T) {
+		path := t.TempDir() + "/conf.jsonc"
+		mustWriteStringToDisk(`{"mode": "dpdk", "LI": {"tf_id": "a"}, "Li": {"tf_id": "b"}}`, path)
+
+		conf, err := LoadConfigFile(path)
+		if err != nil {
+			t.Fatalf("an ambiguous li key stopped the whole configuration load: %v", err)
+		}
+		if conf.Li == nil || conf.Li.blockErr == nil {
+			t.Fatal("two spellings of the li key were accepted, so one of them was picked silently")
+		}
+	})
+}
