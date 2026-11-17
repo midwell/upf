@@ -53,8 +53,8 @@ func liStoredSession(seid uint64, ue string) PFCPSession {
 // inside the array, and RemoveFAR shifts the remainder down inside it — the second is
 // what lets a reader observe a rule at an index that now belongs to a different one.
 // A round that only removed would fail on the next round with the FAR already gone,
-// and the handler answers a failed removal by returning before it writes anything, so
-// the writer would go quiet after one round and the test would assert nothing.
+// and the handler answers a failed removal by rolling the round back, so the writer
+// would leave the session unchanged after one round and the test would assert nothing.
 func modifyFARRequest(seid uint64, round int) message.Message {
 	seq := uint32(round)
 	if round%2 == 0 {
