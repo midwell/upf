@@ -18,6 +18,7 @@ import (
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/wmnsk/go-pfcp/ie"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -1093,11 +1094,19 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 			// operator that this NE is LI-provisioned, which network-element-level
 			// undetectability forbids. No X1 channel exists yet at datapath init, so
 			// pending a restricted LI log sink this is surfaced only non-attributably.
-			logger.BessLog.Errorln("an optional datapath subsystem failed to initialise")
+			declineOptionalSubsystem()
 		}
 	}
 
 	b.setupSliceMeter(conf)
+}
+
+// declineOptionalSubsystem logs that an optional datapath subsystem did not start, and
+// nothing that says which. The message names none, and the line carries no caller: the
+// logger records each line's call site, and the file and line of a call inside the Lawful
+// Interception branch above would name that branch to anyone with the source.
+func declineOptionalSubsystem() {
+	logger.BessLog.WithOptions(zap.WithCaller(false)).Errorln("an optional datapath subsystem failed to initialise")
 }
 
 func (b *bess) startEndMarkerSender(addr string) {
