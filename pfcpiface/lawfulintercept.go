@@ -43,10 +43,13 @@ const (
 // Read is time that queue spends filling, so the loop does nothing but read and
 // hand off; parsing, task lookup and PDU framing happen on workers.
 const (
-	// liFrameQueueDepth absorbs a burst that arrives faster than it can be framed.
+	// liFrameQueueDepth absorbs a burst that arrives faster than it can be framed. It is
+	// the total across the workers' queues, so the buffers it can hold do not grow with
+	// the number of workers.
 	liFrameQueueDepth = 4096
 	// liFrameWorkers frame concurrently. Delivery itself is already asynchronous;
-	// this covers the per-packet work in front of it.
+	// this covers the per-packet work in front of it. Each session is framed by one of
+	// them, so its copies are framed in the order they were read: see frameQueueFor.
 	liFrameWorkers = 4
 	// liMaxPunted bounds a single copy read from the socket.
 	liMaxPunted = 1 << 16
@@ -105,9 +108,9 @@ type liShipper struct {
 	// sock is the shipping loop's to write and a probe answers on another goroutine.
 	egressDown atomic.Bool
 
-	// punted carries copies from the socket read to the framing workers, and free
-	// recycles the buffers so the hot path does not allocate per packet.
-	punted chan []byte
+	// punted carries copies from the socket read to the framing workers, one queue per
+	// worker, and free recycles the buffers so the hot path does not allocate per packet.
+	punted []chan []byte
 	free   chan []byte
 }
 
@@ -249,11 +252,14 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		tlsConfig: mat.ClientTLS(),
 		keepalive: keepaliveConfig(*cfg, issueReporter),
 		senders:   make(map[string]x2x3.Sender),
-		punted:    make(chan []byte, liFrameQueueDepth),
+		punted:    make([]chan []byte, liFrameWorkers),
 		free:      make(chan []byte, liFrameQueueDepth),
 		// Built once: the two identities are constant for the life of the process, so
 		// no xCC pays for constructing them, and this is a per-packet path.
 		ids: x2x3.NewIdentity(cfg.NEID, upfInterceptionPoint),
+	}
+	for i := range s.punted {
+		s.punted[i] = make(chan []byte, liFrameQueueDepth/liFrameWorkers)
 	}
 	// The egress is down until the shipping loop has established it, which is the
 	// truth from this moment and the answer the x3EgressDown probe owes anyone who
@@ -304,8 +310,8 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 		go s.watcher.Watch(nil)
 	}
 
-	for range liFrameWorkers {
-		go s.frameLoop()
+	for _, q := range s.punted {
+		go s.frameLoop(q)
 	}
 
 	// shipLoop establishes the egress itself, retrying until the datapath answers,
@@ -584,7 +590,7 @@ func (s *liShipper) shipLoop() {
 		out := append(s.buffer()[:0], buf[:n]...)
 
 		select {
-		case s.punted <- out:
+		case s.frameQueueFor(out) <- out:
 		default:
 			// Framing cannot keep up. This is lost content like any other, so it is
 			// reported rather than left to be inferred from a counter nobody reads.
@@ -594,9 +600,26 @@ func (s *liShipper) shipLoop() {
 	}
 }
 
+// frameQueueFor picks the framing worker for a copy by the session in its tag.
+//
+// **A session's copies are framed by one worker, in the order they were read.** A
+// fragmented datagram is classified from its initial fragment and its later fragments
+// follow that decision (lawfulintercept_fragment.go). With any worker free to take any
+// copy, a later fragment read after its first could be looked up before the worker
+// holding the first had classified it, and be dropped and reported as lost although it
+// arrived in order. The memo is per session, so ordering within a session is all that
+// decision needs. The tag is already in hand, so the choice costs a modulo and no
+// parsing on the read loop. The local SEID is drawn at random, so sessions spread over
+// the workers; a single session is framed by one.
+func (s *liShipper) frameQueueFor(tagged []byte) chan []byte {
+	fseid := binary.LittleEndian.Uint64(tagged[:fseidTagLen])
+
+	return s.punted[fseid%uint64(len(s.punted))]
+}
+
 // frameLoop turns punted copies into X3 PDUs and hands them to delivery.
-func (s *liShipper) frameLoop() {
-	for b := range s.punted {
+func (s *liShipper) frameLoop(punted <-chan []byte) {
+	for b := range punted {
 		if s.checkTag(b) {
 			s.ship(b)
 		}

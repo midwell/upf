@@ -5,6 +5,7 @@ package pfcpiface
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -69,7 +70,7 @@ func TestTheReadLoopKeepsDrainingWhileAReportIsOutstanding(t *testing.T) {
 		senders:  make(map[string]x2x3.Sender),
 		// One slot and nothing draining it: the second datagram onwards is a drop, so
 		// the report fires on all but the first.
-		punted:   make(chan []byte, 1),
+		punted:   []chan []byte{make(chan []byte, 1)},
 		free:     make(chan []byte, 1),
 		reporter: x1.NewReporter(unansweringADMF(t), "admfID", "neID", nil),
 	}
@@ -227,5 +228,93 @@ func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("refusing an unauthorised request took %s while the reporter was unresponsive", elapsed)
+	}
+}
+
+// TestASessionsCopiesReachOneFramingWorkerInReadOrder: a fragmented datagram is
+// classified from its first fragment, and its later fragments follow that decision. If any
+// worker could take any copy, a later fragment read after its first could be looked up
+// before the worker holding the first had classified it, and be dropped as lost although
+// it arrived in order. So each session's copies go to one worker's queue, in the order the
+// read loop took them. The workers are left out, so the queues hold exactly what the read
+// loop handed over.
+func TestASessionsCopiesReachOneFramingWorkerInReadOrder(t *testing.T) {
+	addr := filepath.Join(t.TempDir(), "li-x3.sock")
+
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unixpacket", addr)
+	if err != nil {
+		t.Skipf("unixpacket sockets unavailable here: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	// Not a multiple of the worker count, so a session-blind rotation over the workers
+	// cannot happen to keep each session on one.
+	const sessions, perSession = 13, 20
+
+	s := &liShipper{
+		sockAddr: addr,
+		senders:  make(map[string]x2x3.Sender),
+		punted:   make([]chan []byte, liFrameWorkers),
+		free:     make(chan []byte, sessions*perSession),
+	}
+	for i := range s.punted {
+		s.punted[i] = make(chan []byte, sessions*perSession)
+	}
+	s.egressDown.Store(true)
+
+	go s.shipLoop()
+
+	conn, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("the shipper never dialled the egress: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+
+	// Interleaved across sessions, as the datapath tees them. The SEIDs are consecutive,
+	// so they fall on every worker. Each copy carries its session and its place in that
+	// session's stream.
+	for i := range perSession {
+		for seid := range uint64(sessions) {
+			copyOf := make([]byte, liTagLen+2)
+			binary.LittleEndian.PutUint64(copyOf, seid+1)
+			copyOf[fseidTagLen] = farForwardUAndDuplicate
+			copyOf[liTagLen] = byte(i)
+			if _, err := conn.Write(copyOf); err != nil {
+				t.Fatalf("writing copy %d of session %d: %v", i, seid+1, err)
+			}
+		}
+	}
+
+	queueOf := make(map[uint64]int, sessions)
+	next := make(map[uint64]byte, sessions)
+	deadline := time.After(10 * time.Second)
+
+	for got := 0; got < sessions*perSession; {
+		for q, punted := range s.punted {
+			select {
+			case b := <-punted:
+				got++
+				seid := binary.LittleEndian.Uint64(b)
+				if first, seen := queueOf[seid]; seen && first != q {
+					t.Fatalf("session %d's copies went to workers %d and %d", seid, first, q)
+				}
+				queueOf[seid] = q
+				if b[liTagLen] != next[seid] {
+					t.Fatalf("session %d: copy %d reached its worker where copy %d was due", seid, b[liTagLen], next[seid])
+				}
+				next[seid]++
+			case <-deadline:
+				t.Fatalf("only %d of %d copies reached the framing queues", got, sessions*perSession)
+			default:
+			}
+		}
+	}
+
+	workers := make(map[int]bool)
+	for _, q := range queueOf {
+		workers[q] = true
+	}
+	if len(workers) < 2 {
+		t.Errorf("%d sessions all went to one worker", sessions)
 	}
 }
