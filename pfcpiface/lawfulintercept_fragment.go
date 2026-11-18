@@ -72,9 +72,10 @@ type fragDecision struct {
 // rule does not pin both the port and the protocol — so a task keyed by a session, an address
 // or a tunnel pays nothing and the unfragmented path allocates nothing at all.
 //
-// Shared by the framing workers, which are four deep, so it carries its own lock. The map is
-// small and the critical section is a lookup, which is why a mutex rather than anything
-// cleverer: the alternative costs more in complexity than the contention it avoids.
+// Held per session, and a session is framed by one worker (see frameQueueFor), so the lock
+// is not there for concurrent framing: a tasking change rebuilds the memo while a worker may
+// be using it. The map is small and the critical section is a lookup, which is why a mutex
+// rather than anything cleverer.
 type fragmentMemo struct {
 	// onLoss reports that a fragment of a datagram this element could not classify was
 	// discarded. It is the existing X3 content-loss condition, not a new one: from the

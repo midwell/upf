@@ -1456,8 +1456,10 @@ func (e *ccEnabler) tasksCovering(seid uint64) []coveredTask {
 	defer e.coveredMu.Unlock()
 
 	// **Whoever got there first wins, and the loser discards its own answer.** Resolution runs
-	// unlocked — it has to, since it walks every session — so two framing workers missing on the
-	// same session at the same time both compute one. The answers are equivalent, but they are
+	// unlocked — it has to, since it walks every session — so two callers missing on the same
+	// session at the same time would both compute one. The shipper cannot do that today, since
+	// a session is framed by one worker (frameQueueFor); the check keeps it so if another caller
+	// comes. The answers are equivalent, but they are
 	// not interchangeable: resolveCovering allocates the *fragment memo* the filter carries, so
 	// two answers are two memos. Last-writer-wins left the other worker holding a filter whose
 	// memo nothing else shares, and a datagram whose initial fragment was classified into one

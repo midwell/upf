@@ -17,9 +17,8 @@ import (
 )
 
 // TestTheDeclineLineCarriesNoCallerAndNamesNothing: when the X3 shipper does not start,
-// the general BESS log says that an optional subsystem did not, and no more. The logger
-// records each line's call site, and the file and line of a call inside the Lawful
-// Interception branch of setUpfInfo would name that branch to anyone with the source.
+// the general BESS log says that an optional subsystem did not, and no more: no LI
+// wording and none of the file and line the logger otherwise records for each line.
 func TestTheDeclineLineCarriesNoCallerAndNamesNothing(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	saved := logger.BessLog

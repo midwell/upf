@@ -1102,9 +1102,9 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 }
 
 // declineOptionalSubsystem logs that an optional datapath subsystem did not start, and
-// nothing that says which. The message names none, and the line carries no caller: the
-// logger records each line's call site, and the file and line of a call inside the Lawful
-// Interception branch above would name that branch to anyone with the source.
+// nothing that says which. The message names none, and the line is written without the
+// caller field the logger otherwise records, so the log line itself carries no file and
+// line.
 func declineOptionalSubsystem() {
 	logger.BessLog.WithOptions(zap.WithCaller(false)).Errorln("an optional datapath subsystem failed to initialise")
 }
