@@ -51,15 +51,30 @@ namespace bess {
 static struct rte_mempool *pframe_pool[RTE_MAX_NUMA_NODES];
 
 Packet *Packet::copy(const Packet *src) {
-  DCHECK(src->is_linear());
+  // Only the first segment's data is copied, so a packet in several segments
+  // cannot be: a caller sees the same failure as an empty pool.
+  if (!src->is_linear()) {
+    return nullptr;  // FAIL.
+  }
 
   Packet *dst = reinterpret_cast<Packet *>(rte_pktmbuf_alloc(src->pool_));
   if (!dst) {
     return nullptr;  // FAIL.
   }
 
-  bess::utils::CopyInlined(dst->append(src->total_len()), src->head_data(),
-                           src->total_len(), true);
+  // A packet can be longer than a fresh buffer's tailroom: whatever was
+  // prepended since it was received (an encapsulation, say) came out of its
+  // headroom. Such a copy starts that much earlier, so it ends where the buffer
+  // does. Both buffers come from the same pool, so it fits.
+  const int len = src->total_len();
+  const bool grown = len > dst->tailroom();
+  if (grown) {
+    dst->set_data_off(dst->data_off() - (len - dst->tailroom()));
+  }
+
+  // A sloppy copy writes up to 31 bytes past len (utils/copy.h), which a grown
+  // copy, ending at the end of the buffer, does not have.
+  bess::utils::CopyInlined(dst->append(len), src->head_data(), len, !grown);
 
   return dst;
 }

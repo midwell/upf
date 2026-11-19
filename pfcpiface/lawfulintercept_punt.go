@@ -153,10 +153,10 @@ func (m *liPuntMonitor) check() {
 
 // checkTeeCopies reports copies a tee could not make.
 //
-// Replicate skips a gate when bess::Packet::copy finds the packet pool empty, and counts
-// nothing, so the copy reaches neither the queue nor the port and neither of their counts
-// sees it. The subscriber's original still goes out on gate 0. The loss is therefore the
-// growth of gate 0's count over gate 1's.
+// Replicate skips a gate when bess::Packet::copy fails -- the packet pool is empty, or the
+// packet is in more than one segment -- and counts nothing, so the copy reaches neither the
+// queue nor the port and neither of their counts sees it. The subscriber's original still
+// goes out on gate 0. The loss is therefore the growth of gate 0's count over gate 1's.
 //
 // The counts are read while the workers run, and the reads are not atomic with them, but on
 // lossless traffic the skew has one direction. Replicate emits each batch's copies before its
