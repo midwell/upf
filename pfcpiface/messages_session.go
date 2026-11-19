@@ -755,6 +755,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 			upf.ccEnabler.removalUnconfirmed(localSEID, remove.fars, "a refused session modification")
 		}
 
+		// Lawful Interception: the restore is a write, answered by its cause alone, and needs no
+		// confirmation here. recordRolledBack has already recorded every FAR it writes as
+		// attempted -- not duplicating -- and the session stays in the store with those FARs,
+		// so whatever the restore left, the record claims no duplication, a FAR the tasking
+		// wants duplicating disagrees with it, and a FAR this element ever turned on is pushed
+		// again by the next pass whatever the record says (everDuplicated). Nothing is forgotten
+		// that a removal report would be the only remedy for.
 		if upf.SendMsgToUPF(upfMsgTypeMod, before, before) == ie.CauseRequestRejected {
 			logger.PfcpLog.Warnln("datapath refused to restore the rules of a refused "+
 				"modification; it may be missing rules this session describes, or holding "+

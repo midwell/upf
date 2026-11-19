@@ -140,8 +140,8 @@ func (f *FakeFar) ActionValue() uint8 {
 // ForwardActionValue returns the value the pipeline's executeFAR splits on, which
 // is where content duplication is signalled (farForwardDAndDuplicate,
 // farForwardUAndDuplicate, and farForwardUEncapAndDuplicate for an uplink FAR
-// that creates an outer header toward another UPF). Assert on this, not ActionValue, when checking that
-// interception reached the datapath.
+// that creates an outer header toward another UPF). Assert on this, not
+// ActionValue, when checking that interception reached the datapath.
 func (f *FakeFar) ForwardActionValue() uint8 {
 	return f.fwdAction
 }

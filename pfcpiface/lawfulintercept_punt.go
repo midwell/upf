@@ -69,11 +69,11 @@ const (
 	teeOriginalGate = 0
 	teeCopyGate     = 1
 
-	// teeSkewAllowance is how far a tee's copy gate can read ahead of its original gate on
-	// lossless traffic. Replicate emits each packet's copy before the original, and BESS runs
-	// a gate's Track hook when that gate's batch is handed on -- once it holds
-	// bess::PacketBatch::kMaxBurst packets (bess/core/pktbatch.h), or when the module's batch
-	// is done -- so a read can fall between the two gates' hooks for one batch.
+	// teeSkewAllowance is the growth of a tee's shortfall that is reported a poll later
+	// rather than at once: one batch, bess::PacketBatch::kMaxBurst (bess/core/pktbatch.h).
+	// It is not a bound on how far the copy gate can read ahead -- that skew lowers the
+	// shortfall and never reaches this -- but the size of what a baseline taken from such a
+	// read is most likely to be off by. See checkTeeCopies.
 	teeSkewAllowance = 64
 
 	// trackHookClass is the class of BESS's default gate hook, whose counts these are.
@@ -90,8 +90,8 @@ type teeAccount struct {
 	// zero, so the first poll reports a shortfall already counted, as the other two
 	// counters do.
 	deficit int64
-	// pending is a growth within the skew allowance seen on the last poll and not yet
-	// reported: a skewed read clears on the next poll, and a lost copy does not.
+	// pending is a growth of up to one batch seen on the last poll and not yet reported. It is
+	// reported if the next poll still shows it.
 	pending bool
 }
 
@@ -135,10 +135,10 @@ func (m *liPuntMonitor) run() {
 	}
 }
 
-// check reads both discard counters once and reports any new loss.
+// check reads each tee's gate counts and both discard counters once, and reports any new loss.
 //
-// Each counter is cumulative and read on its own, so traffic passing between the two reads
-// changes neither: a discard count grows only when a copy is discarded. That is why the
+// Each discard counter is cumulative and read on its own, so traffic passing between the two
+// reads changes neither: a discard count grows only when a copy is discarded. That is why the
 // port's own count is read rather than inferred from what was handed to the port against
 // what it sent — two separate reads of moving packet counters differ by whatever passed
 // between them, which on lossless traffic reads as loss.
@@ -158,14 +158,21 @@ func (m *liPuntMonitor) check() {
 // sees it. The subscriber's original still goes out on gate 0. The loss is therefore the
 // growth of gate 0's count over gate 1's.
 //
-// The two counts are read from moving gates. A batch's copy gate is counted before its
-// original gate, and bessd reads gate 0 before gate 1, so on lossless traffic a read can
-// only find the copy gate ahead, by about a batch (teeSkewAllowance): a skewed read lowers
-// the shortfall. A growth past the allowance is loss at once. One within it is loss only if
-// the next poll still shows it: a read skewed low clears on the next poll, and a lost copy
-// stays lost. What this cannot tell apart is a baseline taken from a read skewed low, which
-// makes the next unskewed reads show up to a batch of growth that persists; that costs at
-// most one report of a batch the tee did copy.
+// The counts are read while the workers run, and the reads are not atomic with them, but on
+// lossless traffic the skew has one direction. Replicate emits each batch's copies before its
+// originals, a gate's hook runs when its batch is handed on, in the order the gates first
+// received a packet, and bessd reads gate 0 before gate 1. A read can therefore find the copy
+// gate ahead and not behind -- how far ahead depends on the batches the workers finish between
+// the two hooks and the two reads -- and ahead lowers the shortfall, so it cannot make a loss
+// out of lossless traffic. The one batch that can read the other way is one whose first copy
+// failed, which is already a loss.
+//
+// A growth of up to one batch (teeSkewAllowance) is reported a poll later, not at once, and
+// only if that poll still shows it; a larger one is reported at once. The wait is not a skew
+// filter, since a copy-ahead read never shows growth. It is for a baseline taken from a
+// copy-ahead read after a report, which makes the next reads show a growth that persists;
+// that can still cost one report of up to a batch the tee did copy. A baseline taken at a
+// reset is clamped at zero, so a reload read with the copy gate ahead costs nothing.
 //
 // Silent where the tee or either gate's Track hook cannot be read -- an older pipeline, or
 // one built with the default hooks skipped -- since a count that is not kept is not loss.
@@ -178,8 +185,10 @@ func (m *liPuntMonitor) checkTeeCopies(name string, acct *teeAccount) {
 	deficit := int64(original) - int64(copied)
 
 	if original < acct.original || copied < acct.copied {
-		// Reset by a pipeline reload: a new baseline rather than a recovery.
-		*acct = teeAccount{original: original, copied: copied, deficit: deficit}
+		// Reset by a pipeline reload: a new baseline rather than a recovery. Not below zero: a
+		// reset read with the copy gate ahead would otherwise leave a baseline the next
+		// unskewed reads grow past.
+		*acct = teeAccount{original: original, copied: copied, deficit: max(deficit, 0)}
 
 		return
 	}

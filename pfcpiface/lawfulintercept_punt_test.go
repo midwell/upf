@@ -33,6 +33,8 @@ type fakeCounters struct {
 	// tees is each tee's gate counts, by module name. A tee not in the map is not in the
 	// pipeline.
 	tees map[string]*teeGates
+	// infoErr makes GetModuleInfo fail at the transport, as a datapath that does not answer.
+	infoErr bool
 }
 
 // teeGates is one tee's output gates as GetModuleInfo reports them.
@@ -45,6 +47,10 @@ type teeGates struct {
 }
 
 func (f *fakeCounters) GetModuleInfo(_ context.Context, in *pb.GetModuleInfoRequest, _ ...grpc.CallOption) (*pb.GetModuleInfoResponse, error) {
+	if f.infoErr {
+		return nil, context.DeadlineExceeded
+	}
+
 	tee, ok := f.tees[in.GetName()]
 	if !ok {
 		return &pb.GetModuleInfoResponse{Error: &pb.Error{Errmsg: "no such module"}}, nil
@@ -320,9 +326,10 @@ func TestPuntMonitorDoesNotMistakeTeeSkewForLoss(t *testing.T) {
 	}
 }
 
-// TestPuntMonitorWaitsAPollOnAShortfallWithinABatch: a shortfall within the skew allowance is
-// not reported when it clears on the next poll, and is reported when it does not.
-func TestPuntMonitorWaitsAPollOnAShortfallWithinABatch(t *testing.T) {
+// TestPuntMonitorReportsGrowthWithinABatchAPollLater: a growth of up to one batch is not
+// reported at once. It is not reported when the next poll no longer shows it, and is reported
+// on the next poll when that poll still does.
+func TestPuntMonitorReportsGrowthWithinABatchAPollLater(t *testing.T) {
 	m, tee, rec := teeMonitor(1000, 1000)
 	m.check()
 
@@ -398,5 +405,120 @@ func TestPuntMonitorIsSilentWithoutTeeCounts(t *testing.T) {
 
 	if len(rec.issues) != 0 {
 		t.Errorf("a tee whose gates are not counted, or no tee at all, was reported as %v", rec.issues)
+	}
+}
+
+// TestPuntMonitorClampsAResetBaselineAtZero: a reload read with the copy gate ahead, then
+// lossless reads. The copy-ahead read must not leave a baseline below zero that the lossless
+// reads then grow past.
+func TestPuntMonitorClampsAResetBaselineAtZero(t *testing.T) {
+	m, tee, rec := teeMonitor(5000, 5000)
+	m.check()
+
+	tee.original, tee.copied = 100, 130
+	m.check()
+
+	for _, n := range []uint64{1000, 2000, 3000} {
+		tee.original, tee.copied = n, n
+		m.check()
+	}
+
+	if len(rec.issues) != 0 {
+		t.Errorf("lossless traffic after a reload read with the copy gate ahead was reported as %v",
+			rec.issues)
+	}
+}
+
+// TestPuntMonitorTakesAResetOfOneGateAsANewBaseline: a Track reset of one gate only (bessctl
+// can reset a hook) drops that count alone. That is a new baseline, not a loss or a recovery.
+func TestPuntMonitorTakesAResetOfOneGateAsANewBaseline(t *testing.T) {
+	m, tee, rec := teeMonitor(5000, 5000)
+	m.check()
+
+	tee.original, tee.copied = 100, 5100
+	m.check()
+
+	tee.original, tee.copied = 1100, 6100
+	m.check()
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Fatalf("a reset of the original gate alone, then lossless traffic, was reported as %v",
+			rec.issues)
+	}
+
+	tee.original, tee.copied = 6000, 5100
+	m.check()
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Errorf("a reset of the copy gate alone, then lossless traffic, was reported as %v", rec.issues)
+	}
+}
+
+// TestPuntMonitorKeepsItsAccountThroughAFailedRead: a poll the datapath does not answer
+// changes nothing. A shortfall already reported is not reported again after it, and new loss
+// after it is.
+func TestPuntMonitorKeepsItsAccountThroughAFailedRead(t *testing.T) {
+	m, tee, rec := teeMonitor(1000, 1000)
+	c := m.client.(*fakeCounters)
+	m.check()
+
+	tee.original, tee.copied = 2000, 1900
+	m.check()
+
+	c.infoErr = true
+	m.check()
+	c.infoErr = false
+
+	tee.original, tee.copied = 3000, 2900
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Fatalf("a shortfall reported before a failed read was reported %d times, want once",
+			len(rec.issues))
+	}
+
+	tee.original, tee.copied = 4000, 3800
+	m.check()
+
+	if len(rec.issues) != 2 {
+		t.Errorf("new loss after a failed read was reported %v, want a second report", rec.issues)
+	}
+}
+
+// TestPuntMonitorKeepsTheTwoTeesApart: the downlink and uplink tees are accounted separately,
+// so a shortfall on one is neither hidden nor repeated by the other's counts.
+func TestPuntMonitorKeepsTheTwoTeesApart(t *testing.T) {
+	down := &teeGates{original: 1000, copied: 1000}
+	up := &teeGates{original: 50000, copied: 50000}
+	c := &fakeCounters{
+		noQueue: true,
+		portErr: true,
+		tees:    map[string]*teeGates{"liReplicaD": down, "liReplicaU": up},
+	}
+	rec := &recordingReporter{}
+	m := &liPuntMonitor{client: c, reporter: rec}
+
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Fatalf("two lossless tees were reported as %v", rec.issues)
+	}
+
+	up.original, up.copied = 60000, 59900
+	m.check()
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Fatalf("100 copies the uplink tee did not make reported %v, want once", rec.issues)
+	}
+
+	down.original, down.copied = 2000, 1900
+	m.check()
+
+	if len(rec.issues) != 2 {
+		t.Errorf("100 copies the downlink tee did not make after the uplink's reported %v, want "+
+			"a second report", rec.issues)
 	}
 }

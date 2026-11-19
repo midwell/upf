@@ -451,6 +451,33 @@ func TestATeardownWithoutLIDoesNotRetryAnUnansweredDelete(t *testing.T) {
 	}
 }
 
+// TestAModificationRemovalWithoutLIIsAnsweredAsBefore: on a UPF with no li block a Remove FAR whose
+// delete is not answered touches no enabler, and the SMF is told the modification was accepted,
+// as it was before.
+func TestAModificationRemovalWithoutLIIsAnsweredAsBefore(t *testing.T) {
+	pConn, dp, _, _ := rejectionConn(t)
+
+	const seid = 407
+
+	pConn.upf.ccEnabler = nil
+	pConn.upf.datapath = &scriptedLIDeleteDP{liRefusingDP: dp, deletes: []deleteAnswer{deleteUnanswered}}
+
+	if err := pConn.store.PutSession(liStoredSession(seid, "10.250.0.20")); err != nil {
+		t.Fatal(err)
+	}
+
+	rsp, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0, ie.NewRemoveFAR(ie.NewFARID(4))))
+	if err != nil {
+		t.Fatalf("the modification was refused: %v", err)
+	}
+
+	cause, err := rsp.(*message.SessionModificationResponse).Cause.Cause()
+	if err != nil || cause != ie.CauseRequestAccepted {
+		t.Errorf("the SMF was answered cause %d (%v), want accepted", cause, err)
+	}
+}
+
 // TestATeardownThatRemovedTheDuplicationReportsNothing: the removal finished, late or not, so
 // nothing was abandoned and the ADMF hears nothing.
 func TestATeardownThatRemovedTheDuplicationReportsNothing(t *testing.T) {
