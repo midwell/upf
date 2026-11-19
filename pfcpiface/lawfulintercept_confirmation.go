@@ -109,3 +109,19 @@ func (u *upf) sendRemoval(all PacketForwardingRules) (uint8, bool, bool) {
 
 	return cause, finished, finished && cause == ie.CauseRequestAccepted
 }
+
+// sendRulesRemoval is sendRemoval for rules removed from a session that stays: a modification's
+// Remove FAR stage, and the rollback of rules a refused modification created. Those callers do not
+// act on completion, so a datapath that cannot confirm is asked through SendMsgToUPF exactly as
+// before, and an accepted answer counts as confirmed.
+func (u *upf) sendRulesRemoval(rules PacketForwardingRules) (uint8, bool) {
+	if r, ok := u.datapath.(removingDatapath); ok {
+		cause, _, confirmed := r.sendMsgToUPFRemoval(rules)
+
+		return cause, confirmed
+	}
+
+	cause := u.SendMsgToUPF(upfMsgTypeDel, rules, PacketForwardingRules{})
+
+	return cause, cause == ie.CauseRequestAccepted
+}

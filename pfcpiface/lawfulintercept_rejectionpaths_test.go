@@ -45,6 +45,8 @@ type liRefusingDP struct {
 	// duplicating is what this datapath believes it is duplicating, keyed by FAR ID. It is
 	// written whatever the answer, because that is the point.
 	duplicating map[uint32]bool
+	// everDuplicating is every FAR a write asked to duplicate, kept through deletions.
+	everDuplicating map[uint32]bool
 }
 
 // sharedMetrics builds the collector once for the whole package.
@@ -58,7 +60,7 @@ var sharedMetrics = sync.OnceValues(func() (*metrics.Service, error) {
 })
 
 func newRefusingDP() *liRefusingDP {
-	return &liRefusingDP{duplicating: make(map[uint32]bool)}
+	return &liRefusingDP{duplicating: make(map[uint32]bool), everDuplicating: make(map[uint32]bool)}
 }
 
 func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwardingRules) uint8 {
@@ -79,6 +81,9 @@ func (d *liRefusingDP) SendMsgToUPF(method upfMsgType, all, updated PacketForwar
 		}
 
 		d.duplicating[f.farID] = f.liDuplicate
+		if f.liDuplicate {
+			d.everDuplicating[f.farID] = true
+		}
 	}
 
 	if d.refuse || (d.refuseDelete && method == upfMsgTypeDel) {
@@ -113,6 +118,16 @@ func (d *liRefusingDP) sendMsgToUPFConfirmed(
 	defer d.mu.Unlock()
 
 	return cause, cause == ie.CauseRequestAccepted && !d.unconfirmed
+}
+
+// sawDuplicating reports whether the last write of a FAR asked the datapath to duplicate it, or,
+// once it was deleted, whether any did. Deletion clears what duplicating holds, so the history is
+// kept alongside it.
+func (d *liRefusingDP) sawDuplicating(farID uint32) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.duplicating[farID] || d.everDuplicating[farID]
 }
 
 func (d *liRefusingDP) sawMethod(m upfMsgType) bool {

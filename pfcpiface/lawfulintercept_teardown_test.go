@@ -323,6 +323,134 @@ func TestARefusedEstablishmentReportsARollbackThatWasNotAnswered(t *testing.T) {
 		"without saying so. Reported: %v", *described)
 }
 
+// TestARemoveFARWhoseDeleteWasNotAnsweredIsReported: a modification removes a FAR this element
+// believes is duplicating, and the delete is not answered. The modification is accepted, as
+// before, and farsRemoved drops the record, so the ADMF is told first.
+func TestARemoveFARWhoseDeleteWasNotAnsweredIsReported(t *testing.T) {
+	pConn, dp, e, reported, described := rejectionConnDescribed(t)
+
+	const seid = 405
+
+	if err := pConn.store.PutSession(liStoredSession(seid, "10.250.0.18")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The element believes FAR 4 is duplicating.
+	e.recordFARs(seid, []far{{farID: 4, fseID: seid, liDuplicate: true}}, true)
+
+	pConn.upf.datapath = &scriptedLIDeleteDP{liRefusingDP: dp, deletes: []deleteAnswer{deleteUnanswered}}
+
+	if _, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0, ie.NewRemoveFAR(ie.NewFARID(4)))); err != nil {
+		t.Fatalf("the modification was refused: %v", err)
+	}
+
+	if _, held := programmedFor(e, seid, 4); held {
+		t.Fatal("precondition: the removed FAR's record was not dropped, so this is not the " +
+			"case where the report is all that is left")
+	}
+
+	assertOneAbandonedReport(t, *reported, *described, "a Remove FAR whose delete was not "+
+		"answered", unconfirmedWording)
+
+	if !strings.Contains((*described)[0], "a session modification") {
+		t.Errorf("the report does not say it came from a modification: %q", (*described)[0])
+	}
+}
+
+// TestARolledBackCreatedFARWhoseDeleteWasNotAnsweredIsReported: a warrant covers the UE, a
+// modification creates a FAR that duplicates and is then refused after its push, and the
+// rollback's delete of the created FAR is not answered. The session the store keeps does not hold
+// that FAR, so no re-derivation will walk it again.
+func TestARolledBackCreatedFARWhoseDeleteWasNotAnsweredIsReported(t *testing.T) {
+	pConn, dp, e, _, described := rejectionConnDescribed(t)
+
+	const (
+		seid = 406
+		ue   = "10.250.0.19"
+	)
+
+	if err := pConn.store.PutSession(liStoredSession(seid, ue)); err != nil {
+		t.Fatal(err)
+	}
+
+	if !e.tasks.Activate(types.InterceptTask{
+		XID:      testXIDPrimary,
+		Products: []types.ProductType{types.ProductCC},
+		Targets:  []types.TargetIdentifier{ueAddr(ue)},
+	}) {
+		t.Fatal("Activate failed")
+	}
+
+	e.reparse()
+	e.retaskAndWait()
+
+	pConn.upf.datapath = &scriptedLIDeleteDP{liRefusingDP: dp, deletes: []deleteAnswer{deleteUnanswered}}
+
+	// A created downlink rule for the target, then a Remove FAR of a FAR the session does not
+	// hold, which fails after the push and rolls the created rules back.
+	if _, err := pConn.handleSessionModificationRequest(
+		message.NewSessionModificationRequest(0, 0, seid, 1, 0,
+			ie.NewCreatePDR(
+				ie.NewPDRID(5),
+				ie.NewPrecedence(10),
+				ie.NewPDI(
+					ie.NewSourceInterface(ie.SrcInterfaceCore),
+					ie.NewUEIPAddress(0x2, ue, "", 0, 0),
+				),
+				ie.NewFARID(5),
+			),
+			ie.NewCreateFAR(
+				ie.NewFARID(5),
+				ie.NewApplyAction(ActionForward),
+				ie.NewForwardingParameters(ie.NewDestinationInterface(ie.DstInterfaceAccess)),
+			),
+			ie.NewRemoveFAR(ie.NewFARID(99)),
+		)); err == nil {
+		t.Fatal("a modification removing a FAR the session does not hold was reported as succeeding")
+	}
+
+	if pushed := dp.sawDuplicating(5); !pushed {
+		t.Fatal("precondition: the created FAR was not pushed as duplicating, so its rollback " +
+			"has nothing a report could be about")
+	}
+
+	for _, d := range *described {
+		if strings.Contains(d, unconfirmedWording) && strings.Contains(d, "a refused session modification") {
+			return
+		}
+	}
+
+	t.Errorf("a created duplicating FAR whose rollback delete was not answered was left without "+
+		"a report. Reported: %v", *described)
+}
+
+// TestATeardownWithoutLIDoesNotRetryAnUnansweredDelete: a UPF with no li block has no enabler.
+// An unanswered FAR delete at teardown is not retried, and the nil enabler is not touched.
+func TestATeardownWithoutLIDoesNotRetryAnUnansweredDelete(t *testing.T) {
+	pConn, dp, _, _ := rejectionConn(t)
+
+	pConn.upf.ccEnabler = nil
+	pConn.Conn = teardownConn(t, nil).Conn
+	pConn.shutdown = make(chan struct{})
+	pConn.InstrumentPFCP = noopMetrics{}
+	scripted := &scriptedLIDeleteDP{liRefusingDP: dp, deletes: []deleteAnswer{deleteUnanswered}}
+	pConn.upf.datapath = scripted
+
+	s := unmarkedSession(teardownSEID, testUEIPv4)
+	s.metrics = &metrics.Session{}
+
+	if err := pConn.store.PutSession(s); err != nil {
+		t.Fatal(err)
+	}
+
+	pConn.executeShutdown()
+
+	if n := scripted.deletesAsked(); n != 1 {
+		t.Errorf("a teardown without LI asked for %d removals, want 1", n)
+	}
+}
+
 // TestATeardownThatRemovedTheDuplicationReportsNothing: the removal finished, late or not, so
 // nothing was abandoned and the ADMF hears nothing.
 func TestATeardownThatRemovedTheDuplicationReportsNothing(t *testing.T) {

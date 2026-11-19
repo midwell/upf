@@ -743,9 +743,16 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		// translated or marshalled, which was never programmed either -- the reasoning
 		// the establishment rollback records. A module that learns to refuse a delete of
 		// a rule it holds changes that, and this line with it.
-		if upf.SendMsgToUPF(upfMsgTypeDel, remove, PacketForwardingRules{}) == ie.CauseRequestRejected {
+		removeCause, removeConfirmed := upf.sendRulesRemoval(remove)
+		if removeCause == ie.CauseRequestRejected {
 			logger.PfcpLog.Warnln("could not translate a rule a refused modification created "+
 				"in order to remove it; it was not programmed either, F-SEID:", localSEID)
+		} else if !removeConfirmed {
+			// Lawful Interception: a created FAR whose delete was not answered may still be in
+			// the datapath, and the session the store keeps does not hold it, so no
+			// re-derivation will walk it again. recordRolledBack has run, so a created FAR that
+			// was to duplicate counts as possibly duplicating.
+			upf.ccEnabler.removalUnconfirmed(localSEID, remove.fars, "a refused session modification")
 		}
 
 		if upf.SendMsgToUPF(upfMsgTypeMod, before, before) == ie.CauseRequestRejected {
@@ -889,7 +896,7 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		qers: delQERs,
 	}
 
-	cause = upf.SendMsgToUPF(upfMsgTypeDel, deleted, PacketForwardingRules{})
+	cause, removalConfirmed := upf.sendRulesRemoval(deleted)
 	if cause == ie.CauseRequestRejected {
 		// Lawful Interception: the created and updated rules above were pushed to the
 		// datapath before this stage ran, and this return is before PutSession — so
@@ -906,6 +913,13 @@ func (pConn *PFCPConn) handleSessionModificationRequest(msg message.Message) (me
 		recordRolledBack()
 
 		return sendError(ErrWriteToDatapath)
+	}
+
+	// Lawful Interception: a Remove FAR whose delete was not answered is accepted all the same,
+	// as before, and farsRemoved below drops the only record that it may be duplicating. So the
+	// ADMF is told first, as on the deletion path.
+	if !removalConfirmed {
+		upf.ccEnabler.removalUnconfirmed(localSEID, delFARs, "a session modification")
 	}
 
 	// Lawful Interception: the removed FARs are gone from the session, so nothing that walks
