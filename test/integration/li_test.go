@@ -20,7 +20,13 @@ const (
 	bessForwardU             uint8 = 0x1
 	bessForwardDAndDuplicate uint8 = 0x5
 	bessForwardUAndDuplicate uint8 = 0x6
+	// bessForwardUEncapAndDuplicate is the uplink value for a FAR that creates an outer
+	// header toward another UPF over N9: its copy is teed after GTP-U encapsulation.
+	bessForwardUEncapAndDuplicate uint8 = 0x7
 )
+
+// anchorN9Address is the address of the anchor UPF an N9 uplink FAR tunnels to.
+const anchorN9Address = "198.51.100.9"
 
 // FAR IDs installed by testUEAttach: 1 forwards uplink, 2 forwards downlink.
 const (
@@ -98,7 +104,38 @@ func TestLawfulInterceptDuplicateFAR(t *testing.T) {
 	assertFARAction(t, "warrant deactivated", downlinkFARID, bessForwardD)
 	verifyEntries(t, testcase.expected)
 
+	// An uplink FAR toward another UPF over N9 creates an outer header, so the pipeline
+	// encapsulates before executeFAR and the copy is a GTP-U packet. It takes its own
+	// value, which tells the X3 shipper so, while the PDU type stays uplink.
+	modifyUplinkFARToN9(t, testcase, ActionForward|ActionDuplicate)
+
+	assertFARAction(t, "CC warrant active, N9 uplink", uplinkFARID, bessForwardUEncapAndDuplicate)
+	assertFARPduType(t, "CC warrant active, N9 uplink", uplinkFARID, bessForwardU)
+
+	modifyUplinkFARToN9(t, testcase, ActionForward)
+
+	assertFARAction(t, "warrant deactivated, N9 uplink", uplinkFARID, bessForwardU)
+
 	testUEDetach(t, testcase)
+}
+
+// modifyUplinkFARToN9 updates the session's uplink FAR to tunnel toward an anchor UPF, as an
+// intermediate UPF's uplink FAR does, with the given apply-action.
+func modifyUplinkFARToN9(t *testing.T, testcase *testCase, action uint8) {
+	t.Helper()
+
+	fars := []*ie.IE{
+		session.NewFARBuilder().
+			WithMethod(session.Update).WithID(uplinkFARID).
+			WithDstInterface(ie.DstInterfaceCore).
+			WithAction(action).
+			WithTEID(testcase.input.ulTEID).
+			WithDownlinkIP(anchorN9Address).BuildFAR(),
+	}
+
+	if err := pfcpClient.ModifySession(testcase.session, nil, fars, nil, nil); err != nil {
+		t.Fatalf("failed to modify the uplink FAR toward N9: %v", err)
+	}
 }
 
 // modifyForwardingFARs updates both of the session's forwarding FARs with the

@@ -169,13 +169,13 @@ func (f copyFilter) matches(action byte, frame []byte) bool {
 		return true
 	}
 
-	uplink := action == farForwardUAndDuplicate
+	uplink := isUplinkCopy(action)
 	if uplink && !f.uplink || !uplink && !f.downlink {
 		return false
 	}
 	for _, a := range f.checks {
 		if a.applies(uplink) {
-			return f.inspected(frame, uplink)
+			return f.inspected(frame, uplink, isEncapsulatedCopy(action))
 		}
 	}
 
@@ -191,8 +191,8 @@ func (f copyFilter) matches(action byte, frame []byte) bool {
 // non-initial fragment of a datagram this element has just decided was authorised — an agency
 // would receive the head of each datagram and nothing else, and downstream that is invisible,
 // because the dropped copies never reach framing so the X3 sequence has no gap in it.
-func (f copyFilter) inspected(frame []byte, uplink bool) bool {
-	l3, ok := ueNetworkLayer(frame, uplink)
+func (f copyFilter) inspected(frame []byte, uplink, encapsulated bool) bool {
+	l3, ok := ueNetworkLayer(frame, encapsulated)
 	if !ok {
 		return false
 	}
@@ -271,14 +271,16 @@ func (f copyFilter) portsMatch(l3 []byte, uplink bool) bool {
 
 // ueNetworkLayer returns the target's own IP header inside a teed copy.
 //
-// The two directions carry different things, which is the whole reason this is a function:
-// the uplink copy is teed after decapsulation, so it *is* the target's packet; the downlink
-// copy is teed after GTP-U encapsulation, so the target's packet is inside the tunnel.
+// Copies carry different things, which is the whole reason this is a function: an uplink copy
+// toward N6 is teed after decapsulation, so it *is* the target's packet; a downlink copy, and an
+// uplink copy toward another UPF over N9, are teed after GTP-U encapsulation, so the target's
+// packet is inside the tunnel. That is a property of the FAR, not of the direction, so it is
+// asked separately (isEncapsulatedCopy).
 //
 // Split out from the port comparison because the fragment decision needs the same bytes: reading the
 // header twice, once for the ports and once for the fragmentation state, would have walked the
 // tunnel twice on the one path in this element whose cost is per packet.
-func ueNetworkLayer(frame []byte, uplink bool) ([]byte, bool) {
+func ueNetworkLayer(frame []byte, encapsulated bool) ([]byte, bool) {
 	l3, format := networkLayerOf(frame)
 	if format == x2x3.PayloadFormatEthernet {
 		// networkLayerOf reports Ethernet when it found no network layer at all. The
@@ -287,7 +289,7 @@ func ueNetworkLayer(frame []byte, uplink bool) ([]byte, bool) {
 		return nil, false
 	}
 
-	if !uplink {
+	if encapsulated {
 		var ok bool
 		if l3, ok = gtpuPayloadOf(l3); !ok {
 			return nil, false

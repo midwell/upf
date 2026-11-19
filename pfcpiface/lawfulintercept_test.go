@@ -104,6 +104,10 @@ func TestSetFwdActionValueDuplicate(t *testing.T) {
 	ulDup := far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceCore}
 	dlPlain := far{applyAction: ActionForward, dstIntf: ie.DstInterfaceAccess}
 	ulPlain := far{applyAction: ActionForward, dstIntf: ie.DstInterfaceCore}
+	// Toward another UPF over N9: the FAR creates an outer header, so GtpuEncap runs before
+	// executeFAR and the tee sees the GTP-U packet. Its own value tells the shipper so.
+	ulN9Dup := far{applyAction: ActionForward | ActionDuplicate, dstIntf: ie.DstInterfaceCore, tunnelType: 1}
+	ulN9Plain := far{applyAction: ActionForward, dstIntf: ie.DstInterfaceCore, tunnelType: 1}
 
 	// What executeFAR splits on: duplication is visible here.
 	for _, c := range []struct {
@@ -113,8 +117,10 @@ func TestSetFwdActionValueDuplicate(t *testing.T) {
 	}{
 		{"downlink+dupl", dlDup, farForwardDAndDuplicate},
 		{"uplink+dupl", ulDup, farForwardUAndDuplicate},
+		{"N9 uplink+dupl", ulN9Dup, farForwardUEncapAndDuplicate},
 		{"downlink plain", dlPlain, farForwardD},
 		{"uplink plain", ulPlain, farForwardU},
+		{"N9 uplink plain", ulN9Plain, farForwardU},
 	} {
 		if got := b.setFwdActionValue(c.f); got != c.expect {
 			t.Errorf("%s: fwd_action = %d, want %d", c.name, got, c.expect)
@@ -130,6 +136,7 @@ func TestSetFwdActionValueDuplicate(t *testing.T) {
 	}{
 		{"downlink+dupl stays a valid PDU type", dlDup, farForwardD},
 		{"uplink+dupl stays a valid PDU type", ulDup, farForwardU},
+		{"N9 uplink+dupl stays a valid PDU type", ulN9Dup, farForwardU},
 		{"downlink plain", dlPlain, farForwardD},
 		{"uplink plain", ulPlain, farForwardU},
 	} {
@@ -204,8 +211,15 @@ func TestShipperPDU(t *testing.T) {
 		t.Errorf("downlink: format=%d direction=%d, want GTPU/ToTarget", dl.PayloadFormat, dl.Direction)
 	}
 
-	// Both must be well-formed X3 PDUs on the wire.
-	for _, pdu := range []*x2x3.PDU{ul, dl} {
+	// Uplink toward another UPF (action 7): teed after the N9 encapsulation, so the
+	// copy is a GTP-U packet from the target -> GTP-U + FromTarget.
+	n9 := shipperPDU(tag(farForwardUEncapAndDuplicate), task, ids)
+	if n9.PayloadFormat != x2x3.PayloadFormatGTPU || n9.Direction != x2x3.DirectionFromTarget {
+		t.Errorf("N9 uplink: format=%d direction=%d, want GTPU/FromTarget", n9.PayloadFormat, n9.Direction)
+	}
+
+	// All must be well-formed X3 PDUs on the wire.
+	for _, pdu := range []*x2x3.PDU{ul, dl, n9} {
 		if _, err := pdu.Marshal(); err != nil {
 			t.Errorf("Marshal: %v", err)
 		}
@@ -323,6 +337,12 @@ func TestCheckTagReportsUnusableTag(t *testing.T) {
 		{
 			name:       "valid uplink tag is not reported",
 			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, farForwardUAndDuplicate},
+			wantReport: false,
+			wantShip:   true,
+		},
+		{
+			name:       "valid encapsulated uplink tag is not reported",
+			tag:        []byte{1, 0, 0, 0, 0, 0, 0, 0, farForwardUEncapAndDuplicate},
 			wantReport: false,
 			wantShip:   true,
 		},

@@ -25,7 +25,8 @@ import (
 // The BESS liEncap (GenericEncap) prepends a fixed tag to every duplicated
 // packet before it reaches the X3 egress socket: an 8-byte F-SEID (used as the
 // X3 correlation id) followed by a 1-byte FAR action (the forward-and-duplicate
-// action, which encodes the direction). Layout: [fseid(8)][action(1)][packet].
+// action, which encodes the direction and whether the copy is GTP-U encapsulated).
+// Layout: [fseid(8)][action(1)][packet].
 const (
 	fseidTagLen = 8
 	liTagLen    = fseidTagLen + 1 // + 1-byte FAR action
@@ -896,7 +897,7 @@ func droppedCopies(n int) string {
 // join it to the session's signalling.
 func (s *liShipper) checkTag(tagged []byte) bool {
 	switch tagged[fseidTagLen] {
-	case farForwardDAndDuplicate, farForwardUAndDuplicate:
+	case farForwardDAndDuplicate, farForwardUAndDuplicate, farForwardUEncapAndDuplicate:
 	default:
 		s.report(x1.NEIssueX3TagInvalid, "content tag carries an unknown forwarding action")
 
@@ -963,8 +964,9 @@ func (s *liShipper) establish() {
 // datapath prepends the F-SEID (which selects the task) and the FAR action; the
 // action distinguishes the downlink copy — teed after GTP-U encap, so a GTP-U
 // packet toward the target — from the uplink copy — decapsulated inner IP from
-// the target — which sets both the X3 payload format and the direction. Getting
-// this wrong would ship the downlink copy mislabeled as decapsulated inner IP.
+// the target, or a GTP-U packet toward another UPF where the FAR creates an outer
+// header — which sets both the X3 payload format and the direction. Getting this
+// wrong would ship an encapsulated copy mislabeled as the target's own IP packet.
 func shipperPDU(tagged []byte, task types.InterceptTask, ids *x2x3.Identity) *x2x3.PDU {
 	action := tagged[fseidTagLen]
 	inner := tagged[liTagLen:]
@@ -993,9 +995,10 @@ func shipperPDU(tagged []byte, task types.InterceptTask, ids *x2x3.Identity) *x2
 	pdu.Direction = directionOf(action)
 	pdu.PayloadFormat = format
 
-	// The downlink copy is teed after GTP-U encapsulation, so its network layer is
-	// the outer packet carrying the tunnel toward the target.
-	if action == farForwardDAndDuplicate && format != x2x3.PayloadFormatEthernet {
+	// The downlink copy, and the uplink copy of a FAR toward another UPF, are teed
+	// after GTP-U encapsulation, so their network layer is the outer packet carrying
+	// the tunnel.
+	if isEncapsulatedCopy(action) && format != x2x3.PayloadFormatEthernet {
 		pdu.PayloadFormat = x2x3.PayloadFormatGTPU
 	}
 
@@ -1020,12 +1023,24 @@ func networkLayerOf(pkt []byte) ([]byte, x2x3.PayloadFormat) {
 	return pkt, x2x3.PayloadFormatEthernet
 }
 
+// isUplinkCopy reports whether a copy is of the target's uplink traffic.
+func isUplinkCopy(action byte) bool {
+	return action == farForwardUAndDuplicate || action == farForwardUEncapAndDuplicate
+}
+
+// isEncapsulatedCopy reports whether a copy was teed after GTP-U encapsulation, so that the
+// target's packet is inside the tunnel: every downlink copy, and an uplink copy of a FAR
+// toward another UPF. Kept apart from the direction because the two no longer coincide.
+func isEncapsulatedCopy(action byte) bool {
+	return action == farForwardDAndDuplicate || action == farForwardUEncapAndDuplicate
+}
+
 // directionOf maps the datapath forward-and-duplicate action to the X3 direction.
 func directionOf(action byte) x2x3.PayloadDirection {
 	switch action {
 	case farForwardDAndDuplicate:
 		return x2x3.DirectionToTarget
-	case farForwardUAndDuplicate:
+	case farForwardUAndDuplicate, farForwardUEncapAndDuplicate:
 		return x2x3.DirectionFromTarget
 	default:
 		return x2x3.DirectionUnknown

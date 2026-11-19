@@ -82,6 +82,13 @@ func downlinkCopy(port uint16) []byte {
 	return gtpuEncap(ipv4Packet("1.1.1.1", testUEIPv4, protoTCP, tcpSegment(80, port, 16)), 0, nil)
 }
 
+// n9UplinkCopy is a copy of a packet the target sent from the given port, as the uplink tee
+// sees it for a FAR toward another UPF: inside the N9 GTP-U tunnel, because the FAR's outer
+// header is created before executeFAR.
+func n9UplinkCopy(port uint16) []byte {
+	return gtpuEncap(ipv4Packet(testUEIPv4, "1.1.1.1", protoTCP, tcpSegment(port, 80, 16)), 0, nil)
+}
+
 // wildcardSession is the ordinary case: one FAR per direction, and PDRs whose SDF
 // filters constrain nothing but the UE address. A port criterion against it can only
 // be settled by reading the packet.
@@ -263,6 +270,10 @@ func TestFilterOnTransportPort(t *testing.T) {
 		{"another of the target's ports, uplink", farForwardUAndDuplicate, uplinkCopy(8080), false},
 		{"the target's own port, downlink inside the tunnel", farForwardDAndDuplicate, downlinkCopy(443), true},
 		{"another port, downlink", farForwardDAndDuplicate, downlinkCopy(8080), false},
+		// Uplink toward another UPF: the target's packet is inside the N9 tunnel, and the
+		// outer header's ports (2152) are not the target's.
+		{"the target's own port, uplink inside an N9 tunnel", farForwardUEncapAndDuplicate, n9UplinkCopy(443), true},
+		{"another port, uplink inside an N9 tunnel", farForwardUEncapAndDuplicate, n9UplinkCopy(8080), false},
 		{
 			// The far end's port is 443 and the target's is not: matching this would
 			// collect the wrong traffic.

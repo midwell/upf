@@ -56,6 +56,16 @@ const (
 	// the subscriber copy keeps its direction.
 	farForwardDAndDuplicate = 0x5
 	farForwardUAndDuplicate = 0x6
+	// farForwardUEncapAndDuplicate is the uplink variant for a FAR with outer header
+	// creation, toward another UPF over N9. GtpuEncap runs before executeFAR, so its
+	// copy is the GTP-U packet rather than the target's own, which the X3 shipper must
+	// know to read the target's packet and label the payload. The pipeline routes it
+	// to the same uplink tee as 6.
+	//
+	// **The pfcp-agent and the bess image ship together.** A pipeline older than this
+	// value has no executeFAR gate 7, and BESS drops a packet sent to an unconnected
+	// gate, so a new agent on an old pipeline would drop a target's N9 uplink.
+	farForwardUEncapAndDuplicate = 0x7
 	// Bit Rates.
 	KB = 1000
 	MB = 1000000
@@ -1655,6 +1665,10 @@ func (b *bess) setFwdActionValue(f far) uint8 {
 		case ie.DstInterfaceAccess:
 			return farForwardDAndDuplicate
 		case ie.DstInterfaceCore, ie.DstInterfaceSGiLANN6LAN:
+			if f.tunnelType != 0 {
+				return farForwardUEncapAndDuplicate
+			}
+
 			return farForwardUAndDuplicate
 		}
 	}

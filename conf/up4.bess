@@ -33,6 +33,14 @@ farNotifyCPAction = 4
 # of the subscriber's own copy.
 farForwardDAndDuplicateAction = 5
 farForwardUAndDuplicateAction = 6
+# The uplink variant for a FAR that creates an outer header toward another UPF
+# over N9. GtpuEncap runs before executeFAR, so its copy is the GTP-U packet
+# rather than the target's own; this value, carried in the tag, tells the X3
+# shipper so. It shares the uplink tee with 6. The pfcp-agent writes it, so the
+# agent and this pipeline ship together: BESS drops a packet sent to an
+# unconnected gate, so an agent writing 7 on a pipeline without this gate would
+# drop a target's N9 uplink.
+farForwardUEncapAndDuplicateAction = 7
 pdrFailGate = 2
 farFailGate = 2
 qerGreenGate = 1
@@ -315,8 +323,9 @@ liX3 = UnixSocketPort(name='liX3', path=li_x3_path)
 # Prepend the F-SEID (correlation) and the forwarding action (fwd_action) to each
 # LI copy. The action byte lets the Go X3 shipper tell the downlink copy (teed
 # after GTP-U encap, so a GTP-U packet toward the target) from the uplink copy
-# (decapsulated inner packet from the target) and set the X3 payload format and
-# direction accordingly. Field order is [fseid(8)][fwd_action(1)], then the packet.
+# (decapsulated inner packet from the target, or a GTP-U packet toward another
+# UPF for action 7) and set the X3 payload format and direction accordingly.
+# Field order is [fseid(8)][fwd_action(1)], then the packet.
 #
 # These sizes are named once and used by the encap, the subscriber-side decap and
 # nothing else, so the tag cannot come off at a different width than it went on.
@@ -371,6 +380,7 @@ executeFAR:farForwardUAndDuplicateAction \
     -> liEncapU::GenericEncap(fields=[{'size': LI_TAG_FSEID_BYTES, 'attribute': 'fseid'}, {'size': LI_TAG_ACTION_BYTES, 'attribute': 'fwd_action'}]) \
     -> liReplicaU::Replicate(gates=[0, 1])
 liReplicaU:1 -> liMerge
+executeFAR:farForwardUEncapAndDuplicateAction -> liEncapU
 
 # Set default gates for relevant modules
 pdrLookup.set_default_gate(gate=pdrFailGate)
