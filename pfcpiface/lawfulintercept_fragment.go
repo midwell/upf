@@ -40,6 +40,15 @@ const (
 	// are dropped and reported as they are discarded, so the bound costs visibility rather
 	// than silence.
 	fragmentMemoMax = 4096
+
+	// fragmentMemoSweepEvery is how often classify looks for expired classifications once
+	// the memo is worth sweeping. A sweep visits every entry, so sweeping on every initial
+	// fragment would cost a full memo — up to fragmentMemoMax comparisons — per datagram at
+	// the ceiling, on the session's one framing worker. Once a second bounds that to one
+	// pass a second whatever the fragment rate. An expired entry can therefore outlive its
+	// TTL by up to this long, which decision does not see, since it checks the age of what
+	// it finds; at the ceiling such an entry holds its slot that much longer.
+	fragmentMemoSweepEvery = time.Second
 )
 
 // fragKey identifies one IPv4 datagram, within one direction of one session's filter.
@@ -84,6 +93,8 @@ type fragmentMemo struct {
 
 	mu      sync.Mutex
 	decided map[fragKey]fragDecision
+	// nextSweep is the earliest time classify sweeps again. See fragmentMemoSweepEvery.
+	nextSweep time.Time
 	// now is the clock, held so a test can move it rather than wait out the TTL.
 	now func() time.Time
 }
@@ -117,14 +128,16 @@ func (m *fragmentMemo) classify(k fragKey, matched bool) {
 	// no classification, is dropped, and is reported then, which is where the loss is.
 	//
 	// Swept only when the map is worth sweeping, so an ordinary session with a handful of
-	// datagrams in flight pays one comparison.
-	if len(m.decided) >= 16 {
+	// datagrams in flight pays one comparison, and at most once per fragmentMemoSweepEvery,
+	// so a full memo is not walked for every datagram.
+	if len(m.decided) >= 16 && !now.Before(m.nextSweep) {
 		cutoff := now.Add(-fragmentMemoTTL)
 		for key, d := range m.decided {
 			if d.at.Before(cutoff) {
 				delete(m.decided, key)
 			}
 		}
+		m.nextSweep = now.Add(fragmentMemoSweepEvery)
 	}
 
 	if _, exists := m.decided[k]; len(m.decided) >= fragmentMemoMax && !exists {

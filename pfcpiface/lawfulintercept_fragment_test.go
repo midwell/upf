@@ -326,6 +326,59 @@ func TestTheMemoIsBounded(t *testing.T) {
 	}
 }
 
+// TestTheMemoIsSweptAtMostOncePerInterval: a sweep visits every entry, so one on every
+// initial fragment walks a full memo — up to fragmentMemoMax comparisons — per datagram, on
+// the session's one framing worker. Sweeps are at least fragmentMemoSweepEvery apart, and an
+// entry past its TTL but not yet swept is still not used.
+func TestTheMemoIsSweptAtMostOncePerInterval(t *testing.T) {
+	t.Parallel()
+
+	m := newFragmentMemo(nil)
+
+	start := time.Now()
+	now := start
+	m.now = func() time.Time { return now }
+
+	held := func() int {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+
+		return len(m.decided)
+	}
+
+	const old = 16
+	for i := range old {
+		m.classify(fragKey{ident: uint16(i), proto: protoTCP}, true)
+	}
+
+	// A sweep just before the old entries expire: it removes nothing, and the next is due
+	// an interval later.
+	now = start.Add(fragmentMemoTTL - fragmentMemoSweepEvery/2)
+	m.classify(fragKey{ident: 100, proto: protoTCP}, true)
+
+	// The old entries have expired, but the next sweep is not due yet.
+	now = start.Add(fragmentMemoTTL + fragmentMemoSweepEvery/4)
+	m.classify(fragKey{ident: 101, proto: protoTCP}, true)
+
+	if got := held(); got != old+2 {
+		t.Errorf("the memo holds %d classifications a quarter-interval after a sweep, want %d: "+
+			"it was swept again, so a full memo is walked for every datagram", got, old+2)
+	}
+	if _, known := m.decision(fragKey{ident: 0, proto: protoTCP}); known {
+		t.Error("an expired classification awaiting the next sweep was used")
+	}
+
+	// Once the interval has passed, the next classification sweeps the expired entries out.
+	now = start.Add(fragmentMemoTTL + fragmentMemoSweepEvery)
+	m.classify(fragKey{ident: 102, proto: protoTCP}, true)
+
+	// The lookup above deleted ident 0 itself, so 15 old entries were left for the sweep.
+	if got := held(); got != 3 {
+		t.Errorf("the memo holds %d classifications after the interval, want 3: the sweep "+
+			"no longer runs", got)
+	}
+}
+
 // TestAFullMemoStillReplacesAnExistingClassification: the ceiling refuses a datagram that
 // needs a new slot, not one whose key is already held.
 //
