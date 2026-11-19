@@ -279,6 +279,13 @@ func (b *bess) sendMsgToUPFConfirmed(
 	return cause, confirmed
 }
 
+// sendMsgToUPFRemoval deletes a session's rules and gives all three answers: the cause and
+// completion SendMsgToUPFWithCompletion gives, and whether the FAR deletes were confirmed. See
+// removingDatapath.
+func (b *bess) sendMsgToUPFRemoval(all PacketForwardingRules) (uint8, bool, bool) {
+	return b.sendMsgToUPFBatch(upfMsgTypeDel, all, PacketForwardingRules{})
+}
+
 // sendMsgToUPFBatch programs the batch and gives every answer the three functions above
 // take their part of: the cause, whether the batch completed, and whether its FAR writes
 // were confirmed.

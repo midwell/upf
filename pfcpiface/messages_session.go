@@ -269,8 +269,7 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 		// Where the datapath will not take the delete either, the ADMF is told instead,
 		// because a subscriber's traffic may then be copied with nothing in this element
 		// able to stop it.
-		delCause, finished := upf.SendMsgToUPFWithCompletion(
-			upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{})
+		delCause, finished, delConfirmed := upf.sendRemoval(session.PacketForwardingRules)
 		if !finished {
 			// A removal that ran out of time may have left any of the rules the refused
 			// batch programmed, and once the session is forgotten nothing names them: the
@@ -328,6 +327,10 @@ func (pConn *PFCPConn) handleSessionEstablishmentRequest(msg message.Message) (m
 				"no rule the datapath holds is known to be stranded")
 
 			upf.ccEnabler.abandonedDuplication(session.localSEID, session.fars, "a refused session establishment")
+		} else if !delConfirmed {
+			// Accepted and finished, but a FAR delete was not answered: the session is
+			// forgotten all the same, so a duplication rule it leaves behind is reported.
+			upf.ccEnabler.removalUnconfirmed(session.localSEID, session.fars, "a refused session establishment")
 		}
 
 		return errProcessReply(ErrWriteToDatapath,
@@ -1059,10 +1062,16 @@ func (pConn *PFCPConn) handleSessionDeletionRequest(msg message.Message) (messag
 	unlockSession := upf.ccEnabler.lockSession(localSEID)
 	defer unlockSession()
 
-	cause, finished := upf.SendMsgToUPFWithCompletion(
-		upfMsgTypeDel, session.PacketForwardingRules, PacketForwardingRules{})
+	cause, finished, confirmed := upf.sendRemoval(session.PacketForwardingRules)
 	if cause == ie.CauseRequestRejected || !finished {
 		return sendError(ErrWriteToDatapath)
+	}
+
+	// Lawful Interception: a FAR delete whose RPC did not complete leaves the batch accepted
+	// and finished, so the session is deleted as before. Where that FAR may be duplicating,
+	// RemoveSession below drops the only record of it, so the ADMF is told first.
+	if !confirmed {
+		upf.ccEnabler.removalUnconfirmed(session.localSEID, session.fars, "a session deletion")
 	}
 
 	upf.ippool.Release(session.localSEID)
@@ -1235,11 +1244,16 @@ func (pConn *PFCPConn) handleSessionReportResponse(msg message.Message) error {
 		unlockSession := upf.ccEnabler.lockSession(seid)
 		defer unlockSession()
 
-		cause := upf.SendMsgToUPF(
-			upfMsgTypeDel, sessItem.PacketForwardingRules, PacketForwardingRules{})
+		cause, _, confirmed := upf.sendRemoval(sessItem.PacketForwardingRules)
 		if cause == ie.CauseRequestRejected {
 			return errProcess(
 				ErrOperationFailedWithParam("delete session from datapath", "seid", seid))
+		}
+
+		// As in the deletion handler: the session is forgotten below, so an unconfirmed
+		// removal of a rule that may be duplicating is reported before its record goes.
+		if !confirmed {
+			upf.ccEnabler.removalUnconfirmed(seid, sessItem.fars, "a local session deletion")
 		}
 
 		// The address goes back only once the datapath has answered the delete, the same

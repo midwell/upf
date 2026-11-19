@@ -878,14 +878,21 @@ func (e *ccEnabler) abandonedDuplication(seid uint64, fars []far, why string) {
 	e.reportAbandoned(seid, fars, "the datapath did not accept the removal of a duplication rule", why)
 }
 
-// removalUnconfirmed is abandonedDuplication's report for a removal that did not finish, rather
-// than one the datapath refused: an association teardown whose retry also ran out of time. The
-// rules may still be in the datapath, and the session is about to be forgotten either way, so the
-// remedy is the same and only what happened differs. Saying "did not accept" for a removal that
-// timed out would send an operator looking for a refusal that never occurred.
+// removalUnconfirmed is abandonedDuplication's report for a removal the datapath did not confirm,
+// rather than one it refused: a batch that did not finish, or one that finished with a FAR delete
+// whose RPC did not complete, which SendMsgToUPF answers as accepted. The rules may still be in
+// the datapath, and the session is about to be forgotten either way, so the remedy is the same and
+// only what happened differs. Saying "did not accept" for a removal that was never answered would
+// send an operator looking for a refusal that never occurred.
 func (e *ccEnabler) removalUnconfirmed(seid uint64, fars []far, why string) {
 	e.reportAbandoned(seid, fars,
-		"the datapath did not confirm the removal of a duplication rule in time", why)
+		"the datapath did not confirm the removal of a duplication rule", why)
+}
+
+// removalMayLeaveDuplication is mayBeDuplicating for a caller that holds no enabler when LI is
+// off: whether an unconfirmed removal of these FARs may have left duplication running.
+func (e *ccEnabler) removalMayLeaveDuplication(seid uint64, fars []far) bool {
+	return e != nil && e.mayBeDuplicating(seid, fars)
 }
 
 func (e *ccEnabler) reportAbandoned(seid uint64, fars []far, what, why string) {

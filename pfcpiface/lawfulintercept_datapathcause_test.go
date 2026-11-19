@@ -88,6 +88,27 @@ func TestAnUnconfirmedDatapathWriteIsNotCountedAsProgrammed(t *testing.T) {
 	}
 }
 
+// TestAnUnansweredFARDeleteIsNotConfirmed is the removal's half of the same property: a FAR delete
+// whose RPC did not complete leaves the batch accepted and finished, which is what lets a caller
+// forget the session, and only the confirmation says the rule may still be duplicating.
+func TestAnUnansweredFARDeleteIsNotConfirmed(t *testing.T) {
+	b := bessWithNoDatapath(t)
+
+	rules := PacketForwardingRules{fars: []far{{farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward}}}
+
+	cause, finished, confirmed := b.sendMsgToUPFRemoval(rules)
+
+	if cause != ie.CauseRequestAccepted || !finished {
+		t.Fatalf("precondition: the removal answered cause %d, finished %v; want an accepted, "+
+			"finished batch, the answer under which a caller forgets the session", cause, finished)
+	}
+
+	if confirmed {
+		t.Error("a FAR delete to a datapath that is not there was reported confirmed, so a " +
+			"teardown or deletion forgets a session whose duplication rule may still be copying")
+	}
+}
+
 // TestAnAcceptedDatapathWriteStaysAccepted is the regression guard outside LI: the
 // success path must return exactly what it returned before, because the session
 // handlers consume this value to decide whether to answer the SMF with a refusal.

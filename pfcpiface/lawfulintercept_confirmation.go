@@ -85,3 +85,27 @@ func (u *upf) sendDuplicationWrite(
 
 	return cause, cause == ie.CauseRequestAccepted
 }
+
+// removingDatapath is confirmingDatapath's counterpart for a session's removal: the cause and
+// completion SendMsgToUPFWithCompletion gives, and also whether the batch's FAR deletes were
+// acknowledged.
+//
+// A removal needs all three. A FAR delete whose RPC did not complete is answered as accepted and
+// finished, which is what lets the caller forget the session -- and with it the only record that
+// the rule may still be duplicating. Optional for the same reason confirmingDatapath is.
+type removingDatapath interface {
+	sendMsgToUPFRemoval(all PacketForwardingRules) (cause uint8, finished, confirmed bool)
+}
+
+// sendRemoval deletes a session's rules and answers the cause, whether the batch finished, and
+// whether its FAR deletes were confirmed. A datapath that cannot tell is taken at its word, as in
+// sendDuplicationWrite: a finished, accepted removal counts as confirmed.
+func (u *upf) sendRemoval(all PacketForwardingRules) (uint8, bool, bool) {
+	if r, ok := u.datapath.(removingDatapath); ok {
+		return r.sendMsgToUPFRemoval(all)
+	}
+
+	cause, finished := u.SendMsgToUPFWithCompletion(upfMsgTypeDel, all, PacketForwardingRules{})
+
+	return cause, finished, finished && cause == ie.CauseRequestAccepted
+}
