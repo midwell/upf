@@ -314,8 +314,9 @@ packetReplica:1 -> closedLoop::PortOut(port='closedLoop')
 # forward. Each packet is teed: copy 0 continues to the subscriber (uplink/downlink
 # preserved), copy 1 is tagged with the F-SEID and the forwarding action and pushed to a
 # userspace socket where the Go LI X3 shipper frames it per ETSI TS 103 221-2 and
-# delivers it to the MDF3. Built entirely from stock BESS modules (Replicate /
-# GenericEncap / UnixSocketPort) — no datapath C++ changes.
+# delivers it to the MDF3. Built from stock BESS modules (Replicate / GenericEncap /
+# GenericDecap / Queue / UnixSocketPort); the one core change is bess::Packet::copy,
+# which Replicate calls for the copy of a packet grown into its headroom.
 #
 # The tee sits at the forwarding stage, downstream of QER policing
 # (appQERLookup/sessionQERLookup run earlier), so the subscriber's traffic is

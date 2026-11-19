@@ -62,7 +62,7 @@ TEST_F(PacketCopyTest, CopiesAPacketThatGrewIntoItsHeadroom) {
 }
 
 // Only the first segment's data is copied, so a packet in several segments is
-// refused, as an empty pool is, and the copy's buffer goes back to the pool.
+// refused, as an empty pool is, before any buffer is taken from the pool.
 TEST_F(PacketCopyTest, RefusesAPacketInSeveralSegments) {
   bess::Packet *head = pool_->Alloc(100);
   bess::Packet *tail = pool_->Alloc(100);
