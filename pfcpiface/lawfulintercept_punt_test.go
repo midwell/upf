@@ -30,6 +30,51 @@ type fakeCounters struct {
 	// traffic is how many copies the datapath sends, losslessly, before each counter read
 	// is answered — traffic passing between two reads that are not atomic.
 	traffic uint64
+	// tees is each tee's gate counts, by module name. A tee not in the map is not in the
+	// pipeline.
+	tees map[string]*teeGates
+}
+
+// teeGates is one tee's output gates as GetModuleInfo reports them.
+type teeGates struct {
+	original, copied uint64
+	// untrackedCopy reproduces a copy gate without a Track hook -- connected with the default
+	// hooks skipped, or with tracking disabled on it -- which bessd reports with no counts,
+	// while the original gate still counts.
+	untrackedCopy bool
+}
+
+func (f *fakeCounters) GetModuleInfo(_ context.Context, in *pb.GetModuleInfoRequest, _ ...grpc.CallOption) (*pb.GetModuleInfoResponse, error) {
+	tee, ok := f.tees[in.GetName()]
+	if !ok {
+		return &pb.GetModuleInfoResponse{Error: &pb.Error{Errmsg: "no such module"}}, nil
+	}
+
+	gate := func(idx, pkts uint64) *pb.GetModuleInfoResponse_OGate {
+		if idx == teeCopyGate && tee.untrackedCopy {
+			return &pb.GetModuleInfoResponse_OGate{Ogate: idx}
+		}
+
+		return &pb.GetModuleInfoResponse_OGate{
+			Ogate:     idx,
+			Pkts:      pkts,
+			Gatehooks: []*pb.GetModuleInfoResponse_GateHook{{ClassName: "Track", HookName: "track0"}},
+		}
+	}
+
+	return &pb.GetModuleInfoResponse{Ogates: []*pb.GetModuleInfoResponse_OGate{
+		gate(teeOriginalGate, tee.original),
+		gate(teeCopyGate, tee.copied),
+	}}, nil
+}
+
+// teeMonitor is a monitor over a pipeline whose only readable accounting is the uplink tee.
+func teeMonitor(original, copied uint64) (*liPuntMonitor, *teeGates, *recordingReporter) {
+	tee := &teeGates{original: original, copied: copied}
+	c := &fakeCounters{noQueue: true, portErr: true, tees: map[string]*teeGates{"liReplicaU": tee}}
+	rec := &recordingReporter{}
+
+	return &liPuntMonitor{client: c, reporter: rec}, tee, rec
 }
 
 func (f *fakeCounters) ModuleCommand(_ context.Context, in *pb.CommandRequest, _ ...grpc.CallOption) (*pb.CommandResponse, error) {
@@ -229,5 +274,129 @@ func TestPuntMonitorDoesNotMistakeTrafficForLoss(t *testing.T) {
 
 	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX3PuntLost {
 		t.Errorf("reported %v, want one %s once copies were discarded", rec.issues, x1.NEIssueX3PuntLost)
+	}
+}
+
+// TestPuntMonitorReportsACopyTheTeeDidNotMake: Replicate skips a copy when the packet pool is
+// empty, and nothing downstream of the tee can see it. The original gate getting ahead of the
+// copy gate by more than a batch is reported once, and not again while it stays there.
+func TestPuntMonitorReportsACopyTheTeeDidNotMake(t *testing.T) {
+	m, tee, rec := teeMonitor(1000, 1000)
+
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Fatalf("reported %v for a tee that copied everything", rec.issues)
+	}
+
+	tee.original, tee.copied = 2000, 1900
+	m.check()
+
+	if len(rec.issues) != 1 || rec.issues[0] != x1.NEIssueX3PuntLost {
+		t.Fatalf("100 copies the tee did not make reported %v, want one %q", rec.issues, x1.NEIssueX3PuntLost)
+	}
+
+	tee.original, tee.copied = 3000, 2900
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Errorf("a shortfall that stopped growing was reported again: %v", rec.issues)
+	}
+}
+
+// TestPuntMonitorDoesNotMistakeTeeSkewForLoss: on lossless traffic a read can find the copy
+// gate up to a batch ahead of the original, since a batch's copy is counted first.
+func TestPuntMonitorDoesNotMistakeTeeSkewForLoss(t *testing.T) {
+	m, tee, rec := teeMonitor(0, 0)
+
+	for i, skew := range []uint64{0, 40, 64, 0, 13, 64, 64, 0} {
+		base := uint64(1000 * (i + 1))
+		tee.original, tee.copied = base, base+skew
+		m.check()
+	}
+
+	if len(rec.issues) != 0 {
+		t.Errorf("lossless traffic read with the copy gate ahead was reported as %v", rec.issues)
+	}
+}
+
+// TestPuntMonitorWaitsAPollOnAShortfallWithinABatch: a shortfall within the skew allowance is
+// not reported when it clears on the next poll, and is reported when it does not.
+func TestPuntMonitorWaitsAPollOnAShortfallWithinABatch(t *testing.T) {
+	m, tee, rec := teeMonitor(1000, 1000)
+	m.check()
+
+	tee.original, tee.copied = 2030, 2000
+	m.check()
+
+	tee.original, tee.copied = 3000, 3000
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Fatalf("a shortfall within a batch that cleared was reported as %v", rec.issues)
+	}
+
+	tee.original, tee.copied = 4030, 4000
+	m.check()
+
+	if len(rec.issues) != 0 {
+		t.Fatalf("a shortfall within a batch was reported before the next poll: %v", rec.issues)
+	}
+
+	tee.original, tee.copied = 5030, 5000
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Errorf("a shortfall within a batch that persisted was reported %v, want one", rec.issues)
+	}
+}
+
+// TestPuntMonitorTakesATeeResetAsANewBaseline: a pipeline reload starts the gate counts from
+// zero. That is a new baseline, and loss after it is measured from there.
+func TestPuntMonitorTakesATeeResetAsANewBaseline(t *testing.T) {
+	m, tee, rec := teeMonitor(1000, 1000)
+	m.check()
+
+	tee.original, tee.copied = 5000, 4800
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Fatalf("precondition: the shortfall before the reload was reported %v, want one", rec.issues)
+	}
+
+	tee.original, tee.copied = 10, 10
+	m.check()
+
+	tee.original, tee.copied = 2000, 2000
+	m.check()
+
+	if len(rec.issues) != 1 {
+		t.Fatalf("a reload, or lossless traffic after it, was reported: %v", rec.issues)
+	}
+
+	tee.original, tee.copied = 3000, 2900
+	m.check()
+
+	if len(rec.issues) != 2 {
+		t.Errorf("100 copies lost after a reload reported %v, want a second report", rec.issues)
+	}
+}
+
+// TestPuntMonitorIsSilentWithoutTeeCounts: an older pipeline has no tee by that name, and a
+// copy gate without a Track hook reads zero while the original counts. Neither is loss.
+func TestPuntMonitorIsSilentWithoutTeeCounts(t *testing.T) {
+	m, tee, rec := teeMonitor(5000, 0)
+	tee.untrackedCopy = true
+
+	m.check()
+	tee.original = 9000
+	m.check()
+
+	missing := &liPuntMonitor{client: &fakeCounters{noQueue: true, portErr: true}, reporter: rec}
+	missing.check()
+	missing.check()
+
+	if len(rec.issues) != 0 {
+		t.Errorf("a tee whose gates are not counted, or no tee at all, was reported as %v", rec.issues)
 	}
 }

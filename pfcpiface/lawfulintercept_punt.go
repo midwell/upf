@@ -24,10 +24,13 @@ import (
 // faults are reported so that they reach the ADMF rather than failing invisibly.
 //
 // The only vantage point that can see the loss is the datapath's own accounting.
-// Copies are lost in two places on the way out: the egress queue discards on
-// enqueue when it is full, and the egress port discards what its write did not
-// take. Each keeps its own cumulative discard count. The PFCP agent already holds a
-// bessd channel for programming the pipeline, so it can read both and report growth.
+// Copies are lost in three places on the way out: a tee that cannot make the copy,
+// the egress queue, which discards on enqueue when it is full, and the egress port,
+// which discards what its write did not take. The queue and the port keep their own
+// cumulative discard counts. The tee keeps none, but BESS tracks every connected
+// output gate by default, so the copy gate falling behind the original's is the
+// tee's loss. The PFCP agent already holds a bessd channel for programming the
+// pipeline, so it can read all three and report growth.
 
 const (
 	// liPuntPollInterval is how often the egress accounting is read. Loss
@@ -50,10 +53,47 @@ type bessCounters interface {
 	// ModuleCommand is how a module's own accounting is read — Queue.get_status here,
 	// which is the only counter that sees a discard on enqueue.
 	ModuleCommand(ctx context.Context, in *pb.CommandRequest, opts ...grpc.CallOption) (*pb.CommandResponse, error)
+	// GetModuleInfo is how a tee's output gates are read: each carries the packet count
+	// of the Track hook BESS attaches to every connected output gate.
+	GetModuleInfo(ctx context.Context, in *pb.GetModuleInfoRequest, opts ...grpc.CallOption) (*pb.GetModuleInfoResponse, error)
 }
 
 // liQueueModule is the buffering stage in front of the egress port.
 const liQueueModule = "liQueue"
+
+// liTeeModules are the pipeline's two tees, downlink and uplink. Each is a Replicate whose
+// output gate 0 carries the subscriber's original and gate 1 the copy.
+var liTeeModules = [...]string{"liReplicaD", "liReplicaU"}
+
+const (
+	teeOriginalGate = 0
+	teeCopyGate     = 1
+
+	// teeSkewAllowance is how far a tee's copy gate can read ahead of its original gate on
+	// lossless traffic. Replicate emits each packet's copy before the original, and BESS runs
+	// a gate's Track hook when that gate's batch is handed on -- once it holds
+	// bess::PacketBatch::kMaxBurst packets (bess/core/pktbatch.h), or when the module's batch
+	// is done -- so a read can fall between the two gates' hooks for one batch.
+	teeSkewAllowance = 64
+
+	// trackHookClass is the class of BESS's default gate hook, whose counts these are.
+	trackHookClass = "Track"
+)
+
+// teeAccount is what the monitor holds about one tee between polls.
+type teeAccount struct {
+	// original and copied are the gate counts as last read, kept to recognise a reset: a
+	// pipeline reloaded, or a Track hook reset, starts both from zero.
+	original, copied uint64
+	// deficit is the shortfall of copies already accounted for: reported, or present at a
+	// reset. Only growth past it is loss this monitor has not yet reported. It starts at
+	// zero, so the first poll reports a shortfall already counted, as the other two
+	// counters do.
+	deficit int64
+	// pending is a growth within the skew allowance seen on the last poll and not yet
+	// reported: a skewed read clears on the next poll, and a lost copy does not.
+	pending bool
+}
 
 // liPuntMonitor watches for content discarded between the datapath and the
 // shipper.
@@ -70,6 +110,8 @@ type liPuntMonitor struct {
 	// the two are different losses at different points and a datapath restart resets them
 	// independently.
 	dropped uint64
+	// tees is each tee's account, indexed as liTeeModules.
+	tees [len(liTeeModules)]teeAccount
 }
 
 // startLIPuntMonitor begins watching the LI egress accounting. It is silent when
@@ -101,8 +143,109 @@ func (m *liPuntMonitor) run() {
 // what it sent — two separate reads of moving packet counters differ by whatever passed
 // between them, which on lossless traffic reads as loss.
 func (m *liPuntMonitor) check() {
+	for i, name := range liTeeModules {
+		m.checkTeeCopies(name, &m.tees[i])
+	}
+
 	m.checkQueueDrops()
 	m.checkPortDrops()
+}
+
+// checkTeeCopies reports copies a tee could not make.
+//
+// Replicate skips a gate when bess::Packet::copy finds the packet pool empty, and counts
+// nothing, so the copy reaches neither the queue nor the port and neither of their counts
+// sees it. The subscriber's original still goes out on gate 0. The loss is therefore the
+// growth of gate 0's count over gate 1's.
+//
+// The two counts are read from moving gates. A batch's copy gate is counted before its
+// original gate, and bessd reads gate 0 before gate 1, so on lossless traffic a read can
+// only find the copy gate ahead, by about a batch (teeSkewAllowance): a skewed read lowers
+// the shortfall. A growth past the allowance is loss at once. One within it is loss only if
+// the next poll still shows it: a read skewed low clears on the next poll, and a lost copy
+// stays lost. What this cannot tell apart is a baseline taken from a read skewed low, which
+// makes the next unskewed reads show up to a batch of growth that persists; that costs at
+// most one report of a batch the tee did copy.
+//
+// Silent where the tee or either gate's Track hook cannot be read -- an older pipeline, or
+// one built with the default hooks skipped -- since a count that is not kept is not loss.
+func (m *liPuntMonitor) checkTeeCopies(name string, acct *teeAccount) {
+	original, copied, ok := m.teeCounts(name)
+	if !ok {
+		return
+	}
+
+	deficit := int64(original) - int64(copied)
+
+	if original < acct.original || copied < acct.copied {
+		// Reset by a pipeline reload: a new baseline rather than a recovery.
+		*acct = teeAccount{original: original, copied: copied, deficit: deficit}
+
+		return
+	}
+
+	acct.original, acct.copied = original, copied
+
+	growth := deficit - acct.deficit
+
+	switch {
+	case growth <= 0:
+		// Nothing new, or a read that caught the copy gate ahead.
+		acct.pending = false
+
+		return
+	case growth <= teeSkewAllowance && !acct.pending:
+		acct.pending = true
+
+		return
+	}
+
+	acct.deficit = deficit
+	acct.pending = false
+
+	m.reporter.Notify(x1.NEIssueX3PuntLost,
+		"content copies the datapath tee could not make")
+}
+
+// teeCounts reads a tee's original and copy gate packet counts, and reports whether both were
+// there to read.
+func (m *liPuntMonitor) teeCounts(name string) (original, copied uint64, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
+	defer cancel()
+
+	res, err := m.client.GetModuleInfo(ctx, &pb.GetModuleInfoRequest{Name: name})
+	if err != nil || res.GetError() != nil {
+		return 0, 0, false
+	}
+
+	var haveOriginal, haveCopy bool
+
+	for _, g := range res.GetOgates() {
+		if !tracked(g) {
+			continue
+		}
+
+		switch g.GetOgate() {
+		case teeOriginalGate:
+			original, haveOriginal = g.GetPkts(), true
+		case teeCopyGate:
+			copied, haveCopy = g.GetPkts(), true
+		}
+	}
+
+	return original, copied, haveOriginal && haveCopy
+}
+
+// tracked reports whether an output gate's counts are kept: only a gate with a Track hook
+// has them, and an untracked gate reads zero.
+func tracked(g *pb.GetModuleInfoResponse_OGate) bool {
+	for _, h := range g.GetGatehooks() {
+		if h.GetClassName() == trackHookClass {
+			return true
+		}
+	}
+
+	return false
 }
 
 // checkPortDrops reports growth in the egress port's own discard count.
