@@ -45,7 +45,8 @@ func TestAnInterceptionPushWritesNothingToTheGeneralLog(t *testing.T) {
 			farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward, liDuplicate: true,
 			tunnelType: 1, tunnelIP4Dst: 0x0ac800c9, tunnelTEID: 0x1001, tunnelPort: 2152,
 		}},
-		qers: []qer{{qerID: 1, fseID: 0x2632898145f4d191}},
+		// A QFI with no QoS configuration, so the QER workers take their default-burst branch too.
+		qers: []qer{{qerID: 1, fseID: 0x2632898145f4d191, qfi: 9}},
 	}
 
 	// What the same write logs when a PFCP Session Modification makes it: the lines the push must
@@ -55,7 +56,10 @@ func TestAnInterceptionPushWritesNothingToTheGeneralLog(t *testing.T) {
 		b     *bess
 		lines []string
 	}{
-		{"accepted", answeringBess(&pb.CommandResponse{}, nil), []string{"farlookup resp"}},
+		{
+			"accepted", answeringBess(&pb.CommandResponse{}, nil),
+			[]string{"farlookup resp", "pdrlookup resp", "qerlookup resp", "using default burst size"},
+		},
 		{
 			"table full",
 			answeringBess(&pb.CommandResponse{Error: &pb.Error{Code: errnoNoSpace, Errmsg: msgTableFull}}, nil),

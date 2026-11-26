@@ -1604,7 +1604,7 @@ func (b *bess) delApplicationQER(
 
 	arg, err = anypb.New(q)
 	if err != nil {
-		logger.BessLog.Infoln(errMarshalRule, q, err)
+		batchLog(ctx).Infoln(errMarshalRule, q, err)
 		return err
 	}
 
