@@ -1277,7 +1277,7 @@ func (b *bess) processPDR(ctx context.Context, arg *anypb.Any, method upfMsgType
 		Arg:  arg,
 	})
 
-	logger.BessLog.Debugf("pdrlookup resp: %v", resp)
+	batchLog(ctx).Debugf("pdrlookup resp: %v", resp)
 
 	return commandOutcome(batchLog(ctx), "pdrLookup", method, methods[method], resp, err)
 }
@@ -1302,11 +1302,11 @@ func (b *bess) addPDR(ctx context.Context, done chan<- bool, p pdr) {
 		// Translate port ranges into ternary rule(s) and insert them one-by-one.
 		portRules, err := CreatePortRangeCartesianProduct(p.appFilter.srcPortRange, p.appFilter.dstPortRange)
 		if err != nil {
-			logger.BessLog.Errorln(err)
+			batchLog(ctx).Errorln(err)
 			return
 		}
 
-		logger.BessLog.Debugf("PDR rules %+v", portRules)
+		batchLog(ctx).Debugf("PDR rules %+v", portRules)
 
 		for _, r := range portRules {
 			f := &pb.WildcardMatchCommandAddArg{
@@ -1343,7 +1343,7 @@ func (b *bess) addPDR(ctx context.Context, done chan<- bool, p pdr) {
 
 			arg, err = anypb.New(f)
 			if err != nil {
-				logger.BessLog.Infoln(errMarshalRule, f, err)
+				batchLog(ctx).Infoln(errMarshalRule, f, err)
 				return
 			}
 
@@ -1368,7 +1368,7 @@ func (b *bess) delPDR(ctx context.Context, done chan<- bool, p pdr) {
 		// Translate port ranges into ternary rule(s) and insert them one-by-one.
 		portRules, err := CreatePortRangeCartesianProduct(p.appFilter.srcPortRange, p.appFilter.dstPortRange)
 		if err != nil {
-			logger.BessLog.Errorln(err)
+			batchLog(ctx).Errorln(err)
 			return
 		}
 
@@ -1398,7 +1398,7 @@ func (b *bess) delPDR(ctx context.Context, done chan<- bool, p pdr) {
 
 			arg, err = anypb.New(f)
 			if err != nil {
-				logger.BessLog.Errorln(errMarshalRule, f, err)
+				batchLog(ctx).Errorln(errMarshalRule, f, err)
 				return
 			}
 
@@ -1440,7 +1440,7 @@ func (b *bess) handleUplinkQER(ctx context.Context, qer qer) error {
 	// Lookup QCI from QFI, else try default QCI.
 	qosVal, ok := b.qciQosMap[qer.qfi]
 	if !ok {
-		logger.BessLog.Debugf("number of config for qfi/qci: %v using default burst size", qer.qfi)
+		batchLog(ctx).Debugf("number of config for qfi/qci: %v using default burst size", qer.qfi)
 
 		qosVal = b.qciQosMap[0]
 	}
@@ -1481,7 +1481,7 @@ func (b *bess) handleDownlinkQER(ctx context.Context, qer qer) error {
 	// Lookup QCI from QFI, else try default QCI.
 	qosVal, ok := b.qciQosMap[qer.qfi]
 	if !ok {
-		logger.BessLog.Debugf("number of config for qfi/qci: %v using default burst size", qer.qfi)
+		batchLog(ctx).Debugf("number of config for qfi/qci: %v using default burst size", qer.qfi)
 
 		qosVal = b.qciQosMap[0]
 	}
@@ -1540,7 +1540,7 @@ func (b *bess) addApplicationQER(ctx context.Context, gate uint64, srcIface uint
 
 	arg, err = anypb.New(q)
 	if err != nil {
-		logger.BessLog.Errorln(errMarshalRule, q, err)
+		batchLog(ctx).Errorln(errMarshalRule, q, err)
 		return err
 	}
 
@@ -1788,7 +1788,7 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 
 		arg, err = anypb.New(f)
 		if err != nil {
-			logger.BessLog.Infoln(errMarshalRule, f, err)
+			batchLog(ctx).Infoln(errMarshalRule, f, err)
 			return
 		}
 
@@ -1837,7 +1837,7 @@ func (b *bess) processSliceMeter(ctx context.Context, arg *anypb.Any, method upf
 		},
 	)
 
-	logger.BessLog.Debugf("sliceMeter resp: %v", resp)
+	batchLog(ctx).Debugf("sliceMeter resp: %v", resp)
 
 	return commandOutcome(batchLog(ctx), "sliceMeter", method, methods[method], resp, err)
 }
@@ -1982,7 +1982,7 @@ func (b *bess) processQER(ctx context.Context, arg *anypb.Any, method upfMsgType
 		Arg:  arg,
 	})
 
-	logger.BessLog.Debugf("qerlookup resp: %v", resp)
+	batchLog(ctx).Debugf("qerlookup resp: %v", resp)
 
 	return commandOutcome(batchLog(ctx), qosTableName, method, methods[method], resp, err)
 }
@@ -2011,7 +2011,7 @@ func (b *bess) addSessionQER(ctx context.Context, gate uint64, srcIface uint8,
 
 	arg, err = anypb.New(q)
 	if err != nil {
-		logger.BessLog.Errorln(errMarshalRule, q, err)
+		batchLog(ctx).Errorln(errMarshalRule, q, err)
 		return err
 	}
 
@@ -2033,7 +2033,7 @@ func (b *bess) delSessionQER(ctx context.Context, srcIface uint8, qer qer) error
 
 	arg, err = anypb.New(q)
 	if err != nil {
-		logger.BessLog.Errorln(errMarshalRule, q, err)
+		batchLog(ctx).Errorln(errMarshalRule, q, err)
 		return err
 	}
 

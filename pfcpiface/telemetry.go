@@ -189,7 +189,10 @@ func (col PfcpNodeCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // datapathWriteDuration measures how long a batch of rule writes takes to be
-// confirmed by the datapath, against the deadline GRPCJoin gives the whole batch.
+// confirmed by the datapath, from the start of the batch's RPC deadline, before its
+// rules are dispatched, to the join. The join's own one-second wait starts after
+// dispatch, so a batch that times out there reads above the deadline by its
+// dispatch time.
 //
 // A batch that exceeds that deadline leaves this element unable to say whether its
 // rules were applied, and this records how close ordinary batches come to it, so

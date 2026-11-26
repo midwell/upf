@@ -37,19 +37,32 @@ func TestAnInterceptionPushWritesNothingToTheGeneralLog(t *testing.T) {
 	blocked := &bess{client: blockingModuleStub{release: make(chan struct{})}}
 	blocked.readQciQosMap(&Conf{})
 
-	rules := PacketForwardingRules{fars: []far{{
-		farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward, liDuplicate: true,
-		tunnelType: 1, tunnelIP4Dst: 0x0ac800c9, tunnelTEID: 0x1001, tunnelPort: 2152,
-	}}}
+	// A push carries FARs only today, but the batch it goes through takes any rule, so a PDR and a
+	// QER ride along and their workers are held to the same silence.
+	rules := PacketForwardingRules{
+		pdrs: []pdr{{}},
+		fars: []far{{
+			farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward, liDuplicate: true,
+			tunnelType: 1, tunnelIP4Dst: 0x0ac800c9, tunnelTEID: 0x1001, tunnelPort: 2152,
+		}},
+		qers: []qer{{qerID: 1, fseID: 0x2632898145f4d191}},
+	}
 
+	// What the same write logs when a PFCP Session Modification makes it: the lines the push must
+	// not write, and must not have taken from the modification either.
 	for _, tc := range []struct {
-		name string
-		b    *bess
+		name  string
+		b     *bess
+		lines []string
 	}{
-		{"accepted", answeringBess(&pb.CommandResponse{}, nil)},
-		{"table full", answeringBess(&pb.CommandResponse{Error: &pb.Error{Code: errnoNoSpace, Errmsg: msgTableFull}}, nil)},
-		{"rpc failed", answeringBess(nil, errors.New("connection refused"))},
-		{"timed out", blocked},
+		{"accepted", answeringBess(&pb.CommandResponse{}, nil), []string{"farlookup resp"}},
+		{
+			"table full",
+			answeringBess(&pb.CommandResponse{Error: &pb.Error{Code: errnoNoSpace, Errmsg: msgTableFull}}, nil),
+			[]string{"farLookup add was refused", "error making GRPC calls"},
+		},
+		{"rpc failed", answeringBess(nil, errors.New("connection refused")), []string{"farLookup add did not complete"}},
+		{"timed out", blocked, []string{"timed out adding entries"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs.TakeAll()
@@ -65,8 +78,10 @@ func TestAnInterceptionPushWritesNothingToTheGeneralLog(t *testing.T) {
 			// can only be because the push was kept out.
 			u.sendDuplicationWrite(upfMsgTypeMod, PacketForwardingRules{}, rules)
 
-			if logs.Len() == 0 {
-				t.Error("a modification's write logged nothing, so the zero above shows nothing")
+			for _, line := range tc.lines {
+				if logs.FilterMessageSnippet(line).Len() == 0 {
+					t.Errorf("a modification's write did not log %q, so the zero above shows nothing", line)
+				}
 			}
 		})
 	}

@@ -134,7 +134,8 @@ func TestTheInterceptionEnablerPushesUntimed(t *testing.T) {
 }
 
 // slowRuleLog is a debug sink that is slow only for the line the batch logs for each rule as it
-// dispatches it.
+// dispatches it, which it finds by far.String's "FAR(id=". If that format changes, the sink
+// slows nothing and TestABatchIsTimedFromItsDeadline passes whatever the start.
 type slowRuleLog struct{ delay time.Duration }
 
 func (w slowRuleLog) Write(p []byte) (int, error) {
