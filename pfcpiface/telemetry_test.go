@@ -109,8 +109,10 @@ func Test_setupProm(t *testing.T) {
 	})
 
 	// A setup that fails part way takes back what it registered, so the agent can be
-	// set up again once the collision is gone. Each of its own collectors collides in
-	// turn with one registered first.
+	// set up again once the collision is gone. The histogram and the UPF collector each
+	// collide in turn with one registered first. The node collector is left out: it
+	// describes itself by collecting, and without flow measurement it collects nothing,
+	// so a second one registers unchecked and cannot collide.
 	for name, holder := range map[string]func(*upf) prometheus.Collector{
 		"datapath write histogram": func(*upf) prometheus.Collector { return datapathWriteDuration },
 		"UPF collector":            func(u *upf) prometheus.Collector { return newUpfCollector(u) },

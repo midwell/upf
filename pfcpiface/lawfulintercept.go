@@ -224,10 +224,9 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 			// refused is not recorded as programmed, so the next re-derivation
 			// attempts it again — and the refusal is reported, since an interception
 			// this element accepted and is not carrying out is a condition only the
-			// ADMF can act on.
-			func(all, updated PacketForwardingRules) (uint8, bool) {
-				return u.sendDuplicationWrite(upfMsgTypeMod, all, updated)
-			},
+			// ADMF can act on. These writes are made outside any PFCP procedure, so
+			// they go through the datapath's untimed path.
+			u.sendDuplicationPush,
 			func(issueType, description string) {
 				if issueReporter != nil {
 					issueReporter.NotifyAsync(issueType, description)

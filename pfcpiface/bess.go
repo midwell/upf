@@ -248,7 +248,7 @@ func (b *bess) AddSliceInfo(sliceInfo *SliceInfo) error {
 func (b *bess) SendMsgToUPF(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) uint8 {
-	cause, _, _ := b.sendMsgToUPFBatch(method, rules, updated)
+	cause, _, _ := b.sendMsgToUPFBatch(method, rules, updated, true)
 
 	return cause
 }
@@ -259,7 +259,7 @@ func (b *bess) SendMsgToUPF(
 func (b *bess) SendMsgToUPFWithCompletion(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) (uint8, bool) {
-	cause, completed, _ := b.sendMsgToUPFBatch(method, rules, updated)
+	cause, completed, _ := b.sendMsgToUPFBatch(method, rules, updated, true)
 
 	return cause, completed
 }
@@ -291,7 +291,18 @@ func (b *bess) SendMsgToUPFWithCompletion(
 func (b *bess) sendMsgToUPFConfirmed(
 	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
 ) (uint8, bool) {
-	cause, _, confirmed := b.sendMsgToUPFBatch(method, rules, updated)
+	cause, _, confirmed := b.sendMsgToUPFBatch(method, rules, updated, true)
+
+	return cause, confirmed
+}
+
+// sendDuplicationPush is sendMsgToUPFConfirmed for a modification the interception plane
+// makes on its own, outside any PFCP procedure: a warrant activated or withdrawn on an
+// established session. It is not timed in upf_datapath_write_duration_seconds. That is a
+// general operator metric, and a modify write with no PFCP Session Modification behind it
+// would show anyone who reads /metrics that a tasking changed.
+func (b *bess) sendDuplicationPush(all, updated PacketForwardingRules) (uint8, bool) {
+	cause, _, confirmed := b.sendMsgToUPFBatch(upfMsgTypeMod, all, updated, false)
 
 	return cause, confirmed
 }
@@ -300,14 +311,15 @@ func (b *bess) sendMsgToUPFConfirmed(
 // completion SendMsgToUPFWithCompletion gives, and whether the FAR deletes were confirmed. See
 // removingDatapath.
 func (b *bess) sendMsgToUPFRemoval(all PacketForwardingRules) (uint8, bool, bool) {
-	return b.sendMsgToUPFBatch(upfMsgTypeDel, all, PacketForwardingRules{})
+	return b.sendMsgToUPFBatch(upfMsgTypeDel, all, PacketForwardingRules{}, true)
 }
 
-// sendMsgToUPFBatch programs the batch and gives every answer the three functions above
-// take their part of: the cause, whether the batch completed, and whether its FAR writes
-// were confirmed.
+// sendMsgToUPFBatch programs the batch and gives every answer the functions above take
+// their part of: the cause, whether the batch completed, and whether its FAR writes were
+// confirmed. A measured batch is timed in datapathWriteDuration; see sendDuplicationPush
+// for the one that is not.
 func (b *bess) sendMsgToUPFBatch(
-	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules,
+	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules, measured bool,
 ) (uint8, bool, bool) {
 	// create context
 	cause := ie.CauseRequestAccepted
@@ -378,7 +390,9 @@ func (b *bess) sendMsgToUPFBatch(
 	completed, succeeded := b.GRPCJoin(calls, Timeout, done)
 	// Observed whatever the outcome: a batch that succeeded just inside the deadline is
 	// the interesting measurement, not only one that missed it.
-	datapathWriteDuration.WithLabelValues(method.String()).Observe(time.Since(writeStart).Seconds())
+	if measured {
+		datapathWriteDuration.WithLabelValues(method.String()).Observe(time.Since(writeStart).Seconds())
+	}
 
 	if !completed || !succeeded {
 		logger.BessLog.Errorln(errGRPCCallFailed)

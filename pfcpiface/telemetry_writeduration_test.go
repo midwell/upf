@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // The datapath write duration is a general operator metric on a path that also carries
@@ -79,5 +80,30 @@ func TestDatapathWriteDurationDisclosesNoSubject(t *testing.T) {
 		if m.GetHistogram() == nil {
 			t.Errorf("expected a histogram, got %v", m)
 		}
+	}
+}
+
+// A write the interception plane makes on its own, outside any PFCP procedure, is not
+// timed. A modify observation with no PFCP Session Modification behind it would let anyone
+// who compares this histogram with the PFCP message counters see that a tasking changed.
+func TestAnInterceptionPushIsNotTimed(t *testing.T) {
+	datapathWriteDuration.Reset()
+	t.Cleanup(datapathWriteDuration.Reset)
+
+	u := &upf{datapath: bessWithNoDatapath(t)}
+	rules := PacketForwardingRules{fars: []far{{farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward}}}
+
+	u.sendDuplicationPush(PacketForwardingRules{}, rules)
+
+	if n := testutil.CollectAndCount(datapathWriteDuration); n != 0 {
+		t.Errorf("the interception push was timed: %d series after it, want 0", n)
+	}
+
+	// The same write made by a PFCP Session Modification is timed, so the count above can
+	// only be zero because the push was left out.
+	u.sendDuplicationWrite(upfMsgTypeMod, PacketForwardingRules{}, rules)
+
+	if n := testutil.CollectAndCount(datapathWriteDuration); n != 1 {
+		t.Errorf("a modification's write left %d series, want 1", n)
 	}
 }

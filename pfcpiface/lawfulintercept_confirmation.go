@@ -97,13 +97,32 @@ type removingDatapath interface {
 	sendMsgToUPFRemoval(all PacketForwardingRules) (cause uint8, finished, confirmed bool)
 }
 
-// Both are found by type assertion, and a datapath without one is taken at its word, so a
-// bess that stopped implementing one would have unanswered writes counted as confirmed
-// instead of failing to build.
+// pushingDatapath is confirmingDatapath for the interception plane's own modifications, those
+// made outside any PFCP procedure, which a datapath that keeps general write metrics leaves out
+// of them. See bess.sendDuplicationPush.
+type pushingDatapath interface {
+	sendDuplicationPush(all, updated PacketForwardingRules) (uint8, bool)
+}
+
+// All three are found by type assertion, and a datapath without one is taken at its word, so a
+// bess that stopped implementing one would have unanswered writes counted as confirmed, or
+// interception writes timed in a general metric, instead of failing to build.
 var (
 	_ confirmingDatapath = (*bess)(nil)
 	_ removingDatapath   = (*bess)(nil)
+	_ pushingDatapath    = (*bess)(nil)
 )
+
+// sendDuplicationPush is sendDuplicationWrite for a modification the interception plane makes
+// on its own: the same two answers, from a datapath that does not count it among its PFCP
+// writes.
+func (u *upf) sendDuplicationPush(all, updated PacketForwardingRules) (uint8, bool) {
+	if p, ok := u.datapath.(pushingDatapath); ok {
+		return p.sendDuplicationPush(all, updated)
+	}
+
+	return u.sendDuplicationWrite(upfMsgTypeMod, all, updated)
+}
 
 // sendRemoval deletes a session's rules and answers the cause, whether the batch finished, and
 // whether its FAR deletes were confirmed. A datapath that cannot tell is taken at its word, as in
