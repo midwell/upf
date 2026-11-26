@@ -42,7 +42,7 @@ func TestTheTriggeringFunctionIsToldWhenX3DeliveryIsDown(t *testing.T) {
 		t.Fatalf("load tf material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 
 	down := false
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil,

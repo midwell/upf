@@ -108,6 +108,13 @@ var bessIP = flag.String("bess", "localhost:10514", "BESS IP/port combo")
 
 var enableGtpuPathMonitoring = false
 
+// The collectors find these by type assertion, so a bess that stopped
+// implementing one would silently report no metrics instead of failing to build.
+var (
+	_ upfMetricsReader   = (*bess)(nil)
+	_ sessionStatsReader = (*bess)(nil)
+)
+
 type bess struct {
 	client        pb.BESSControlClient
 	conn          *grpc.ClientConn
@@ -1038,7 +1045,7 @@ func (b *bess) clearState() {
 
 // setUpfInfo is only called at pfcp-agent's startup
 // it clears all the state in BESS
-func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
+func (b *bess) SetUpfInfo(u *upf, conf *Conf) error {
 	var err error
 
 	logger.BessLog.Errorln("SetUpfInfo bess")
@@ -1052,7 +1059,7 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 
 	b.conn, err = grpc.NewClient(*bessIP, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		logger.BessLog.Fatalln("did not connect:", err)
+		return fmt.Errorf("creating the BESS gRPC client for %s: %w", *bessIP, err)
 	}
 
 	b.client = pb.NewBESSControlClient(b.conn)
@@ -1116,6 +1123,8 @@ func (b *bess) SetUpfInfo(u *upf, conf *Conf) {
 	}
 
 	b.setupSliceMeter(conf)
+
+	return nil
 }
 
 // declineOptionalSubsystem logs that an optional datapath subsystem did not start, and

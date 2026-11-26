@@ -59,7 +59,7 @@ func TestBulkDeactivationFollowsConfiguration(t *testing.T) {
 			cfg := &LiConfig{
 				NEID:               testNEID,
 				TFID:               testTFID,
-				X1Listen:           freePort(t),
+				X1Listen:           freeLocalAddr(t),
 				DeactivateAllTasks: c.configured,
 			}
 
@@ -153,7 +153,7 @@ func TestBulkRemovalFollowsConfiguration(t *testing.T) {
 			cfg := &LiConfig{
 				NEID:                  testNEID,
 				TFID:                  testTFID,
-				X1Listen:              freePort(t),
+				X1Listen:              freeLocalAddr(t),
 				RemoveAllDestinations: c.configured,
 			}
 

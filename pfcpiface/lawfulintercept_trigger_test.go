@@ -132,9 +132,9 @@ func writePEM(t *testing.T, path string, blocks ...*pem.Block) {
 	}
 }
 
-// freePort returns a port nothing is listening on, so the test does not collide
-// with a fixed number.
-func freePort(t *testing.T) string {
+// freeLocalAddr returns a loopback address on a port nothing is listening on, so the
+// test does not collide with a fixed number.
+func freeLocalAddr(t *testing.T) string {
 	t.Helper()
 
 	//nolint:noctx // test listener; no context needed
@@ -169,7 +169,7 @@ func TestTriggerListenerAcceptsCCTFTasking(t *testing.T) {
 	cfg := &LiConfig{
 		NEID:     testNEID,
 		TFID:     testTFID,
-		X1Listen: freePort(t),
+		X1Listen: freeLocalAddr(t),
 	}
 
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
@@ -267,7 +267,7 @@ func TestTriggerListenerRejectsForeignTasker(t *testing.T) {
 		t.Fatalf("load upf material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
@@ -607,7 +607,7 @@ func keepaliveTaskedReportingTo(t *testing.T, seid uint64, admf *recordingADMF) 
 	}
 
 	cfg := &LiConfig{
-		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
+		NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t),
 		// The shortest the procedure allows. TIME_P1 is the wait after the 9050 report, which
 		// no answer ends at a POI triggered over LI_T3.
 		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
@@ -725,7 +725,7 @@ func TestTheStopReportFollowsTheStop(t *testing.T) {
 		}
 	})
 	cfg := &LiConfig{
-		NEID: testNEID, TFID: testTFID, X1Listen: freePort(t),
+		NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t),
 		KeepaliveTimeout: "1s", KeepaliveTimeP1: "1s",
 	}
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(),
@@ -862,7 +862,7 @@ func TestTriggerKeepaliveMustBeValid(t *testing.T) {
 	}
 
 	// Nothing may be left listening when the timer is rejected.
-	addr := freePort(t)
+	addr := freeLocalAddr(t)
 	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: addr, KeepaliveTimeout: testUnparseable}
 	if _, err := startTriggerListener(cfg, &tls.Config{}, nil, nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil); err == nil {
 		t.Fatal("startTriggerListener accepted an invalid keepalive_timeout")
@@ -898,7 +898,7 @@ func TestOrdinaryWithdrawalIsNotReportedAsAPurge(t *testing.T) {
 	// The default keepalive procedure, whose TIME_P2 is an hour: nothing here is meant to
 	// lapse, so anything reported as a purge would be this element mislabelling a
 	// withdrawal it was asked for.
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(), nil, x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {
@@ -976,7 +976,7 @@ func TestNumberingIsReleasedOnEveryKindOfRemoval(t *testing.T) {
 	}
 
 	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 	if _, startErr := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); startErr != nil {
 		t.Fatalf("startTriggerListener: %v", startErr)
 	}
@@ -1108,7 +1108,7 @@ func TestEndingOneSessionDoesNotRenumberAnother(t *testing.T) {
 	}
 
 	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}
@@ -1207,7 +1207,7 @@ func TestARelabelReleasesTheSupersededLabelsContextOnly(t *testing.T) {
 	}
 
 	ids := x2x3.NewIdentity(testNEID, upfInterceptionPoint)
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 	if _, err := startTriggerListener(cfg, upfMat.ServerTLS(), &recordingReporter{}, nil, ids, nil, nil); err != nil {
 		t.Fatalf("startTriggerListener: %v", err)
 	}

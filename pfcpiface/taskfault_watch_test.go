@@ -39,7 +39,7 @@ func TestTheTriggerListenerStartsTheTaskFaultWatcher(t *testing.T) {
 	enabler := newCCEnabler(store.New(), nil, nil)
 	t.Cleanup(enabler.stop)
 
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 	tasks, err := startTriggerListener(cfg, upfMat.ServerTLS(), admf.reporter(), enabler,
 		x2x3.NewIdentity(testNEID, upfInterceptionPoint), nil, nil)
 	if err != nil {

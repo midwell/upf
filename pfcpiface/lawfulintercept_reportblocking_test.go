@@ -188,7 +188,7 @@ func TestARefusedX1RequestIsAnsweredWithoutWaitingOnTheReporter(t *testing.T) {
 		t.Fatalf("load peer material: %v", err)
 	}
 
-	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freePort(t)}
+	cfg := &LiConfig{NEID: testNEID, TFID: testTFID, X1Listen: freeLocalAddr(t)}
 
 	reporter := &slowFormReporter{block: 10 * time.Second}
 	if _, startErr := startTriggerListener(cfg, upfMat.ServerTLS(), reporter, nil,

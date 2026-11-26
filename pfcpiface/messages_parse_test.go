@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/wmnsk/go-pfcp/ie"
 	"github.com/wmnsk/go-pfcp/message"
 )
@@ -20,7 +19,7 @@ import (
 type fakeDP struct{}
 
 func (f *fakeDP) Exit()                                        {}
-func (f *fakeDP) SetUpfInfo(u *upf, conf *Conf)                {}
+func (f *fakeDP) SetUpfInfo(u *upf, conf *Conf) error          { return nil }
 func (f *fakeDP) AddSliceInfo(sliceInfo *SliceInfo) error      { return nil }
 func (f *fakeDP) SendEndMarkers(endMarkerList *[][]byte) error { return nil }
 func (f *fakeDP) SendMsgToUPF(method upfMsgType, all PacketForwardingRules, newRules PacketForwardingRules) uint8 {
@@ -34,11 +33,7 @@ func (f *fakeDP) SendMsgToUPFWithCompletion(method upfMsgType, all, newRules Pac
 	return 1, true
 }
 
-func (f *fakeDP) IsConnected(accessIP *net.IP) bool                                     { return true }
-func (f *fakeDP) SummaryLatencyJitter(uc *upfCollector, ch chan<- prometheus.Metric)    {}
-func (f *fakeDP) PortStats(uc *upfCollector, ch chan<- prometheus.Metric)               {}
-func (f *fakeDP) SummaryGtpuLatency(uc *upfCollector, ch chan<- prometheus.Metric)      {}
-func (f *fakeDP) SessionStats(pc *PfcpNodeCollector, ch chan<- prometheus.Metric) error { return nil }
+func (f *fakeDP) IsConnected(accessIP *net.IP) bool { return true }
 
 // Test that a truncated (simulated unexpected EOF) Association Setup Request
 // is handled without causing a panic in the PFCP message handler.
