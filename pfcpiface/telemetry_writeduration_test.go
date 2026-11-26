@@ -107,3 +107,21 @@ func TestAnInterceptionPushIsNotTimed(t *testing.T) {
 		t.Errorf("a modification's write left %d series, want 1", n)
 	}
 }
+
+// The enabler the shipper starts pushes through that untimed path. Without this, the wiring
+// could go back to the timed write with every other test still passing.
+func TestTheInterceptionEnablerPushesUntimed(t *testing.T) {
+	datapathWriteDuration.Reset()
+	t.Cleanup(datapathWriteDuration.Reset)
+
+	u := &upf{datapath: bessWithNoDatapath(t)}
+	e := u.newInterceptionEnabler(func(string, string) {})
+	t.Cleanup(e.stop)
+
+	rules := PacketForwardingRules{fars: []far{{farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward}}}
+	e.push(PacketForwardingRules{}, rules)
+
+	if n := testutil.CollectAndCount(datapathWriteDuration); n != 0 {
+		t.Errorf("the enabler's push was timed: %d series after it, want 0", n)
+	}
+}

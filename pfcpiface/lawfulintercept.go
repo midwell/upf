@@ -219,19 +219,11 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	// builds a shipper without a datapath.
 	var enabler *ccEnabler
 	if u != nil {
-		enabler = newCCEnabler(nil,
-			// The datapath's cause is carried back rather than discarded. A FAR it
-			// refused is not recorded as programmed, so the next re-derivation
-			// attempts it again — and the refusal is reported, since an interception
-			// this element accepted and is not carrying out is a condition only the
-			// ADMF can act on. These writes are made outside any PFCP procedure, so
-			// they go through the datapath's untimed path.
-			u.sendDuplicationPush,
-			func(issueType, description string) {
-				if issueReporter != nil {
-					issueReporter.NotifyAsync(issueType, description)
-				}
-			})
+		enabler = u.newInterceptionEnabler(func(issueType, description string) {
+			if issueReporter != nil {
+				issueReporter.NotifyAsync(issueType, description)
+			}
+		})
 		u.ccEnabler = enabler
 	}
 
@@ -328,6 +320,17 @@ func startLIShipper(cfg *LiConfig, client pb.BESSControlClient, u *upf) error {
 	startLIPuntMonitor(client, issueReporter)
 
 	return nil
+}
+
+// newInterceptionEnabler builds the duplication control for this UPF's datapath.
+//
+// The datapath's cause is carried back rather than discarded. A FAR it refused is not
+// recorded as programmed, so the next re-derivation attempts it again — and the refusal is
+// reported, since an interception this element accepted and is not carrying out is a
+// condition only the ADMF can act on. These writes are made outside any PFCP procedure, so
+// they go through the datapath's untimed path (sendDuplicationPush).
+func (u *upf) newInterceptionEnabler(report func(issueType, description string)) *ccEnabler {
+	return newCCEnabler(nil, u.sendDuplicationPush, report)
 }
 
 // setPuntReadBuffer asks the kernel for a deeper receive buffer on the egress
