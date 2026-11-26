@@ -4,11 +4,18 @@
 package pfcpiface
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/omec-project/upf-epc/logger"
+	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // The datapath write duration is a general operator metric on a path that also carries
@@ -123,5 +130,44 @@ func TestTheInterceptionEnablerPushesUntimed(t *testing.T) {
 
 	if n := testutil.CollectAndCount(datapathWriteDuration); n != 0 {
 		t.Errorf("the enabler's push was timed: %d series after it, want 0", n)
+	}
+}
+
+// slowRuleLog is a debug sink that is slow only for the line the batch logs for each rule as it
+// dispatches it.
+type slowRuleLog struct{ delay time.Duration }
+
+func (w slowRuleLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("FAR(id=")) {
+		time.Sleep(w.delay)
+	}
+
+	return len(p), nil
+}
+
+// A batch is timed from where its deadline starts, before its rules are dispatched, so the
+// histogram measures how close the batch came to the deadline it is read against. Timed from the
+// join, a slow debug sink in the dispatch loop spent the deadline without being seen.
+func TestABatchIsTimedFromItsDeadline(t *testing.T) {
+	datapathWriteDuration.Reset()
+	t.Cleanup(datapathWriteDuration.Reset)
+
+	const delay = 50 * time.Millisecond
+	saved := logger.BessLog
+	logger.BessLog = zap.New(zapcore.NewCore(
+		zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()),
+		zapcore.AddSync(slowRuleLog{delay}), zapcore.DebugLevel)).Sugar()
+	t.Cleanup(func() { logger.BessLog = saved })
+
+	b := answeringBess(&pb.CommandResponse{}, nil)
+	rules := PacketForwardingRules{fars: []far{{farID: 1, fseID: 0x2632898145f4d191, applyAction: ActionForward}}}
+	b.SendMsgToUPF(upfMsgTypeMod, PacketForwardingRules{}, rules)
+
+	var m dto.Metric
+	if err := datapathWriteDuration.WithLabelValues(upfMsgTypeMod.String()).(prometheus.Histogram).Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Duration(m.GetHistogram().GetSampleSum() * float64(time.Second)); got < delay {
+		t.Errorf("the batch was timed at %s, less than the %s its dispatch took", got, delay)
 	}
 }

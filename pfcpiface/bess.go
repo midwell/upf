@@ -183,7 +183,7 @@ func (b *bess) sendPathMonitoring(ctx context.Context, method upfMsgType, gnb ui
 
 	arg, err := anypb.New(g)
 	if err != nil {
-		logger.BessLog.Infoln("error marshalling data", g, err)
+		batchLog(ctx).Infoln("error marshalling data", g, err)
 		return
 	}
 
@@ -298,9 +298,9 @@ func (b *bess) sendMsgToUPFConfirmed(
 
 // sendDuplicationPush is sendMsgToUPFConfirmed for a modification the interception plane
 // makes on its own, outside any PFCP procedure: a warrant activated or withdrawn on an
-// established session. It is not timed in upf_datapath_write_duration_seconds. That is a
-// general operator metric, and a modify write with no PFCP Session Modification behind it
-// would show anyone who reads /metrics that a tasking changed.
+// established session. It is neither timed in upf_datapath_write_duration_seconds nor
+// written to the general log. Both are read by operators, and a modify write with no PFCP
+// Session Modification behind it would show anyone who reads either that a tasking changed.
 func (b *bess) sendDuplicationPush(all, updated PacketForwardingRules) (uint8, bool) {
 	cause, _, confirmed := b.sendMsgToUPFBatch(upfMsgTypeMod, all, updated, false)
 
@@ -316,10 +316,10 @@ func (b *bess) sendMsgToUPFRemoval(all PacketForwardingRules) (uint8, bool, bool
 
 // sendMsgToUPFBatch programs the batch and gives every answer the functions above take
 // their part of: the cause, whether the batch completed, and whether its FAR writes were
-// confirmed. A measured batch is timed in datapathWriteDuration; see sendDuplicationPush
-// for the one that is not.
+// confirmed. A batch made for a PFCP procedure is timed in datapathWriteDuration and logged
+// in the general log; see sendDuplicationPush for the one that is neither.
 func (b *bess) sendMsgToUPFBatch(
-	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules, measured bool,
+	method upfMsgType, rules PacketForwardingRules, updated PacketForwardingRules, pfcpProcedure bool,
 ) (uint8, bool, bool) {
 	// create context
 	cause := ie.CauseRequestAccepted
@@ -340,15 +340,22 @@ func (b *bess) sendMsgToUPFBatch(
 		return cause, true, true
 	}
 
+	// Timed from where the batch's deadline starts, so the histogram measures what it is
+	// read against.
+	writeStart := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), Timeout)
 	defer cancel()
 
 	ctx, batch := withBatchConfirmation(ctx)
+	if !pfcpProcedure {
+		ctx = withoutGeneralLog(ctx)
+	}
+	log := batchLog(ctx)
 
 	done := make(chan bool, calls)
 
 	for _, pdr := range pdrs {
-		logger.BessLog.Debugln(method, pdr)
+		log.Debugln(method, pdr)
 
 		switch method {
 		case upfMsgTypeAdd:
@@ -361,7 +368,7 @@ func (b *bess) sendMsgToUPFBatch(
 	}
 
 	for _, far := range fars {
-		logger.BessLog.Debugln(method, far)
+		log.Debugln(method, far)
 
 		switch method {
 		case upfMsgTypeAdd:
@@ -374,7 +381,7 @@ func (b *bess) sendMsgToUPFBatch(
 	}
 
 	for _, qer := range qers {
-		logger.BessLog.Debugln(method, qer)
+		log.Debugln(method, qer)
 
 		switch method {
 		case upfMsgTypeAdd:
@@ -386,16 +393,15 @@ func (b *bess) sendMsgToUPFBatch(
 		}
 	}
 
-	writeStart := time.Now()
-	completed, succeeded := b.GRPCJoin(calls, Timeout, done)
+	completed, succeeded := grpcJoin(log, calls, Timeout, done)
 	// Observed whatever the outcome: a batch that succeeded just inside the deadline is
 	// the interesting measurement, not only one that missed it.
-	if measured {
+	if pfcpProcedure {
 		datapathWriteDuration.WithLabelValues(method.String()).Observe(time.Since(writeStart).Seconds())
 	}
 
 	if !completed || !succeeded {
-		logger.BessLog.Errorln(errGRPCCallFailed)
+		log.Errorln(errGRPCCallFailed)
 	}
 
 	// Reject only a batch that completed and reported a failure. A batch that timed out
@@ -1228,11 +1234,11 @@ func refused(err error) bool {
 // a batch that timed out is answered accepted with an unknown subset of its rules in
 // place, and the session's later deletion names all of them. Reporting that as a refusal
 // would reject deletions that did exactly what they were asked to do.
-func commandOutcome(module string, method upfMsgType, methodName string,
+func commandOutcome(log *zap.SugaredLogger, module string, method upfMsgType, methodName string,
 	resp *pb.CommandResponse, err error,
 ) error {
 	if err != nil {
-		logger.BessLog.Errorf("%v %v did not complete: %v", module, methodName, err)
+		log.Errorf("%v %v did not complete: %v", module, methodName, err)
 
 		return err
 	}
@@ -1242,12 +1248,12 @@ func commandOutcome(module string, method upfMsgType, methodName string,
 	}
 
 	if method == upfMsgTypeDel && resp.GetError().GetCode() == errnoNoEntry {
-		logger.BessLog.Debugf("%v %v: the datapath did not hold the rule", module, methodName)
+		log.Debugf("%v %v: the datapath did not hold the rule", module, methodName)
 
 		return nil
 	}
 
-	logger.BessLog.Errorf("%v %v was refused: %v", module, methodName, resp.GetError())
+	log.Errorf("%v %v was refused: %v", module, methodName, resp.GetError())
 
 	return fmt.Errorf("%v %v: %v: %w", module, methodName, resp.GetError(), errDatapathRefused)
 }
@@ -1273,7 +1279,7 @@ func (b *bess) processPDR(ctx context.Context, arg *anypb.Any, method upfMsgType
 
 	logger.BessLog.Debugf("pdrlookup resp: %v", resp)
 
-	return commandOutcome("pdrLookup", method, methods[method], resp, err)
+	return commandOutcome(batchLog(ctx), "pdrLookup", method, methods[method], resp, err)
 }
 
 func (b *bess) addPDR(ctx context.Context, done chan<- bool, p pdr) {
@@ -1620,14 +1626,14 @@ func (b *bess) processFAR(ctx context.Context, arg *anypb.Any, method upfMsgType
 		Arg:  arg,
 	})
 
-	logger.BessLog.Debugf("farlookup resp: %v", resp)
+	batchLog(ctx).Debugf("farlookup resp: %v", resp)
 
-	return commandOutcome("farLookup", method, methods[method], resp, err)
+	return commandOutcome(batchLog(ctx), "farLookup", method, methods[method], resp, err)
 }
 
 func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, method upfMsgType) {
 	if method != upfMsgTypeAdd && method != upfMsgTypeDel && method != upfMsgTypeClear {
-		logger.BessLog.Errorln(errInvalidMethodName, method)
+		batchLog(ctx).Errorln(errInvalidMethodName, method)
 		return
 	}
 
@@ -1639,10 +1645,10 @@ func (b *bess) processGtpuPathMonitoring(ctx context.Context, arg *anypb.Any, me
 		Arg:  arg,
 	})
 
-	logger.BessLog.Debugf("gtpuPathMonitoring resp: %v", resp)
+	batchLog(ctx).Debugf("gtpuPathMonitoring resp: %v", resp)
 
 	if err != nil || resp.GetError() != nil {
-		logger.BessLog.Errorf("gtpuPathMonitoring method failed with resp: %v, err: %v", resp, err)
+		batchLog(ctx).Errorf("gtpuPathMonitoring method failed with resp: %v, err: %v", resp, err)
 	}
 }
 
@@ -1730,7 +1736,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 
 		arg, err = anypb.New(f)
 		if err != nil {
-			logger.BessLog.Infoln(errMarshalRule, f, err)
+			batchLog(ctx).Infoln(errMarshalRule, f, err)
 			return
 		}
 
@@ -1833,7 +1839,7 @@ func (b *bess) processSliceMeter(ctx context.Context, arg *anypb.Any, method upf
 
 	logger.BessLog.Debugf("sliceMeter resp: %v", resp)
 
-	return commandOutcome("sliceMeter", method, methods[method], resp, err)
+	return commandOutcome(batchLog(ctx), "sliceMeter", method, methods[method], resp, err)
 }
 
 func (b *bess) addSliceMeter(ctx context.Context, done chan<- bool, meterConfig SliceMeterConfig) {
@@ -1978,7 +1984,7 @@ func (b *bess) processQER(ctx context.Context, arg *anypb.Any, method upfMsgType
 
 	logger.BessLog.Debugf("qerlookup resp: %v", resp)
 
-	return commandOutcome(qosTableName, method, methods[method], resp, err)
+	return commandOutcome(batchLog(ctx), qosTableName, method, methods[method], resp, err)
 }
 
 func (b *bess) addSessionQER(ctx context.Context, gate uint64, srcIface uint8,
@@ -2051,6 +2057,11 @@ func (b *bess) delSessionQER(ctx context.Context, srcIface uint8, qer qer) error
 // has already replaced. A failing batch therefore costs up to the full timeout instead
 // of returning at the first failure, which the timeout already bounds.
 func (b *bess) GRPCJoin(calls int, timeout time.Duration, done chan bool) (bool, bool) {
+	return grpcJoin(logger.BessLog, calls, timeout, done)
+}
+
+// grpcJoin is GRPCJoin logging to log, which a batch chooses with batchLog.
+func grpcJoin(log *zap.SugaredLogger, calls int, timeout time.Duration, done chan bool) (bool, bool) {
 	boom := time.After(timeout)
 	succeeded := true
 
@@ -2058,14 +2069,14 @@ func (b *bess) GRPCJoin(calls int, timeout time.Duration, done chan bool) (bool,
 		select {
 		case ok := <-done:
 			if !ok {
-				logger.BessLog.Errorln("error making GRPC calls")
+				log.Errorln("error making GRPC calls")
 
 				succeeded = false
 			}
 
 			calls--
 		case <-boom:
-			logger.BessLog.Infoln("timed out adding entries")
+			log.Infoln("timed out adding entries")
 			return false, false
 		}
 	}

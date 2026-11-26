@@ -7,7 +7,9 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/omec-project/upf-epc/logger"
 	"github.com/wmnsk/go-pfcp/ie"
+	"go.uber.org/zap"
 )
 
 // A batch of datapath writes has two outcomes that must not be collapsed into one: the
@@ -54,6 +56,32 @@ func noteUnconfirmed(ctx context.Context) {
 	if batch, ok := ctx.Value(batchConfirmationKey{}).(*batchConfirmation); ok {
 		batch.unconfirmed.Store(true)
 	}
+}
+
+// A batch the interception plane makes on its own is kept out of the general log the way it is
+// kept out of upf_datapath_write_duration_seconds (see sendDuplicationPush). Each rule it writes
+// would be logged with the session's F-SEID and tunnel, and a failed write with the module it
+// failed in, with no PFCP Session Modification before them, so the log alone would show an
+// operator which session a tasking had just reached. What the push could not confirm still goes
+// to the ADMF, through the batch confirmation above.
+type quietBatchKey struct{}
+
+// silentLog is what batchLog gives a batch marked by withoutGeneralLog: a log that writes nothing.
+var silentLog = zap.NewNop().Sugar()
+
+// withoutGeneralLog marks a batch's context so that batchLog gives it silentLog.
+func withoutGeneralLog(ctx context.Context) context.Context {
+	return context.WithValue(ctx, quietBatchKey{}, true)
+}
+
+// batchLog is the log a datapath write under ctx writes to: the general BESS log, or silentLog for
+// a batch marked by withoutGeneralLog.
+func batchLog(ctx context.Context) *zap.SugaredLogger {
+	if quiet, _ := ctx.Value(quietBatchKey{}).(bool); quiet {
+		return silentLog
+	}
+
+	return logger.BessLog
 }
 
 // confirmingDatapath is the optional half of the datapath contract: a datapath that can
