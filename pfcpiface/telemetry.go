@@ -208,19 +208,23 @@ var datapathWriteDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 }, []string{"method"})
 
 func setupProm(mux *http.ServeMux, upf *upf, node *PFCPNode) (*upfCollector, *PfcpNodeCollector, error) {
+	// First, so that a failure below can take it back like the UPF collector.
+	if err := prometheus.Register(datapathWriteDuration); err != nil {
+		return nil, nil, err
+	}
+
 	uc := newUpfCollector(upf)
 	if err := prometheus.Register(uc); err != nil {
+		prometheus.Unregister(datapathWriteDuration)
+
 		return nil, nil, err
 	}
 
 	nc := NewPFCPNodeCollector(node)
 	if err := prometheus.Register(nc); err != nil {
 		prometheus.Unregister(uc)
+		prometheus.Unregister(datapathWriteDuration)
 
-		return nil, nil, err
-	}
-
-	if err := prometheus.Register(datapathWriteDuration); err != nil {
 		return nil, nil, err
 	}
 
