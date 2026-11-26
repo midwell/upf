@@ -97,6 +97,14 @@ type removingDatapath interface {
 	sendMsgToUPFRemoval(all PacketForwardingRules) (cause uint8, finished, confirmed bool)
 }
 
+// Both are found by type assertion, and a datapath without one is taken at its word, so a
+// bess that stopped implementing one would have unanswered writes counted as confirmed
+// instead of failing to build.
+var (
+	_ confirmingDatapath = (*bess)(nil)
+	_ removingDatapath   = (*bess)(nil)
+)
+
 // sendRemoval deletes a session's rules and answers the cause, whether the batch finished, and
 // whether its FAR deletes were confirmed. A datapath that cannot tell is taken at its word, as in
 // sendDuplicationWrite: a finished, accepted removal counts as confirmed.
