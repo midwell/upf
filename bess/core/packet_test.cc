@@ -6,9 +6,14 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
+#include <utility>
 
 #include "dpdk.h"
 #include "packet_pool.h"
@@ -59,6 +64,65 @@ TEST_F(PacketCopyTest, CopiesAPacketThatGrewIntoItsHeadroom) {
     bess::Packet::Free(dst);
     bess::Packet::Free(src);
   }
+}
+
+// A packet whose data ends at the end of its buffer has nothing readable past
+// its last byte. That is a full-size frame, however much was trimmed from its
+// head (GTP-U decapsulation) or prepended to it (the 9-byte LI tag), so its
+// copy fits a fresh buffer's tailroom. Here the source's buffer is followed by
+// an unmapped page, so a copy that reads past the packet faults.
+TEST_F(PacketCopyTest, ReadsNothingPastTheEndOfTheSourceBuffer) {
+  const size_t page = sysconf(_SC_PAGESIZE);
+  const uint16_t buf_len = SNBUF_HEADROOM + SNBUF_DATA;
+  const size_t region = ((buf_len + page - 1) / page + 1) * page;
+  void *mem = mmap(nullptr, region, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(mem, MAP_FAILED);
+  char *guard = static_cast<char *>(mem) + region - page;
+  ASSERT_EQ(0, mprotect(guard, page, PROT_NONE));
+
+  // {trimmed from the head, prepended}: 2021 bytes is Copilot's case.
+  for (auto [trimmed, prepended] : std::initializer_list<std::pair<int, int>>{
+           {36, 9}, {36, 0}, {1, 0}, {0, 0}}) {
+    SCOPED_TRACE(testing::Message() << trimmed << "/" << prepended);
+
+    bess::Packet *src = pool_->Alloc();
+    ASSERT_NE(src, nullptr);
+    rte_mbuf *m = reinterpret_cast<rte_mbuf *>(src);
+    void *own_addr = m->buf_addr;
+    const uint16_t own_len = m->buf_len;
+    m->buf_addr = guard - buf_len;
+    m->buf_len = buf_len;
+    src->set_data_off(SNBUF_HEADROOM);
+
+    ASSERT_NE(src->append(src->tailroom()), nullptr);
+    if (trimmed > 0) {
+      ASSERT_NE(src->adj(trimmed), nullptr);
+    }
+    if (prepended > 0) {
+      ASSERT_NE(src->prepend(prepended), nullptr);
+    }
+    const int len = src->total_len();
+    ASSERT_EQ(len, SNBUF_DATA - trimmed + prepended);
+    ASSERT_EQ(src->head_data<char *>() + len, guard);
+    uint8_t *data = src->head_data<uint8_t *>();
+    for (int i = 0; i < len; i++) {
+      data[i] = static_cast<uint8_t>(i * 7 + 3);
+    }
+
+    bess::Packet *dst = bess::Packet::copy(src);
+    ASSERT_NE(dst, nullptr);
+    EXPECT_EQ(dst->total_len(), len);
+    EXPECT_EQ(0, memcmp(dst->head_data(), src->head_data(), len));
+    bess::Packet::Free(dst);
+
+    m->buf_addr = own_addr;
+    m->buf_len = own_len;
+    src->set_data_off(SNBUF_HEADROOM);
+    bess::Packet::Free(src);
+  }
+
+  munmap(mem, region);
 }
 
 // Only the first segment's data is copied, so a packet in several segments is

@@ -72,9 +72,14 @@ Packet *Packet::copy(const Packet *src) {
     dst->set_data_off(dst->data_off() - (len - dst->tailroom()));
   }
 
-  // A sloppy copy writes up to 31 bytes past len (utils/copy.h), which a grown
-  // copy, ending at the end of the buffer, does not have.
-  bess::utils::CopyInlined(dst->append(len), src->head_data(), len, !grown);
+  // A sloppy copy reads and writes whole blocks, up to 31 bytes past len
+  // (utils/copy.h). A copy that did not grow starts where a fresh buffer's data
+  // area does, which its rounded length cannot overrun; a grown one ends at the
+  // end of the buffer. The source's data ends wherever it ends: a full-size
+  // frame's ends at the end of its buffer, however much was trimmed from or
+  // prepended to its head. So copy sloppily only when both have the room.
+  const bool sloppy = !grown && src->tailroom() >= 31;
+  bess::utils::CopyInlined(dst->append(len), src->head_data(), len, sloppy);
 
   return dst;
 }
